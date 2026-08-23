@@ -124,7 +124,8 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     for boundary in (
         "use the local serverpilot mcp",
         "gpu_status",
-        "include_busy=true",
+        "lease_id",
+        "leased_gpus",
         "gpu_apply",
         "gpu_count",
         "no_capacity",
@@ -151,9 +152,13 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # The global rule loads in every project, so it stays bounded.  The
     # ceiling moved from 180 to 200 words when per-GPU idle reclaim became
     # part of the claim contract: an agent that does not know an unused card
-    # is returned will keep over-claiming.  Contract sentences are never cut
-    # to fit this bound.
-    assert len(adapter.split()) < 200
+    # is returned will keep over-claiming.  It moved from 200 to 250 when
+    # telemetry moved onto the lease: an agent that is not told a free card
+    # carries no telemetry, and that the load it can observe there is
+    # ServerPilot's own hold, re-derives availability from that observation
+    # and reads free cards as taken.  Contract sentences are never cut to fit
+    # this bound.
+    assert len(adapter.split()) < 250
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -176,7 +181,8 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "gpu_cuda_visible_devices",
         "workspace_path",
         "gpu_release",
-        "include_busy=true",
+        "lease_id=",
+        "leased_gpus",
         "task",
         "不读取客户端 ui 标题",
         "无容量直接失败，不排队",
@@ -188,10 +194,13 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         assert runtime_contract in mcp_instructions
     # The routine instructions load once per session, so they stay bounded.  The
     # ceiling moved from 512 to 560 when connection and workspace became a
-    # per-server projection: the added structure sentence costs about ten tokens
-    # once, and saves far more on every gpu_status response.  Prohibition
-    # wording is never shortened to fit this bound.
-    assert len(mcp.instructions) < 560
+    # per-server projection, and from 560 to 730 when telemetry moved onto the
+    # lease: the caller has to be told both that a free card carries no
+    # telemetry and how to read its own, or it re-derives the answer from an
+    # observation that is ServerPilot's own hold.  Every gpu_status response
+    # gets smaller in exchange.  Prohibition wording is never shortened to fit
+    # this bound.
+    assert len(mcp.instructions) < 730
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -207,7 +216,7 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
 
 def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contract() -> None:
     required = (
-        "gpu_status(include_busy=false, server_id?)",
+        "gpu_status(server_id?, lease_id?)",
         "gpu_apply(server_id?, gpu_count=1, task?)",
         "gpu_release(lease_id)",
     )

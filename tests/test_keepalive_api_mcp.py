@@ -1569,8 +1569,12 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert enabled.status_code == 200, enabled.text
     status_on = mcp_server.gpu_status()
     assert len(status_on["gpus"]) == len(GPU_UUIDS)
-    assert {gpu["status"] for gpu in status_on["gpus"]} == {"可用 · 空闲占卡"}
-    assert {tuple(gpu["keepalive"].values()) for gpu in status_on["gpus"]} == {("ON", "ON")}
+    # Keepalive is how ServerPilot holds an idle card for itself.  A routine
+    # caller can act only on whether the card can be claimed, so the mechanism
+    # never reaches it: one status, no keepalive field, no telemetry carrying
+    # the hold.
+    assert {gpu["status"] for gpu in status_on["gpus"]} == {"可用"}
+    assert all("keepalive" not in gpu and "telemetry" not in gpu for gpu in status_on["gpus"])
 
     # Simulate the exact production failure: the workload has already been
     # released and the helper restarted its own workers, so their PIDs no
@@ -1594,10 +1598,8 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     unavailable = mcp_server.gpu_status()
     assert unavailable["gpus"] == []
     assert unavailable["no_capacity"]["reason"] == "all_gpus_busy_or_unavailable"
-    error_status = mcp_server.gpu_status(include_busy=True)
-    assert {gpu["available"] for gpu in error_status["gpus"]} == {False}
-    assert {tuple(gpu["keepalive"].values()) for gpu in error_status["gpus"]} == {("ON", "ERROR")}
-    assert {gpu["status"] for gpu in error_status["gpus"]} == {"占卡校验失败，暂不可申请"}
+    assert {gpu["status"] for gpu in unavailable["busy_gpus"]} == {"占卡校验失败，暂不可申请"}
+    assert len(unavailable["busy_gpus"]) == len(GPU_UUIDS)
 
     async def recover_restarted_workers() -> None:
         await app.state.reconcile_endpoint_keepalive(
@@ -1611,7 +1613,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert adapter.attest_calls[-1] == ("endpoint-a", GPU_UUIDS)
     recovered_status = mcp_server.gpu_status()
     assert len(recovered_status["gpus"]) == len(GPU_UUIDS)
-    assert {gpu["status"] for gpu in recovered_status["gpus"]} == {"可用 · 空闲占卡"}
+    assert {gpu["status"] for gpu in recovered_status["gpus"]} == {"可用"}
 
     allocation_on = mcp_server.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡开启申请验收"
@@ -1648,8 +1650,10 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert disabled.status_code == 200, disabled.text
     status_off = mcp_server.gpu_status()
     assert len(status_off["gpus"]) == len(GPU_UUIDS)
-    assert {gpu["status"] for gpu in status_off["gpus"]} == {"可用 · 未开启占卡"}
-    assert {tuple(gpu["keepalive"].values()) for gpu in status_off["gpus"]} == {("OFF", "OFF")}
+    # Turning the policy off changes nothing a routine caller can see: the card
+    # was claimable before and is claimable now.
+    assert {gpu["status"] for gpu in status_off["gpus"]} == {"可用"}
+    assert all("keepalive" not in gpu for gpu in status_off["gpus"])
 
     allocation_off = mcp_server.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡关闭申请验收"
@@ -1950,7 +1954,8 @@ def test_keepalive_capability_and_mcp_schema_and_delegation(monkeypatch) -> None
     ]
     instructions = mcp_server.MCP_INSTRUCTIONS.lower()
     assert "常规 gpu 任务" in instructions
-    assert "空闲占卡" in instructions
+    assert "serverpilot 占卡" in instructions
+    assert "分配前会停" in instructions
     assert "code_location=not_provided" in instructions
     assert "不得把 workspace_path 当代码仓库路径" in instructions
     assert "以它为工作目录" in instructions

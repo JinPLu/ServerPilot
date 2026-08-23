@@ -369,6 +369,28 @@ def test_routine_apply_rejects_invalid_daily_inputs_before_contacting_broker(
         mcp_server.gpu_apply(server_id=server_id, gpu_count=gpu_count, task="训练")
 
 
+@pytest.mark.parametrize(
+    ("server_id", "lease_id", "message"),
+    [
+        ("   ", None, "提供 server_id 时不能为空"),
+        (None, "   ", "提供 lease_id 时不能为空"),
+    ],
+)
+def test_routine_status_rejects_blank_narrowing_before_contacting_broker(
+    server_id: str | None,
+    lease_id: str | None,
+    message: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_client() -> object:
+        raise AssertionError("blank narrowing must not contact the broker")
+
+    monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
+
+    with pytest.raises(ValueError, match=message):
+        mcp_server.gpu_status(server_id=server_id, lease_id=lease_id)
+
+
 @pytest.mark.parametrize("lease_id", ["", "   "])
 def test_routine_release_rejects_blank_lease_before_contacting_broker(
     lease_id: str, monkeypatch: pytest.MonkeyPatch
@@ -398,40 +420,40 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
                         "publicly_available": False,
                         "public_status": "任务占用",
                         "keepalive": {"state": "OFF", "reason": None},
-                        "lease": {"task_ref": "训练任务"},
+                        "lease": {"id": "lease-other", "task_ref": "训练任务"},
+                        "telemetry": {"memory_used_mib": 70_000, "gpu_utilization_pct": 90},
                     }
                 ],
             }
         },
-        include_busy=True,
+        lease_id=None,
     )
 
-    assert status["gpus"][0]["task"] == "训练任务"
+    assert status["gpus"] == []
     assert status["servers"][0]["workspace"] == {
         "path": "/srv/server-a",
         "kind": "working_directory",
         "use_as_cwd": True,
         "code_location": "not_provided",
     }
-    assert set(status["gpus"][0]) == {
-        "server_id",
-        "gpu_id",
-        "index",
-        "name",
-        "vram_mib",
-        "status",
-        "telemetry",
-        "available",
-        "task",
-        "keepalive",
-    }
+    # Who holds a busy card is actionable; how hard their job works it is not,
+    # so somebody else's telemetry never reaches this response.
+    assert status["busy_gpus"] == [
+        {
+            "server_id": "server-a",
+            "gpu_id": "GPU-a",
+            "index": 0,
+            "status": "任务占用",
+            "task": "训练任务",
+        }
+    ]
     assert set(status["servers"][0]) == {"server_id", "workspace_path", "workspace"}
 
 
 def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:
     status = mcp_server._routine_gpu_status(
         {"data": {"summary": {"total_gpus": 0}, "gpus": []}},
-        include_busy=False,
+        lease_id=None,
     )
 
     assert status == {"servers": [], "gpus": [], "message": "无 GPU"}
@@ -461,7 +483,7 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
                 "gpus": [],
             }
         },
-        include_busy=False,
+        lease_id=None,
     )
 
     assert status == {
@@ -483,7 +505,7 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
 def test_routine_status_explains_when_all_gpus_are_unavailable() -> None:
     status = mcp_server._routine_gpu_status(
         {"data": {"summary": {"total_gpus": 4, "available_gpus": 0}, "gpus": []}},
-        include_busy=False,
+        lease_id=None,
     )
 
     assert status == {
@@ -491,10 +513,7 @@ def test_routine_status_explains_when_all_gpus_are_unavailable() -> None:
         "gpus": [],
         "no_capacity": {
             "reason": "all_gpus_busy_or_unavailable",
-            "message": (
-                "当前没有可申请 GPU；busy_gpus 已列出占用任务，"
-                "需要忙卡遥测时再调用 gpu_status(include_busy=true)。"
-            ),
+            "message": "当前没有可申请 GPU；busy_gpus 已列出占用它们的任务。",
             "total_gpus": 4,
         },
     }

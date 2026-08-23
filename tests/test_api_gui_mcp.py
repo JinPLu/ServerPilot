@@ -1319,12 +1319,12 @@ def test_mcp_exposes_required_tools() -> None:
     assert by_name["gpu_release"].inputSchema["required"] == ["lease_id"]
     assert set(by_name["gpu_release"].inputSchema["properties"]) == {"lease_id"}
     status_schema = by_name["gpu_status"].inputSchema
-    assert set(status_schema["properties"]) == {"include_busy", "server_id"}
-    assert status_schema["properties"]["include_busy"]["default"] is False
+    assert set(status_schema["properties"]) == {"server_id", "lease_id"}
+    assert status_schema["properties"]["lease_id"]["default"] is None
     assert "required" not in status_schema
     assert by_name["gpu_status"].description == (
-        "列出可申请 GPU、紧凑 busy_gpus、纯 CPU 服务器和近 10 分钟遥测；"
-        "include_busy=true 时忙卡带完整遥测。"
+        "列出可申请 GPU、占用中的 busy_gpus 和纯 CPU 服务器；"
+        "给出 lease_id 时附带该租约的逐卡遥测。"
     )
     for name in (
         "gpu_add_server",
@@ -1347,8 +1347,8 @@ def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
     assert not any(name.startswith("gpu_scheduler_") for name in names)
     assert names == {"gpu_status", "gpu_apply", "gpu_release"}
     assert by_name["gpu_status"].description == (
-        "列出可申请 GPU、紧凑 busy_gpus、纯 CPU 服务器和近 10 分钟遥测；"
-        "include_busy=true 时忙卡带完整遥测。"
+        "列出可申请 GPU、占用中的 busy_gpus 和纯 CPU 服务器；"
+        "给出 lease_id 时附带该租约的逐卡遥测。"
     )
 
 
@@ -1665,7 +1665,7 @@ def test_routine_projects_registered_ssh_connection_without_a_shell_command() ->
                 ],
             }
         },
-        include_busy=False,
+        lease_id=None,
     )
     # Connection and workspace belong to the server, not to each GPU.
     assert status["servers"] == [
@@ -1714,7 +1714,7 @@ def test_mcp_default_task_is_harness_neutral() -> None:
     assert mcp_server._routine_task(None) == "未命名任务"
 
 
-def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
+def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
     class FakeClient:
@@ -1733,9 +1733,9 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                 "data": {
                     "summary": {
                         "total_gpus": 2,
-                        "available_gpus": 2,
+                        "available_gpus": 1,
                         "claimed_gpus": 1,
-                        "workload_claimed_gpus": 0,
+                        "workload_claimed_gpus": 1,
                         "keepalive_owned_gpus": 1,
                         "verified_keepalive_gpus": 1,
                     },
@@ -1749,16 +1749,6 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                             "private_detail": "must not cross MCP boundary",
                         }
                     ],
-                    "host_capacity": [
-                        {
-                            "endpoint": {"id": "server-a"},
-                            "capacity": {
-                                "available_cpu_cores": 12.0,
-                                "available_memory_mib": 32768,
-                                "total_memory_mib": 65536,
-                            },
-                        }
-                    ],
                     "gpus": [
                         {
                             "id": "gpu-a",
@@ -1766,29 +1756,21 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                             "gpu_uuid": "GPU-a",
                             "gpu_index": 0,
                             "name": "A",
-                            "total_vram_mib": 80000,
-                            "state": "AVAILABLE",
-                            "state_reason": None,
-                            "process_count": 0,
-                            "owner": None,
-                            "task_ref": None,
-                            "expires_at": None,
+                            "total_vram_mib": 80_000,
+                            "state": "KEEPALIVE",
                             "lease": None,
                             "publicly_available": True,
-                            "public_status": "可用 · 未开启占卡",
-                            "keepalive": {
-                                "state": "OFF",
-                                "reason": None,
-                                "lease_id": None,
-                            },
+                            "public_status": "可用 · 空闲占卡",
+                            "keepalive": {"state": "ON", "reason": None, "lease_id": "ka-1"},
+                            # ServerPilot's own hold: 80% of the card, released
+                            # before allocation.  It must not reach the caller.
                             "telemetry": {
                                 "observed_at": "2026-08-12T00:00:00Z",
-                                "memory_used_mib": 0,
-                                "memory_free_mib": 80_000,
-                                "gpu_utilization_pct": 3,
-                                "memory_utilization_pct": 1,
-                                "temperature_c": 42,
-                                "private": "drop",
+                                "memory_used_mib": 64_000,
+                                "memory_free_mib": 16_000,
+                                "gpu_utilization_pct": 66,
+                                "memory_utilization_pct": 11,
+                                "temperature_c": 58,
                             },
                             "processes": ["drop"],
                         },
@@ -1798,10 +1780,9 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                             "gpu_uuid": "GPU-b",
                             "gpu_index": 1,
                             "name": "A",
-                            "total_vram_mib": 80000,
-                            "state": "HELD",
-                            "state_reason": "workload lease is held",
-                            "lease": {"task_ref": "训练"},
+                            "total_vram_mib": 80_000,
+                            "state": "RUNNING_MANAGED",
+                            "lease": {"id": "lease-mine", "task_ref": "训练"},
                             "publicly_available": False,
                             "public_status": "任务占用",
                             "keepalive": {"state": "OFF", "reason": None, "lease_id": None},
@@ -1813,6 +1794,18 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                                 "memory_utilization_pct": 27,
                                 "temperature_c": 75,
                                 "private": "drop",
+                                "recent_average": {
+                                    "window_seconds": 600,
+                                    "sample_count": 10,
+                                    "first_observed_at": "2026-08-11T23:50:00Z",
+                                    "last_observed_at": "2026-08-12T00:00:00Z",
+                                    "memory_used_mib": 24_000,
+                                    "memory_free_mib": 56_000,
+                                    "memory_used_pct": 30.0,
+                                    "gpu_utilization_pct": 91.0,
+                                    "memory_utilization_pct": 26.0,
+                                    "temperature_c": 74.0,
+                                },
                             },
                             "processes": ["drop"],
                         },
@@ -1827,20 +1820,22 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
         "_routine_client",
         lambda: FakeClient(),
     )
-    workspace = {
-        "path": "/srv/serverpilot-workspace",
-        "kind": "working_directory",
-        "use_as_cwd": True,
-        "code_location": "not_provided",
-    }
-
     server_projection = {
         "server_id": "server-a",
         "workspace_path": "/srv/serverpilot-workspace",
-        "workspace": workspace,
+        "workspace": {
+            "path": "/srv/serverpilot-workspace",
+            "kind": "working_directory",
+            "use_as_cwd": True,
+            "code_location": "not_provided",
+        },
     }
 
     status = mcp_server.gpu_status()
+    # An allocatable card answers one question — can it be claimed — so it is
+    # published as capacity.  The load observed on it is ServerPilot's own
+    # keepalive hold, and publishing that would turn a free card into a card
+    # that reads as full.
     assert status == {
         "servers": [server_projection],
         "gpus": [
@@ -1849,23 +1844,10 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                 "gpu_id": "GPU-a",
                 "index": 0,
                 "name": "A",
-                "vram_mib": 80000,
-                "status": "可用 · 未开启占卡",
-                "telemetry": {
-                    "observed_at": "2026-08-12T00:00:00Z",
-                    "memory_used_mib": 0,
-                    "memory_free_mib": 80000,
-                    "memory_used_pct": 0.0,
-                    "gpu_utilization_pct": 3,
-                    "memory_utilization_pct": 1,
-                    "temperature_c": 42,
-                    "recent_average": None,
-                },
-                "keepalive": {"desired": "OFF", "actual": "OFF"},
+                "vram_mib": 80_000,
+                "status": "可用",
             }
         ],
-        # The default response names the busy card's task, so deciding where to
-        # place work never needs a second include_busy call.
         "busy_gpus": [
             {
                 "server_id": "server-a",
@@ -1875,88 +1857,65 @@ def test_mcp_status_defaults_to_available_and_adds_busy_task_only_on_request(
                 "task": "训练",
             }
         ],
-        "telemetry_summary": {
-            "visible_gpu_count": 1,
-            "vram_total_mib": 80000,
-            "average_vram_mib": 80000.0,
-            "telemetry_gpu_count": 1,
-            "memory_used_mib": 0,
-            "memory_used_gpu_count": 1,
-            "memory_free_mib": 80000,
-            "memory_free_gpu_count": 1,
-            "memory_used_pct": 0.0,
-            "current_average_gpu_utilization_pct": 3.0,
-            "gpu_utilization_gpu_count": 1,
-            "current_average_memory_utilization_pct": 1.0,
-            "memory_utilization_gpu_count": 1,
-        },
     }
+    assert "64000" not in json.dumps(status)
 
-    # include_busy keeps its old meaning: busy cards join gpus[] with full
-    # telemetry, and the compact busy_gpus summary is then redundant.
-    busy = mcp_server.gpu_status(include_busy=True)
-    assert "busy_gpus" not in busy
-    assert busy == {
-        "servers": [server_projection],
-        "gpus": [
-            {
-                "server_id": "server-a",
-                "gpu_id": "GPU-a",
-                "index": 0,
-                "name": "A",
-                "vram_mib": 80000,
-                "status": "可用 · 未开启占卡",
-                "telemetry": {
-                    "observed_at": "2026-08-12T00:00:00Z",
-                    "memory_used_mib": 0,
-                    "memory_free_mib": 80000,
-                    "memory_used_pct": 0.0,
-                    "gpu_utilization_pct": 3,
-                    "memory_utilization_pct": 1,
-                    "temperature_c": 42,
-                    "recent_average": None,
-                },
-                "keepalive": {"desired": "OFF", "actual": "OFF"},
-                "available": True,
-            },
-            {
-                "server_id": "server-a",
-                "gpu_id": "GPU-b",
-                "index": 1,
-                "name": "A",
-                "vram_mib": 80000,
-                "status": "任务占用",
-                "telemetry": {
-                    "observed_at": "2026-08-12T00:00:00Z",
-                    "memory_used_mib": 25000,
-                    "memory_free_mib": 55000,
-                    "memory_used_pct": 31.25,
-                    "gpu_utilization_pct": 93,
-                    "memory_utilization_pct": 27,
-                    "temperature_c": 75,
-                    "recent_average": None,
-                },
-                "keepalive": {"desired": "OFF", "actual": "OFF"},
-                "available": False,
-                "task": "训练",
-            },
-        ],
-        "telemetry_summary": {
-            "visible_gpu_count": 2,
-            "vram_total_mib": 160000,
-            "average_vram_mib": 80000.0,
-            "telemetry_gpu_count": 2,
-            "memory_used_mib": 25000,
-            "memory_used_gpu_count": 2,
-            "memory_free_mib": 135000,
-            "memory_free_gpu_count": 2,
-            "memory_used_pct": 15.62,
-            "current_average_gpu_utilization_pct": 48.0,
-            "gpu_utilization_gpu_count": 2,
-            "current_average_memory_utilization_pct": 14.0,
-            "memory_utilization_gpu_count": 2,
+    # The caller's own lease is the one place occupancy provably belongs to the
+    # reader, so it is the one place telemetry is published.
+    mine = mcp_server.gpu_status(lease_id="lease-mine")
+    assert "busy_gpus" not in mine
+    assert mine["lease"] == {
+        "lease_id": "lease-mine",
+        "gpu_count": 1,
+        "task": "训练",
+        "telemetry_window": {
+            "window_seconds": 600,
+            "sample_count": 10,
+            "first_observed_at": "2026-08-11T23:50:00Z",
+            "last_observed_at": "2026-08-12T00:00:00Z",
+        },
+        "telemetry_gpu_count": 1,
+        "recent_average": {
+            "gpu_utilization_pct": 91.0,
+            "memory_used_pct": 30.0,
+            "memory_utilization_pct": 26.0,
+            "min_memory_free_mib": 56_000,
         },
     }
+    assert mine["leased_gpus"] == [
+        {
+            "server_id": "server-a",
+            "gpu_id": "GPU-b",
+            "index": 1,
+            "name": "A",
+            "vram_mib": 80_000,
+            "recent_average": {
+                "memory_used_mib": 24_000,
+                "memory_free_mib": 56_000,
+                "memory_used_pct": 30.0,
+                "gpu_utilization_pct": 91.0,
+                "memory_utilization_pct": 26.0,
+                "temperature_c": 74.0,
+            },
+            "current": {
+                "observed_at": "2026-08-12T00:00:00Z",
+                "memory_used_mib": 25_000,
+                "memory_free_mib": 55_000,
+                "memory_used_pct": 31.25,
+                "gpu_utilization_pct": 93,
+                "memory_utilization_pct": 27,
+                "temperature_c": 75,
+            },
+        }
+    ]
+    # A free card stays capacity-only even when the caller names a lease.
+    assert mine["gpus"] == status["gpus"]
+
+    unknown = mcp_server.gpu_status(lease_id="lease-gone")
+    assert "leased_gpus" not in unknown
+    assert unknown["no_leased_gpus"]["reason"] == "lease_holds_no_visible_gpu"
+    # Somebody else's lease is still only named, never measured.
+    assert unknown["busy_gpus"] == status["busy_gpus"]
 
 
 def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
@@ -1971,8 +1930,9 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
                         "gpu_index": 0,
                         "name": "A800",
                         "total_vram_mib": 80_000,
-                        "publicly_available": True,
-                        "public_status": "可用 · 未开启占卡",
+                        "publicly_available": False,
+                        "public_status": "任务占用",
+                        "lease": {"id": "lease-mine", "task_ref": "训练"},
                         "telemetry": {
                             "memory_used_mib": 4_000,
                             "recent_average": {
@@ -1993,12 +1953,12 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
                 ],
             }
         },
-        include_busy=False,
+        lease_id="lease-mine",
     )
 
     # Measurements stay per GPU; the window descriptor they all share is
-    # published once on the server.
-    assert status["gpus"][0]["telemetry"]["recent_average"] == {
+    # published once on the lease that owns them.
+    assert status["leased_gpus"][0]["recent_average"] == {
         "memory_used_mib": 12_000.5,
         "memory_free_mib": 67_999.5,
         "memory_used_pct": 15.0,
@@ -2006,13 +1966,69 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
         "memory_utilization_pct": 21.0,
         "temperature_c": 54.67,
     }
-    assert status["servers"][0]["telemetry_window"] == {
+    assert status["lease"]["telemetry_window"] == {
         "window_seconds": 3_600,
         "sample_count": 3,
         "first_observed_at": "2026-08-15T00:00:00Z",
         "last_observed_at": "2026-08-15T00:02:00Z",
     }
-    assert "window_override" not in status["gpus"][0]["telemetry"]
+    assert "window_override" not in status["leased_gpus"][0]
+    # A single-GPU lease has no laggard to name.
+    assert "slowest_gpu" not in status["lease"]
+
+
+def test_routine_status_names_the_gpu_holding_a_multi_gpu_lease_back() -> None:
+    """Averaging the spread away would hide the case worth acting on."""
+
+    def gpu(uuid: str, index: int, utilization: float, memory_free_mib: int) -> dict[str, object]:
+        return {
+            "endpoint_id": "server-a",
+            "gpu_uuid": uuid,
+            "gpu_index": index,
+            "name": "A800",
+            "total_vram_mib": 80_000,
+            "publicly_available": False,
+            "public_status": "任务占用",
+            "lease": {"id": "lease-mine", "task_ref": "训练"},
+            "telemetry": {
+                "observed_at": "2026-08-15T00:02:00Z",
+                "recent_average": {
+                    "window_seconds": 600,
+                    "sample_count": 10,
+                    "first_observed_at": "2026-08-15T00:00:00Z",
+                    "last_observed_at": "2026-08-15T00:02:00Z",
+                    "gpu_utilization_pct": utilization,
+                    "memory_free_mib": memory_free_mib,
+                },
+            },
+        }
+
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "endpoints": [{"id": "server-a", "workspace_path": "/srv/server-a"}],
+                "gpus": [
+                    gpu("GPU-a", 0, 92.0, 40_000),
+                    gpu("GPU-b", 1, 31.0, 12_000),
+                    gpu("GPU-c", 2, 90.0, 38_000),
+                ],
+            }
+        },
+        lease_id="lease-mine",
+    )
+
+    lease = status["lease"]
+    assert lease["gpu_count"] == 3
+    assert lease["telemetry_gpu_count"] == 3
+    assert lease["gpu_utilization_spread_pct"] == 61.0
+    assert lease["slowest_gpu"] == {
+        "gpu_id": "GPU-b",
+        "index": 1,
+        "gpu_utilization_pct": 31.0,
+    }
+    # The free memory that bounds a larger batch is the smallest one, not the
+    # average across the lease.
+    assert lease["recent_average"]["min_memory_free_mib"] == 12_000
 
 
 def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() -> None:
@@ -2025,8 +2041,9 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
             "gpu_index": index,
             "name": "A800",
             "total_vram_mib": 80_000,
-            "publicly_available": True,
-            "public_status": "可用 · 未开启占卡",
+            "publicly_available": False,
+            "public_status": "任务占用",
+            "lease": {"id": "lease-mine", "task_ref": "训练"},
             "telemetry": {
                 "observed_at": "2026-08-15T00:02:00Z",
                 "recent_average": {
@@ -2046,12 +2063,12 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
                 "gpus": [gpu("GPU-a", 0, 10), gpu("GPU-b", 1, 4)],
             }
         },
-        include_busy=False,
+        lease_id="lease-mine",
     )
 
-    assert "telemetry_window" not in status["servers"][0]
-    assert status["gpus"][0]["telemetry"]["window_override"]["sample_count"] == 10
-    assert status["gpus"][1]["telemetry"]["window_override"]["sample_count"] == 4
+    assert "telemetry_window" not in status["lease"]
+    assert status["leased_gpus"][0]["window_override"]["sample_count"] == 10
+    assert status["leased_gpus"][1]["window_override"]["sample_count"] == 4
 
 
 def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
@@ -2124,13 +2141,18 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
         "GPU-endpoint-a-1",
     }
     assert all("available" not in item for item in status["gpus"])
-    assert {item["status"] for item in status["gpus"]} == {
+    # One card is held by a running keepalive helper and the other is not, but
+    # that is ServerPilot's own bookkeeping.  A routine caller can act only on
+    # whether the card can be claimed, and both can, so the mechanism stays
+    # inside: no keepalive field, no telemetry carrying its hold.
+    assert {item["status"] for item in status["gpus"]} == {"可用"}
+    for item in status["gpus"]:
+        assert set(item) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
+    # The GUI still sees the distinction on its own path.
+    detail = rest.get("/api/v1/snapshot", headers=headers).json()
+    assert {gpu["public_status"] for gpu in detail["data"]["gpus"]} == {
         "可用 · 空闲占卡",
         "可用 · 占卡未运行",
-    }
-    assert {tuple(item["keepalive"].values()) for item in status["gpus"]} == {
-        ("ON", "ON"),
-        ("ON", "OFF"),
     }
 
 
@@ -2616,29 +2638,30 @@ def test_routine_projections_do_not_repeat_server_facts_per_gpu() -> None:
 
     A measured 8-GPU status response spent about a quarter of its bytes on
     endpoint fields copied onto every GPU row, and a 4-GPU lease spent about
-    half.  Both are now published once per server, so this gate fails if per-GPU
-    duplication is reintroduced or the payload creeps back up.
+    half.  Both are published once per server.  Dropping telemetry from cards
+    nobody holds took the same response from 5,957 to 1,749 bytes, because the
+    only thing it described was ServerPilot's own hold.  This gate fails if
+    either regression returns.
     """
 
-    status = mcp_server._routine_gpu_status(_routine_status_fixture(8), include_busy=False)
+    status = mcp_server._routine_gpu_status(_routine_status_fixture(8), lease_id=None)
 
     assert len(status["servers"]) == 1
     assert len(status["gpus"]) == 8
     for row in status["gpus"]:
         for server_fact in ("ssh", "workspace", "workspace_path"):
             assert server_fact not in row
-        # The shared window is published once on the server.
-        assert set(row["telemetry"]["recent_average"]) == {
-            "memory_used_mib",
-            "memory_free_mib",
-            "memory_used_pct",
-            "gpu_utilization_pct",
-            "memory_utilization_pct",
-            "temperature_c",
-        }
-    assert status["servers"][0]["telemetry_window"]["sample_count"] == 10
-    status_size = len(json.dumps(status, ensure_ascii=False))
-    assert status_size < 6_000, status_size
+        assert set(row) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
+        assert row["status"] == "可用"
+    assert "telemetry_window" not in status["servers"][0]
+    # The fixture's cards each read as 78,411 MiB used at 68% — every byte of
+    # it ServerPilot's own keepalive hold, released before allocation.  None of
+    # it may reach a caller deciding whether to claim them.
+    rendered = json.dumps(status, ensure_ascii=False)
+    for held in ("78411", "18840", "80.1", "62.7", "keepalive"):
+        assert held not in rendered
+    status_size = len(rendered)
+    assert status_size < 2_000, status_size
 
     allocation = mcp_server._routine_gpu_allocation(
         {

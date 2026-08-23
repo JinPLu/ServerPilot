@@ -6,6 +6,14 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+## 1.8.0 - 2026-08-24
+
+**ServerPilot 1.8.0 publishes telemetry only where the occupancy belongs to the caller: a free card reports capacity, and your own lease reports per-GPU utilisation and the card lagging behind.**
+
+- `gpu_status` now answers three questions in three groups: an allocatable card reports capacity only (model, VRAM, available), a busy card reports who holds it, and telemetry appears only on cards the caller holds. Free cards used to carry telemetry too — and every bit of load observable on a free card comes from ServerPilot's own keepalive hold (80% of VRAM, released only when the card is actually allocated), so a machine with eight free cards read as eight-tenths full and an agent that checked availability against it concluded there was nothing to claim.
+- New `gpu_status(lease_id=…)` returns your own lease: per-GPU rolling ten-minute averages and the latest sample, plus a lease summary — average utilisation, the smallest free VRAM across the lease, and on multi-GPU leases the utilisation spread and the card lagging behind. These are the numbers behind "is my job using these cards well, can I raise the batch size, is one card holding the rest back"; a card you held previously fell into the compact `busy_gpus` list with nothing but its task name.
+- `gpu_status` no longer takes `include_busy`: busy cards always come back in `busy_gpus` with their task, and your own cards come from `lease_id`. Allocatable cards report one status, "available", instead of exposing keepalive's internal variants. A `gpu_status` response for an eight-GPU machine went from 5,957 to 1,749 bytes.
+
 ## 1.7.0 - 2026-08-23
 
 **ServerPilot 1.7.0 turns the servers page back into a table you can compare down a column, with a pressure bar on all four metrics, and makes idle reclaim per GPU.**

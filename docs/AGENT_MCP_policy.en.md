@@ -2,7 +2,7 @@
 
 Use the local `serverpilot` MCP.
 
-1. `gpu_status(include_busy=false, server_id?)` returns allocatable GPUs plus compact `busy_gpus` naming each busy card's human-readable task. `include_busy=true` adds busy-card telemetry; `server_id` narrows scope.
+1. `gpu_status(server_id?, lease_id?)` returns allocatable GPUs as capacity only — `name`, `vram_mib`, `status`, no telemetry — plus compact `busy_gpus` naming each busy card's human-readable task; `server_id` narrows scope. Telemetry is readable only on cards you hold: `gpu_status(lease_id=…)` adds `leased_gpus` with `recent_average` and a lease summary (`min_memory_free_mib`, `slowest_gpu`) for tuning batch size and parallelism. Load on an unclaimed card is ServerPilot's own hold, stopped before allocation, never evidence the card is taken.
 2. `gpu_apply(server_id?, gpu_count=1, task?)` allocates GPUs; never use a UI title or GPU ID.
 3. `gpu_release(lease_id)` releases one allocation, echoing its settled `state`.
 
