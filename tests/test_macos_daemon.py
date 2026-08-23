@@ -696,13 +696,75 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     assert "NSCursor.pop()" in split_source
     assert 'accessibilityLabel("调整列表与详情宽度")' in split_source
 
-    endpoint_table_body = dashboard_source.split(
+    # The endpoint list is a table, because the page's job is comparing four
+    # pressures across machines and only a column lets the eye do that.  Narrow
+    # widths fold columns from the right instead of dropping to a compact row
+    # variant, and the SSH lane keeps a floor no tier may cross.
+    table_layout = dashboard_source.split(
+        "private enum EndpointTableLayout", maxsplit=1
+    )[1].split("private struct EndpointTableDivider", maxsplit=1)[0]
+    assert "static let sshLane: CGFloat = 304" in table_layout
+    assert "static func tier(width: CGFloat) -> Tier" in table_layout
+    for tier in ("case wide", "case medium", "case compact"):
+        assert tier in table_layout, tier
+    # Folding is allowed only for the two columns whose facts are also in the
+    # tooltip and the detail sheet; the pressure columns are never optional.
+    assert "var showsGPUModel: Bool" in table_layout
+    assert "var showsAssignment: Bool" in table_layout
+    assert "showsPressure" not in table_layout
+    assert "pressureWidth * 4" in table_layout
+
+    assert "EndpointTableLayout.tier(width:" in dashboard_source
+    assert "LazyVStack(spacing: 0)" in dashboard_source
+
+    # Every metric the header sorts by is drawn the same way in the row: a
+    # percentage and a bar.  A number without a bar cannot be compared down a
+    # column, and four metrics drawn two ways read as two classes of fact.
+    header_body = dashboard_source.split(
+        "private struct EndpointTableHeader", maxsplit=1
+    )[1].split("private struct TablePressureCell", maxsplit=1)[0]
+    for key in (
+        ".id",
+        ".assignment",
+        ".gpuModel",
+        ".availableGPU",
+        ".gpuUtilization",
+        ".gpuMemory",
+        ".cpuLoad",
+        ".memory",
+    ):
+        assert f"header({key}," in header_body, key
+    # Sortable headers used to be unnamed to assistive technology.
+    assert 'accessibilityLabel("按\\(key.label)排序")' in header_body
+
+    row_body = dashboard_source.split(
         "private struct EndpointTableRow", maxsplit=1
-    )[1].split("private struct EndpointPressureCell", maxsplit=1)[0]
-    assert "ViewThatFits(in: .horizontal)" in endpoint_table_body
-    assert "compactRow" in endpoint_table_body
-    assert "LazyVGrid(" in endpoint_table_body
-    assert 'header("项目 · 任务", icon: "folder", column: .assignment, alignment: .leading)' in dashboard_source
+    )[1].split("private struct PressureMeter", maxsplit=1)[0]
+    for label in (
+        'label: "GPU 利用率"',
+        'label: "显存占用率"',
+        'label: "CPU 负载"',
+        'label: "内存占用率"',
+    ):
+        assert label in row_body, label
+    assert row_body.count("TablePressureCell(") == 4
+    # The demotion that left CPU and memory as bare numbers must not come back.
+    assert "emphasised" not in dashboard_source
+
+    # Static hardware inventory, peak temperature, absolute VRAM and the remote
+    # workspace path are detail-sheet facts, not row facts.  They are asserted
+    # absent from the row and present in the sheet so the split cannot drift
+    # back by accident.
+    detail_body = dashboard_source.split(
+        "private struct ServerDetailSheet", maxsplit=1
+    )[1].split("private struct ServerGPUMemoryStatusGrid", maxsplit=1)[0]
+    for fact in ("CPU 核数", "内存总量", "最高温度", "显存合计", "远端工作区"):
+        assert fact in detail_body, fact
+        assert fact not in row_body, fact
+    # A 44 pt row prints no second line, so everything it drops stays reachable
+    # through the hover tooltip.
+    assert "private var tooltip: String" in row_body
+    assert ".help(tooltip)" in row_body
 
 
 def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry_claims() -> None:

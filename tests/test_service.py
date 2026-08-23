@@ -2448,11 +2448,21 @@ def _make_persistent(service, lease_id: str) -> None:  # type: ignore[no-untyped
     service._write(write)
 
 
-def _backdate_idle_since(service, lease_id: str, seconds: int) -> None:  # type: ignore[no-untyped-def]
+def _backdate_idle_since(service, lease_id: str, seconds: int, *, gpu_ids=None) -> None:  # type: ignore[no-untyped-def]
+    """Age the observed idle streak, which lives per leased GPU."""
+
     def write(session):  # type: ignore[no-untyped-def]
+        stamp = utcnow() - timedelta(seconds=seconds)
         lease = session.get(Lease, lease_id)
         assert lease is not None
-        lease.idle_since = utcnow() - timedelta(seconds=seconds)
+        lease.idle_since = stamp
+        for resource in session.scalars(
+            select(LeaseResource).where(
+                LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+            )
+        ).all():
+            if gpu_ids is None or resource.gpu_id in gpu_ids:
+                resource.idle_since = stamp
 
     service._write(write)
 
@@ -2593,3 +2603,82 @@ def test_idle_reclaim_leaves_a_lease_that_declared_its_own_duration(service, adm
 
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] != "EXPIRED_EMPTY"
+
+
+def test_idle_reclaim_returns_only_the_unused_gpus_of_a_working_claim(service, admin) -> None:
+    """A claim that keeps eight cards and uses one must return the rest.
+
+    Whole-lease granularity let a single running process protect every other
+    GPU in the same claim, which is the most common way capacity is hoarded.
+    """
+
+    service.ingest_observation(observation(count=2))
+    allocated = service.create_request(
+        admin, request_data("partly-used", count=2), idempotency_key="partly-used"
+    )
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    busy_gpu, idle_gpu = "GPU-endpoint-a-0", "GPU-endpoint-a-1"
+    busy_id, idle_id = f"endpoint-a:{busy_gpu}", f"endpoint-a:{idle_gpu}"
+
+    # One card runs real work; the other never does.
+    service.ingest_observation(observation(count=2, processes=[process_for_gpu(busy_gpu)]))
+    _backdate_idle_since(
+        service,
+        lease_id,
+        service.inventory.idle_lease_reclaim_seconds + 5,
+        gpu_ids={idle_id},
+    )
+    service.ingest_observation(observation(count=2, processes=[process_for_gpu(busy_gpu)]))
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] != "EXPIRED_EMPTY", "the working GPU must keep the claim alive"
+
+    def active_gpu_ids(session):  # type: ignore[no-untyped-def]
+        return {
+            resource.gpu_id
+            for resource in session.scalars(
+                select(LeaseResource).where(
+                    LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+                )
+            ).all()
+        }
+
+    remaining = service._read(active_gpu_ids)
+    assert remaining == {busy_id}, f"only the idle GPU should be returned, got {remaining}"
+
+    # The returned GPU is allocatable again while the claim keeps working.
+    reused = service.create_request(admin, request_data("reuse-idle"), idempotency_key="reuse")
+    assert reused["lease"] is not None
+
+
+def test_idle_reclaim_keeps_a_gpu_whose_process_appears_before_the_window(service, admin) -> None:
+    service.ingest_observation(observation(count=2))
+    allocated = service.create_request(
+        admin, request_data("late-start", count=2), idempotency_key="late-start"
+    )
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    late_gpu = "GPU-endpoint-a-1"
+    late_id = f"endpoint-a:{late_gpu}"
+
+    service.ingest_observation(observation(count=2))
+    _backdate_idle_since(
+        service, lease_id, service.inventory.idle_lease_alert_seconds + 5, gpu_ids={late_id}
+    )
+    # The workload finally starts on that card before the reclaim window.
+    service.ingest_observation(observation(count=2, processes=[process_for_gpu(late_gpu)]))
+
+    def idle_marks(session):  # type: ignore[no-untyped-def]
+        return {
+            resource.gpu_id: resource.idle_since
+            for resource in session.scalars(
+                select(LeaseResource).where(
+                    LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+                )
+            ).all()
+        }
+
+    marks = service._read(idle_marks)
+    assert late_id in marks, "the GPU that started working must stay in the claim"
+    assert marks[late_id] is None, "its idle streak must be cleared"

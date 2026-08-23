@@ -27,7 +27,7 @@ MCP_INSTRUCTIONS = """常规 GPU 任务三个工具：gpu_status；gpu_apply 自
 连接与工作目录在 servers[]，不逐卡重复：ssh=连接；workspace.path（workspace_path）=cwd，以它为工作目录；code_location=not_provided，不得把 workspace_path 当代码仓库路径；gpus[] 以 server_id 指回。
 cuda_device_order=PCI_BUS_ID；cuda_visible_devices=租约 ordinal，gpu_cuda_visible_devices=单卡 ordinal；勿用 UUID 选卡。
 gpu_status 默认给可申请卡（含空闲占卡）与紧凑 busy_gpus(task)；忙卡遥测用 include_busy=true，server_id 收窄一台。
-无容量直接失败，不排队。失败即 gpu_release 并确认 released。
+无容量直接失败，不排队。失败即 gpu_release 并确认 released。只申请会用的卡：空闲的卡会被单独收回。
 只协调 GPU；勿用 SSH、SQLite、inventory、nvidia-smi 绕过协调。非 GPU 远端操作（Git 同步）无需 GPU 租约。"""
 
 

@@ -27,6 +27,7 @@ run_capture() {
     SERVERPILOT_DESKTOP_VIEWPORT="${viewport}" \
     SERVERPILOT_DESKTOP_SCREENSHOT="${screenshot}" \
     SERVERPILOT_DESKTOP_EXIT_AFTER_SCREENSHOT=1 \
+    SERVERPILOT_DESKTOP_FORCE_INCREASE_CONTRAST="${SERVERPILOT_DESKTOP_FORCE_INCREASE_CONTRAST:-0}" \
     SERVERPILOT_CLI=/usr/bin/false \
     "${executable}" "$@" > "${command_log}" 2>&1
   [[ -s "${screenshot}" ]] || {
@@ -45,6 +46,11 @@ run_capture error-1024x640 error server-pool 1024x640
 run_capture forced-light-1280x800 resource-ownership server-pool 1280x800 -NSRequiresAquaSystemAppearance YES
 run_capture system-dark-request-1280x800 resource-ownership server-pool 1280x800 -AppleInterfaceStyle Dark
 run_capture high-contrast-1280x800 resource-ownership server-pool 1280x800 -AppleIncreaseContrast YES
+# Fixture-only override, because the launch argument above is inert.  This
+# exercises the token wiring; the real System Settings toggle is still the only
+# proof of the OS integration.
+SERVERPILOT_DESKTOP_FORCE_INCREASE_CONTRAST=1 \
+  run_capture high-contrast-forced-1280x800 resource-ownership server-pool 1280x800
 run_capture reduce-motion-1280x800 resource-ownership server-pool 1280x800 -AppleReduceMotion YES
 run_capture system-dark-high-contrast-request-1280x800 resource-ownership server-pool 1280x800 \
   -AppleInterfaceStyle Dark -AppleIncreaseContrast YES
@@ -116,6 +122,12 @@ PY
   xcrun --find xctest
 } > "${result_dir}/logs/xctest-toolchain.log" 2>&1 || true
 
+ax_dumper="${result_dir}/ax-dump"
+if ! xcrun swiftc -O "${script_dir}/tools/ax-dump.swift" -o "${ax_dumper}" 2> "${result_dir}/logs/ax-dump-build.log"; then
+  print -u2 "Could not build the accessibility dumper; see logs/ax-dump-build.log"
+  exit 4
+fi
+
 collect_ax() {
   local name=$1 fixture=$2 section=$3
   local app_log="${result_dir}/logs/ax-${name}.app.log"
@@ -147,54 +159,7 @@ collect_ax() {
   sleep 0.8
 
   local ax_status=0
-  /usr/bin/osascript - "${app_pid}" > "${result_dir}/ax/${name}.txt" 2> "${result_dir}/ax/${name}.err" <<'APPLESCRIPT' || ax_status=$?
-on run argv
-set targetPID to item 1 of argv as integer
-tell application "System Events"
-  tell (first process whose unix id is targetPID)
-    set frontmost to true
-    set elements to entire contents of window 1
-    set output to "element_count=" & (count of elements) & linefeed
-    repeat with itemRef in elements
-      try
-        set roleValue to (role of itemRef) as text
-      on error
-        set roleValue to "?"
-      end try
-      try
-        set identifierValue to (value of attribute "AXIdentifier" of itemRef) as text
-      on error
-        set identifierValue to "?"
-      end try
-      try
-        set titleValue to (value of attribute "AXTitle" of itemRef) as text
-      on error
-        set titleValue to "?"
-      end try
-      try
-        set helpValue to (value of attribute "AXHelp" of itemRef) as text
-      on error
-        set helpValue to "?"
-      end try
-      try
-        set valueValue to (value of attribute "AXValue" of itemRef) as text
-      on error
-        set valueValue to "?"
-      end try
-      try
-        set enabledValue to (value of attribute "AXEnabled" of itemRef) as text
-      on error
-        set enabledValue to "?"
-      end try
-      if titleValue is not "?" or helpValue is not "?" or valueValue is not "?" then
-        set output to output & roleValue & tab & identifierValue & tab & titleValue & tab & helpValue & tab & valueValue & tab & enabledValue & linefeed
-      end if
-    end repeat
-    return output
-  end tell
-end tell
-end run
-APPLESCRIPT
+  "${ax_dumper}" "${app_pid}" > "${result_dir}/ax/${name}.txt" 2> "${result_dir}/ax/${name}.err" || true
   kill "${app_pid}" 2>/dev/null || true
   wait "${app_pid}" 2>/dev/null || true
   return "${ax_status}"
@@ -206,12 +171,40 @@ collect_ax settings resource-ownership settings
 collect_ax empty 0 server-pool
 collect_ax error error server-pool
 
+# Full Keyboard Access is a global setting.  Passing -AppleKeyboardUIMode as a
+# launch argument only populates the app's own NSArgumentDomain; AppKit reads
+# the real NSGlobalDomain value, so the argument alone leaves Tab traversal off
+# and the check below then reports "not measured" rather than a verdict.
+#
+# Writing the global default is a change to the operator's Mac, so it happens
+# only when SERVERPILOT_AX_SET_KEYBOARD_MODE=1 is set explicitly.  The previous
+# value is captured first and restored on any exit path, including a signal.
+keyboard_mode_restored=0
+restore_keyboard_mode() {
+  [ "${keyboard_mode_restored}" = "1" ] && return 0
+  keyboard_mode_restored=1
+  case "${keyboard_mode_previous-unset}" in
+    unset) ;;
+    absent) defaults delete NSGlobalDomain AppleKeyboardUIMode 2>/dev/null || true ;;
+    *) defaults write NSGlobalDomain AppleKeyboardUIMode -int "${keyboard_mode_previous}" 2>/dev/null || true ;;
+  esac
+}
+if [ "${SERVERPILOT_AX_SET_KEYBOARD_MODE:-0}" = "1" ]; then
+  if keyboard_mode_previous=$(defaults read NSGlobalDomain AppleKeyboardUIMode 2>/dev/null); then
+    :
+  else
+    keyboard_mode_previous=absent
+  fi
+  trap restore_keyboard_mode EXIT INT TERM
+  defaults write NSGlobalDomain AppleKeyboardUIMode -int 3
+fi
+
 env \
   SERVERPILOT_DESKTOP_FIXTURE=resource-ownership \
   SERVERPILOT_DESKTOP_SECTION=server-pool \
   SERVERPILOT_DESKTOP_VIEWPORT=1280x800 \
   SERVERPILOT_CLI=/usr/bin/false \
-  "${executable}" -AppleKeyboardUIMode 3 > "${result_dir}/logs/keyboard.app.log" 2>&1 &
+  "${executable}" > "${result_dir}/logs/keyboard.app.log" 2>&1 &
 keyboard_pid=$!
 for _attempt in {1..50}; do
   /usr/bin/osascript -e 'on run argv' \
@@ -222,6 +215,8 @@ for _attempt in {1..50}; do
   sleep 0.1
 done
 sleep 0.8
+defaults read NSGlobalDomain AppleKeyboardUIMode 2>/dev/null \
+  > "${result_dir}/ax/keyboard-uimode.txt" || echo absent > "${result_dir}/ax/keyboard-uimode.txt"
 /usr/bin/osascript - "${keyboard_pid}" > "${result_dir}/ax/keyboard-focus.txt" 2> "${result_dir}/ax/keyboard-focus.err" <<'APPLESCRIPT'
 on run argv
 set targetPID to item 1 of argv as integer
@@ -259,9 +254,11 @@ end run
 APPLESCRIPT
 kill "${keyboard_pid}" 2>/dev/null || true
 wait "${keyboard_pid}" 2>/dev/null || true
+restore_keyboard_mode
 
 python3 - "${project_root}" "${app_bundle}" "${result_dir}" <<'PY'
 import json
+import subprocess
 import pathlib
 import re
 import struct
@@ -320,11 +317,18 @@ semantic_checks = {
         token in ax_text["usage"]
         for token in ("使用情况", "vision-lab", "4 个任务", "当前使用")
     ),
+    # The settings page groups its facts into cards, so the group headings are
+    # asserted alongside the facts: a card that loses its heading loses the only
+    # thing that says what its rows are about.
     "settings_contract_ax": all(
         token in ax_text["settings"]
-        for token in ("设置", "本机服务地址", "数据采集间隔", "版本")
+        for token in (
+            "设置", "本机服务", "服务地址", "版本",
+            "数据状态", "连接", "快照", "清单", "资源变更",
+            "数据采集", "数据采集间隔",
+        )
     ),
-    "empty_state_ax": "暂无资源" in ax_text["empty"],
+    "empty_state_ax": "暂无端点" in ax_text["empty"],
     "connection_error_ax": any(
         token in ax_text["error"]
         for token in ("连接失败", "连接或更新超时", "更新中断")
@@ -337,11 +341,46 @@ semantic_checks = {
 keyboard_text = (result_dir / "ax/keyboard-focus.txt").read_text(encoding="utf-8", errors="replace")
 keyboard_rows = [line for line in keyboard_text.splitlines() if re.match(r"^\d+\t", line)]
 keyboard_focus_summaries = {line.split("\t", 1)[1] for line in keyboard_rows if not line.endswith("\tnone")}
-semantic_checks["keyboard_focus_traversal"] = len(keyboard_focus_summaries) >= 3 and "command-r=sent" in keyboard_text
+# Read back what was in force *during* the capture: the harness restores the
+# operator's original value before these checks run, so probing the live
+# setting here would describe the restored state, not the measured one.
+full_keyboard_access = (result_dir / "ax/keyboard-uimode.txt").read_text(
+    encoding="utf-8", errors="replace"
+).strip()
+if full_keyboard_access not in {"2", "3"}:
+    # Without Full Keyboard Access, .focusable() views legitimately take no Tab
+    # stop, so a verdict here would describe System Settings, not this app.
+    semantic_checks["keyboard_focus_traversal"] = None
+    semantic_checks["keyboard_focus_traversal_note"] = (
+        "not measured: Full Keyboard Access is off, so .focusable() views take no "
+        "Tab stop and any verdict here would describe System Settings.  Re-run with "
+        "SERVERPILOT_AX_SET_KEYBOARD_MODE=1 to let this script set and restore it, or "
+        "enable System Settings > Keyboard > Keyboard navigation."
+    )
+else:
+    semantic_checks["keyboard_focus_traversal"] = (
+        len(keyboard_focus_summaries) >= 3 and "command-r=sent" in keyboard_text
+    )
 
 appearance_checks = {
     "light_only_policy_ignores_system_dark_request": pixels_by_name.get("forced-light-1280x800") == pixels_by_name.get("system-dark-request-1280x800"),
-    "high_contrast_injection_changed_static_pixels": pixels_by_name.get("high-contrast-1280x800") != pixels_by_name.get("forced-light-1280x800"),
+    # -AppleIncreaseContrast YES does not drive
+    # NSWorkspace.accessibilityDisplayShouldIncreaseContrast: measured on this
+    # machine it stays false, so a pixel comparison here reports the launch
+    # argument's inertness, not the app.  Verifying this needs the real System
+    # Settings > Accessibility > Display > Increase contrast toggle.
+    "high_contrast_injection_changed_static_pixels": None,
+    "high_contrast_note": (
+        "not measured: the launch argument does not set the accessibility flag; "
+        "toggle System Settings > Accessibility > Display > Increase contrast, then re-run"
+    ),
+    # What this does prove: the Increase Contrast branch reaches the rendered
+    # tokens.  What it does not prove: that macOS delivers the flag to the app.
+    "forced_high_contrast_changed_static_pixels": (
+        pixels_by_name.get("servers-1280x800") is not None
+        and pixels_by_name.get("high-contrast-forced-1280x800") is not None
+        and pixels_by_name.get("servers-1280x800") != pixels_by_name.get("high-contrast-forced-1280x800")
+    ),
     "reduce_motion_static_screenshot_is_not_behavioral_proof": None,
 }
 payload = {

@@ -804,6 +804,9 @@ class LeaseResource(Base):
     )
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     released_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: When a fresh observation first showed no compute process on this GPU.
+    #: Tracked per GPU so a claim that uses one card does not keep the rest.
+    idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
 class LeaseEndpointCommitment(Base):

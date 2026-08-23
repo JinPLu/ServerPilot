@@ -8483,17 +8483,28 @@ class BrokerService:
             )
         return len(leases)
 
+    def _gpu_is_observably_idle(
+        self,
+        session: Session,
+        resource: LeaseResource,
+        now: datetime,
+    ) -> bool:
+        """Return whether this one GPU is currently observed to run nothing."""
+
+        if self._current_processes(session, resource.gpu_id, now):
+            return False
+        return self._resources_have_fresh_telemetry(session, [resource], now)
+
     def _reconcile_idle_lease(
         self,
         session: Session,
         lease: Lease,
         resources: list[LeaseResource],
-        processes: list[ProcessObservation],
         now: datetime,
         *,
         actor_id: str,
-    ) -> None:
-        """Track and reclaim a workload lease that holds GPUs but runs nothing.
+    ) -> bool:
+        """Track and reclaim the GPUs of a claim that holds them but runs nothing.
 
         A routine claim never expires, so nothing else ever returns its GPUs
         when the agent forgets to release or its process dies.  This is the
@@ -8501,79 +8512,101 @@ class BrokerService:
         to be worth a human's attention, reclaim once it is long enough to be
         certain, and only ever act on *observed* idleness.
 
-        The clock is reset whenever a compute process appears or telemetry goes
-        stale, so ``idle_since`` always measures a continuously observed window.
-        A collector outage can therefore never accumulate into a reclaim, which
-        keeps the behaviour fail closed the same way GPU admission is.
+        Idleness is tracked per GPU, so a claim that keeps eight cards and uses
+        one returns the other seven instead of counting as busy as a whole.  The
+        clock of a GPU is reset whenever a process appears on it or its
+        telemetry goes stale, so each streak is a continuously observed window
+        and a collector outage can never accumulate into a reclaim.
         """
 
         if not resources:
-            return
+            return False
         if lease.expires_at is not None:
             # A lease that declared a duration already has a bound, and that
             # window is the user's stated intent: a job may legitimately sit at
             # zero GPU processes during a long CPU phase.  Only claims with no
             # other safety net are reclaimed on observed idleness.
-            return
-        if processes or not self._resources_have_fresh_telemetry(session, resources, now):
-            # Either the lease is doing real work, or we cannot see whether it
-            # is.  Both mean the previous idle streak no longer counts.
-            if lease.idle_since is not None:
-                lease.idle_since = None
-                self._resolve_idle_lease_alert(session, lease.id, now)
-            return
-        if lease.idle_since is None:
-            lease.idle_since = now
-            return
-        idle_seconds = (now - (_as_utc(lease.idle_since) or now)).total_seconds()
-        reclaim_after = self.inventory.idle_lease_reclaim_seconds
+            return False
+
         alert_after = self.inventory.idle_lease_alert_seconds
-        if idle_seconds < alert_after:
-            return
-        if idle_seconds < reclaim_after:
-            self._upsert_alert(
-                session,
-                alert_type="idle_lease",
-                severity="warning",
-                resource_type="lease",
-                resource_id=lease.id,
-                message=(
-                    f"lease has held {len(resources)} GPU(s) for "
-                    f"{int(idle_seconds // 60)} minutes with no observed compute process; "
-                    f"it is reclaimed automatically after {reclaim_after // 60} minutes"
-                ),
-                now=now,
-            )
-            return
-        before = self._lease_dict(session, lease)
-        lease.state = "EXPIRED_EMPTY"
-        lease.released_at = now
-        lease.release_reason = "idle without observed process"
-        lease.idle_since = None
+        reclaim_after = self.inventory.idle_lease_reclaim_seconds
+        reclaimed: list[LeaseResource] = []
+        alerting = 0
         for resource in resources:
+            if not self._gpu_is_observably_idle(session, resource, now):
+                resource.idle_since = None
+                continue
+            if resource.idle_since is None:
+                resource.idle_since = now
+                continue
+            idle_seconds = (now - (_as_utc(resource.idle_since) or now)).total_seconds()
+            if idle_seconds >= reclaim_after:
+                reclaimed.append(resource)
+            elif idle_seconds >= alert_after:
+                alerting += 1
+
+        remaining = [resource for resource in resources if resource not in reclaimed]
+        # The lease-level streak stays defined as "every GPU idle", which keeps
+        # the whole-claim reclaim below reading the same way it always has.
+        idle_starts = [_as_utc(resource.idle_since) for resource in resources]
+        lease.idle_since = min(idle_starts) if all(idle_starts) else None
+
+        if not reclaimed:
+            if alerting:
+                self._upsert_alert(
+                    session,
+                    alert_type="idle_lease",
+                    severity="warning",
+                    resource_type="lease",
+                    resource_id=lease.id,
+                    message=(
+                        f"{alerting} of {len(resources)} leased GPU(s) have run no compute "
+                        f"process for over {alert_after // 60} minutes; each is reclaimed "
+                        f"automatically after {reclaim_after // 60} minutes"
+                    ),
+                    now=now,
+                )
+            else:
+                self._resolve_idle_lease_alert(session, lease.id, now)
+            return False
+
+        before = self._lease_dict(session, lease)
+        for resource in reclaimed:
             resource.active = False
             resource.released_at = now
-        request = session.get(AllocationRequest, lease.request_id)
-        if request is not None:
-            request.state = "EXPIRED"
-            request.updated_at = now
+            resource.idle_since = None
+        if remaining:
+            # Part of the claim is still doing real work, so the lease lives on
+            # with a smaller resource set.
+            action = "lease.idle_gpu_reclaimed"
+        else:
+            action = "lease.idle_reclaimed"
+            lease.state = "EXPIRED_EMPTY"
+            lease.released_at = now
+            lease.release_reason = "idle without observed process"
+            lease.idle_since = None
+            request = session.get(AllocationRequest, lease.request_id)
+            if request is not None:
+                request.state = "EXPIRED"
+                request.updated_at = now
         self._resolve_idle_lease_alert(session, lease.id, now)
         self._audit(
             session,
             actor_id=actor_id,
-            action="lease.idle_reclaimed",
+            action=action,
             resource_type="lease",
             resource_id=lease.id,
             result="success",
             before=before,
             after=self._lease_dict(session, lease),
             summary={
-                "reason": lease.release_reason,
-                "idle_seconds": int(idle_seconds),
-                "gpu_count": len(resources),
+                "reason": "idle without observed process",
+                "reclaimed_gpu_count": len(reclaimed),
+                "remaining_gpu_count": len(remaining),
             },
             now=now,
         )
+        return True
 
     def _reconcile_leases(self, session: Session, now: datetime, *, actor_id: str) -> None:
         """Reconcile expiry and legacy attribution state; never kill/restart anything."""
@@ -8600,16 +8633,11 @@ class BrokerService:
                 for process in self._current_processes(session, resource.gpu_id, now)
             ]
             if lease.state in {"HELD", "ACTIVE"}:
-                self._reconcile_idle_lease(
-                    session,
-                    lease,
-                    resources,
-                    processes,
-                    now,
-                    actor_id=actor_id,
-                )
-                if lease.state == "EXPIRED_EMPTY":
+                if self._reconcile_idle_lease(session, lease, resources, now, actor_id=actor_id):
+                    # Reclaiming even one GPU frees capacity a queued request
+                    # may now fit into.
                     expired_released = True
+                if lease.state == "EXPIRED_EMPTY":
                     continue
             expires_at = _as_utc(lease.expires_at)
             if lease.state in {"HELD", "ACTIVE"} and expires_at is not None and expires_at <= now:

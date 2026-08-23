@@ -66,7 +66,7 @@ struct PersistedMasterDetailSplit<Master: View, Detail: View>: View {
                             HStack {
                                 Button(action: { showsCompactDetail = false }) {
                                     Label(configuration.compactBackLabel, systemImage: "chevron.backward")
-                                        .font(.system(size: 12, weight: .semibold))
+                                        .font(.callout.weight(.semibold))
                                 }
                                 .buttonStyle(.plain)
                                 .accessibilityLabel(configuration.compactBackLabel)
@@ -76,7 +76,7 @@ struct PersistedMasterDetailSplit<Master: View, Detail: View>: View {
                             .frame(height: 42)
                             .background(DesignTokens.surface)
 
-                            Divider().opacity(0.45)
+                            Divider().opacity(DesignTokens.Alpha.strong)
                             detail
                         }
                     } else {
@@ -107,14 +107,14 @@ struct PersistedMasterDetailSplit<Master: View, Detail: View>: View {
 
     private func splitHandle(maximumMasterWidth: CGFloat) -> some View {
         Rectangle()
-            .fill(DesignTokens.surfaceStroke.opacity(0.55))
+            .fill(DesignTokens.surfaceStroke.opacity(DesignTokens.Alpha.strong))
             .frame(width: 1)
             .frame(width: 10)
             .contentShape(Rectangle())
             .overlay {
                 Image(systemName: "line.3.horizontal")
-                    .font(.system(size: 8, weight: .bold))
-                    .foregroundStyle(DesignTokens.mutedInk.opacity(0.55))
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(DesignTokens.mutedInk.opacity(DesignTokens.Alpha.strong))
                     .rotationEffect(.degrees(90))
                     .accessibilityHidden(true)
             }

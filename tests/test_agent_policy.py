@@ -148,7 +148,12 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     ):
         assert boundary in adapter
 
-    assert len(adapter.split()) < 180
+    # The global rule loads in every project, so it stays bounded.  The
+    # ceiling moved from 180 to 200 words when per-GPU idle reclaim became
+    # part of the claim contract: an agent that does not know an unused card
+    # is returned will keep over-claiming.  Contract sentences are never cut
+    # to fit this bound.
+    assert len(adapter.split()) < 200
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",

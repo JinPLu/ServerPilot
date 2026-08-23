@@ -6,6 +6,27 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+## 1.7.0 - 2026-08-23
+
+**ServerPilot 1.7.0 turns the servers page back into a table you can compare down a column, with a pressure bar on all four metrics, and makes idle reclaim per GPU.**
+
+- The servers page is a table again, one 44pt row per machine: GPU utilisation, VRAM, CPU load and memory are all drawn the same way — a percentage and a bar, equal width, equal weight — so the eye can compare them straight down a column. CPU and memory previously carried a number with no bar, while the sort control still offered to sort by CPU load, which left the resulting order with nothing visible behind it.
+- Narrow windows fold columns from the right instead of switching to a different layout: the full SSH command is never truncated at any width, and none of the four bars ever folds. `GPU model` drops at 1280 and `project / task` below that; both stay in the row's tooltip and in the detail sheet.
+- Column headers are the sort controls: click one to sort by it, click again to reverse, and the active column darkens and carries an arrow. The headers now have accessibility names too, so screen readers no longer meet a row of unnamed buttons.
+- Rows no longer print the absence of a task, and a host with no GPUs shows its core count and total memory where a GPU model would go — that is what that machine actually is.
+- Idle reclaim is now per GPU: a claim that takes eight cards and uses one returns the other seven individually as each idle window elapses, while the working card keeps its claim. Previously a single running process protected every other GPU in the same claim.
+- CPU cores, total memory, peak temperature, absolute VRAM and the full remote workspace path move into a new "host" card in the detail sheet. The workspace path could only ever render as `…Data/tmp/ljp` in a row, which carries no information; all of it also stays in the row's tooltip.
+- The usage and settings pages now speak the same card language as the servers page: a group of facts sits in one white card, rows are separated by hairlines instead of each carrying its own fill and border. Usage detail gains a "resource total" card, and settings gains a "data state" card (connection, snapshot freshness and revision, server / GPU / lease counts, and whether resource changes can run).
+- The server detail sheet drops its translucent material for the same plane as every other page, and the per-GPU grid's minimum column width now fits its whole contents, so mid-word truncations like `4 / 8…`, `32 / …` and `task: …` are gone.
+- Turning on the system Increase Contrast setting now actually changes the interface: cards gain an outline, hairlines deepen, status colours re-solve to 7:1, and bar tracks darken — applied immediately, with no restart.
+- Settings cards align to the left margin instead of centring in a wide window, and the connection fact no longer claims a live local service while the read-only test fixture is in use.
+- The usage page and the server detail sheet used to collapse into a single element, leaving screen reader users with one summary sentence and no access to any button or value inside; both are now readable item by item.
+- Status colour is rebuilt as two tiers: a deep mark tier (`#00832F` / `#B05A00` / `#E40021`) for dots, bars and status words, and a luminous area tier (`#E7F8EB` / `#FFF1E5` / `#FFE7E8`) that carries the brightness. Darkening the whole palette so a small dot could clear contrast on its own had left the green muddy and the amber mustard.
+- The interface drops from three background planes to two (white content over `#E9ECF1`); the old three differed by only 1.06-1.09 each, which reads as a rendering fault rather than as depth.
+- The type ramp gains a 26pt display step, lifting the largest-to-smallest ratio from 1.70 to 2.60 so something can finally lead, and every numeral is now tabular so columns stop twitching on refresh.
+- Every font size across the interface now comes from a six-step Apple semantic ramp (previously 19 sizes including half-pixel steps), so the interface follows the system text size.
+- Settings drops a third "Settings" heading that repeated the sidebar and page title, and the filter control's duplicate label no longer stacks vertically in wide windows.
+
 ## 1.6.0 - 2026-08-21
 
 **ServerPilot 1.6.0 cuts about seventy percent of the context an agent spends reading GPU status, and returns idle-but-claimed GPUs to the pool on their own.**

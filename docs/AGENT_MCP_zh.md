@@ -40,7 +40,7 @@ serverpilot daemon status
 
 `no_capacity` 不创建队列，也不代表传输失败；此时 `busy_gpus` 已经列出占用者，不需要为了看占用再查一次。同一 turn 最多再刷新一次状态，然后把再次尝试留给下一 turn 或后续工作周期，不在当前 turn 反复申请。`Transport closed` 与 `no_capacity` 分开处理：前者最多重试一次，仍失败就报告传输错误。
 
-例行租约持续到显式 `gpu_release` 或 App 人工处理，不需要 bind、renew、heartbeat、coordination 或调用方提供 `idempotency_key`。MCP adapter 为每次工具调用生成内部重放键，只在本地 HTTP 传输失败时以同一键自动重试一次；参数相同的新工具调用仍会创建新的 lease。一个任务持有多个 lease 时必须维护显式的 `lease_id` 清单，申请者负责逐个释放并确认结果为 `released`，不能因其中一个已释放就把整个任务视为完成。MCP 进程退出后，由调用方另发的新调用不能与旧调用判定为同一次传输重放。
+例行租约持续到显式 `gpu_release`、App 人工处理，或空闲回收；**只申请真正会用的卡**——租约中持续空闲的单张卡会被单独收回，其余仍在工作的卡不受影响，因此申请后请按返回的 `cuda_visible_devices` 实际使用全部卡，或只申请需要的数量。例行租约不需要 bind、renew、heartbeat、coordination 或调用方提供 `idempotency_key`。MCP adapter 为每次工具调用生成内部重放键，只在本地 HTTP 传输失败时以同一键自动重试一次；参数相同的新工具调用仍会创建新的 lease。一个任务持有多个 lease 时必须维护显式的 `lease_id` 清单，申请者负责逐个释放并确认结果为 `released`，不能因其中一个已释放就把整个任务视为完成。MCP 进程退出后，由调用方另发的新调用不能与旧调用判定为同一次传输重放。
 
 ServerPilot 只协调 GPU。申请成功后的直接 SSH 是执行 workload 的正常路径；禁止的是通过 SSH、SQLite、静态 inventory 或 `nvidia-smi` 绕过 ServerPilot 发现、指定、申请或释放 GPU。已经登记且当前凭据可达的 endpoint 可以直接 SSH，不要求先加入 Codex saved hosts。非 GPU 远端操作，例如 Git 同步、文件维护和只读环境检查，不需要申请 GPU lease；普通 SSH 操作本身不等于绕过 ServerPilot。
 

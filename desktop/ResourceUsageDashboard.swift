@@ -267,7 +267,7 @@ struct ResourceUsageDashboard: View {
     var body: some View {
         VStack(spacing: 0) {
             overviewBar
-            Divider().opacity(0.45)
+            Divider().opacity(DesignTokens.Alpha.strong)
             PersistedMasterDetailSplit(
                 configuration: .ownership,
                 showsCompactDetail: $showsCompactDetail,
@@ -279,7 +279,10 @@ struct ResourceUsageDashboard: View {
         .onAppear { updateProjection() }
         .onChange(of: scope) { _, _ in updateProjection(resetSelection: true) }
         .onChange(of: store.snapshot.snapshotRevision) { _, _ in updateProjection() }
-        .accessibilityLabel("使用情况")
+        // Labelling this container collapsed the whole page into one leaf and
+        // repeated "使用情况" over every descendant.  The sidebar tab and the
+        // visible page title already name it.
+        .accessibilityElement(children: .contain)
     }
 
     private var overviewBar: some View {
@@ -298,7 +301,7 @@ struct ResourceUsageDashboard: View {
 
     private var overviewCount: some View {
         Text("\(projection.activeTaskCount) 个当前任务  ·  \(projection.assignedQuantities.gpuCount + projection.runningQuantities.gpuCount) 张 GPU")
-            .font(.system(size: 11, weight: .semibold))
+            .font(.subheadline.weight(.semibold))
             .foregroundStyle(DesignTokens.ink)
             .lineLimit(1)
             .fixedSize(horizontal: true, vertical: false)
@@ -319,7 +322,7 @@ struct ResourceUsageDashboard: View {
 
             HStack {
                 Text("\(groups.count) 个\(scope.label)")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                 Spacer()
             }
@@ -396,30 +399,6 @@ struct ResourceUsageDashboard: View {
     }
 }
 
-private struct ResourceUsageInlineMetric: View {
-    let title: String
-    let value: String
-    let icon: String
-
-    var body: some View {
-        HStack(spacing: 5) {
-            Image(systemName: icon)
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(DesignTokens.mutedInk)
-            Text(title)
-                .foregroundStyle(DesignTokens.mutedInk)
-            Text(value)
-                .foregroundStyle(DesignTokens.ink)
-                .lineLimit(1)
-        }
-        .font(.system(size: 10, weight: .semibold))
-        .help(resourceUsageStatusHelp(title))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(title)
-        .accessibilityValue(value)
-    }
-}
-
 private struct ResourceUsageGroupRow: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
@@ -431,21 +410,21 @@ private struct ResourceUsageGroupRow: View {
         Button(action: select) {
             HStack(spacing: 11) {
                 Image(systemName: group.scope.icon)
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
                     .frame(width: 30, height: 30)
                     .background(
-                        (selected ? DesignTokens.interaction : DesignTokens.mutedInk).opacity(0.10),
-                        in: RoundedRectangle(cornerRadius: 8, style: .continuous)
+                        (selected ? DesignTokens.interaction : DesignTokens.mutedInk).opacity(DesignTokens.Alpha.fill),
+                        in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
                     )
                 VStack(alignment: .leading, spacing: 3) {
                     Text(group.title)
-                        .font(.system(size: 12, weight: .semibold))
+                        .font(.callout.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Text(group.subtitle)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
@@ -454,8 +433,8 @@ private struct ResourceUsageGroupRow: View {
             .padding(.horizontal, 10)
             .frame(height: 52)
             .background(
-                selected ? DesignTokens.interaction.opacity(0.11) : DesignTokens.ink.opacity(hovering ? 0.04 : 0),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                selected ? DesignTokens.interaction.opacity(DesignTokens.Alpha.fill) : DesignTokens.ink.opacity(hovering ? 0.04 : 0),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
             )
             .contentShape(Rectangle())
         }
@@ -475,20 +454,23 @@ private struct ResourceUsageGroupDetail: View {
 
     var body: some View {
         ScrollView {
-            VStack(alignment: .leading, spacing: 14) {
+            VStack(alignment: .leading, spacing: 16) {
                 HStack(alignment: .top, spacing: 14) {
                     Image(systemName: group.scope.icon)
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(.title3.weight(.semibold))
                         .foregroundStyle(DesignTokens.interaction)
                         .frame(width: 36, height: 36)
-                        .background(DesignTokens.interaction.opacity(0.10), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
+                        .background(
+                            DesignTokens.interaction.opacity(DesignTokens.Alpha.fill),
+                            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                        )
                     VStack(alignment: .leading, spacing: 2) {
                         Text(group.title)
-                            .font(.system(size: 20, weight: .semibold))
+                            .font(.title.weight(.semibold))
                             .foregroundStyle(DesignTokens.ink)
                             .lineLimit(2)
                         Text(group.subtitle)
-                            .font(.system(size: 11, weight: .medium))
+                            .font(.subheadline.weight(.medium))
                             .foregroundStyle(DesignTokens.mutedInk)
                     }
                     Spacer(minLength: 0)
@@ -496,40 +478,69 @@ private struct ResourceUsageGroupDetail: View {
 
                 if let inlineMessage {
                     Label(inlineMessage, systemImage: inlineMessage == "GPU 已释放。" ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(inlineMessage == "GPU 已释放。" ? DesignTokens.success : DesignTokens.danger)
                         .padding(11)
                         .frame(maxWidth: .infinity, alignment: .leading)
-                        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
-                        .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(DesignTokens.surfaceStroke, lineWidth: 1))
+                        .background(
+                            DesignTokens.surface,
+                            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                                .strokeBorder(DesignTokens.surfaceStroke, lineWidth: 1)
+                        )
                 }
 
-                if !group.assignedClaims.isEmpty || !group.runningClaims.isEmpty || !group.leases.isEmpty {
-                    ResourceUsageSectionTitle(
-                        title: "当前使用"
-                    )
-                    VStack(spacing: 6) {
-                        ForEach(group.assignedClaims) { claim in
-                            ResourceClaimDetailRow(claim: claim)
-                        }
-                        ForEach(group.runningClaims) { claim in
-                            ResourceClaimDetailRow(claim: claim)
-                        }
-                        ForEach(group.leases) { lease in
-                            ResourceLeaseDetailRow(
-                                store: store,
-                                lease: lease,
-                                release: { release(lease) }
+                // The header carried only a name and a task count, so a project
+                // holding four tasks and a GPU read as emptier than it is.
+                if group.assignedQuantities.hasResources
+                    || group.runningQuantities.hasResources
+                    || group.requestedQuantities.hasResources {
+                    HomeCard(padding: 16) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            CardSectionLabel(text: "资源合计")
+                            ResourceStateSummary(
+                                assigned: group.assignedQuantities,
+                                running: group.runningQuantities,
+                                requested: group.requestedQuantities
                             )
                         }
                     }
                 }
 
+                if !group.assignedClaims.isEmpty || !group.runningClaims.isEmpty || !group.leases.isEmpty {
+                    ResourceUsageSection(title: "当前使用") {
+                        VStack(spacing: 0) {
+                            ForEach(Array(group.assignedClaims.enumerated()), id: \.element.id) { index, claim in
+                                if index > 0 { ResourceUsageRowDivider() }
+                                ResourceClaimDetailRow(claim: claim)
+                            }
+                            ForEach(Array(group.runningClaims.enumerated()), id: \.element.id) { index, claim in
+                                if index > 0 || !group.assignedClaims.isEmpty { ResourceUsageRowDivider() }
+                                ResourceClaimDetailRow(claim: claim)
+                            }
+                            ForEach(Array(group.leases.enumerated()), id: \.element.id) { index, lease in
+                                if index > 0 || !group.assignedClaims.isEmpty || !group.runningClaims.isEmpty {
+                                    ResourceUsageRowDivider()
+                                }
+                                ResourceLeaseDetailRow(
+                                    store: store,
+                                    lease: lease,
+                                    release: { release(lease) }
+                                )
+                            }
+                        }
+                    }
+                }
+
                 if !group.actuals.isEmpty {
-                    ResourceUsageSectionTitle(title: "任务记录")
-                    VStack(spacing: 6) {
-                        ForEach(group.actuals) { actual in
-                            ResourceActualDetailRow(actual: actual)
+                    ResourceUsageSection(title: "任务记录") {
+                        VStack(spacing: 0) {
+                            ForEach(Array(group.actuals.enumerated()), id: \.element.id) { index, actual in
+                                if index > 0 { ResourceUsageRowDivider() }
+                                ResourceActualDetailRow(actual: actual)
+                            }
                         }
                     }
                 }
@@ -543,6 +554,9 @@ private struct ResourceUsageGroupDetail: View {
             .padding(.bottom, 40)
             .frame(maxWidth: .infinity, alignment: .leading)
         }
+        // The page plane, so the section tiles above read as tiles.
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .background(DesignTokens.ambientSmoke)
     }
 }
 
@@ -568,14 +582,13 @@ private struct ResourceStateSummary: View {
             if requested.hasResources { EmptyView() }
             if !assigned.hasResources && !running.hasResources && !requested.hasResources {
                 Text("暂无资源")
-                    .font(.system(size: 10, weight: .medium))
+                    .font(Typography.metricLabel)
                     .foregroundStyle(DesignTokens.mutedInk)
-                    .padding(.horizontal, 12)
             }
         }
-        .frame(height: 52)
-        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-        .overlay(RoundedRectangle(cornerRadius: 9, style: .continuous).stroke(DesignTokens.surfaceStroke, lineWidth: 1))
+        // No fill or stroke of its own: this sits inside a HomeCard, and a
+        // white box on a white card is a box in a box.
+        .frame(height: 44)
     }
 }
 
@@ -587,36 +600,53 @@ private struct ResourceStateSummaryItem: View {
     var body: some View {
         HStack(spacing: 8) {
             Image(systemName: icon)
-                .font(.system(size: 11, weight: .semibold))
+                .font(.subheadline.weight(.semibold))
                 .foregroundStyle(DesignTokens.mutedInk)
             VStack(alignment: .leading, spacing: 2) {
                 Text(title)
-                    .font(.system(size: 9, weight: .medium))
+                    .font(Typography.metricLabel)
                     .foregroundStyle(DesignTokens.mutedInk)
                 Text(quantities.compactLabel)
-                    .font(.system(size: 11, weight: .semibold, design: .rounded))
+                    .font(Typography.cardValue)
                     .foregroundStyle(DesignTokens.ink)
                     .lineLimit(1)
                     .minimumScaleFactor(0.75)
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 12)
+        .padding(.trailing, 12)
         .frame(maxWidth: .infinity)
         .help(resourceUsageStatusHelp(title))
-        .accessibilityElement(children: .combine)
+        // `.combine` concatenated each child's inherited AXHelp, so the help
+        // sentence was announced once per descendant.  The label and value
+        // below are explicit, so the children carry nothing extra.
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
         .accessibilityValue(quantities.compactLabel)
     }
 }
 
-private struct ResourceUsageSectionTitle: View {
+/// Rows of one section, stacked inside a single tile with hairline separators.
+private struct ResourceUsageSection<Content: View>: View {
     let title: String
+    @ViewBuilder let content: Content
 
     var body: some View {
-        Text(title)
-            .font(.system(size: 13, weight: .semibold))
-            .foregroundStyle(DesignTokens.ink)
+        HomeCard(padding: 16) {
+            VStack(alignment: .leading, spacing: 10) {
+                CardSectionLabel(text: title)
+                content
+            }
+        }
+    }
+}
+
+/// Hairline between two rows of a section; omitted before the first row.
+private struct ResourceUsageRowDivider: View {
+    var body: some View {
+        Rectangle()
+            .fill(DesignTokens.surfaceStroke)
+            .frame(height: 1)
     }
 }
 
@@ -629,16 +659,16 @@ private struct ResourceClaimDetailRow: View {
                 ResourceRecordIcon(systemName: "key.fill")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(claim.taskReference.isEmpty ? (claim.purpose ?? "未命名任务") : claim.taskReference)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(claim.projectID)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 10)
                 Text(claim.quantities.compactLabel)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                     .lineLimit(1)
             }
@@ -661,22 +691,22 @@ private struct ResourceLeaseDetailRow: View {
                 ResourceRecordIcon(systemName: "square.stack.3d.up.fill")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(lease.taskReference ?? lease.purpose ?? "未命名任务")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(lease.projectID)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 10)
                 Text("\(lease.gpuIDs.count) GPU")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                 Button {
                     showsReassignment = true
                 } label: {
                     Label("改派", systemImage: "arrow.triangle.swap")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
                 .disabled(
@@ -687,7 +717,7 @@ private struct ResourceLeaseDetailRow: View {
                 .help(store.allowsMutations ? "选择同等数量的目标 GPU" : store.mutationUnavailableReason)
                 Button(action: release) {
                     Label(store.releasingLeaseIDs.contains(lease.id) ? "释放中" : "释放", systemImage: "arrow.uturn.backward")
-                        .font(.system(size: 9, weight: .semibold))
+                        .font(.caption2.weight(.semibold))
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
                 .disabled(!store.allowsMutations || store.releasingLeaseIDs.contains(lease.id))
@@ -695,7 +725,6 @@ private struct ResourceLeaseDetailRow: View {
             }
         }
         .accessibilityElement(children: .contain)
-        .accessibilityLabel("GPU 使用记录 \(lease.taskReference ?? lease.id)")
         .sheet(isPresented: $showsReassignment) {
             LeaseReassignmentSheet(store: store, lease: lease)
         }
@@ -740,23 +769,23 @@ private struct LeaseReassignmentSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "arrow.triangle.swap")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(.title2.weight(.semibold))
                     .foregroundStyle(DesignTokens.interaction)
                     .frame(width: 42, height: 42)
-                    .background(DesignTokens.interaction.opacity(0.11), in: RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .background(DesignTokens.interaction.opacity(DesignTokens.Alpha.fill), in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("改派 GPU")
-                        .font(.system(size: 18, weight: .semibold))
+                        .font(.title2.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                     Text("\(lease.projectID) · \(lease.taskReference ?? lease.purpose ?? "未命名任务")")
-                        .font(.system(size: 11, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(2)
                 }
             }
 
             Text("选择 \(lease.gpuIDs.count) 块目标 GPU。应用后，请让对应 Agent 按新分配的 CVD 重启任务。")
-                .font(.system(size: 12, weight: .medium))
+                .font(.callout.weight(.medium))
                 .foregroundStyle(DesignTokens.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -772,7 +801,7 @@ private struct LeaseReassignmentSheet: View {
 
             if !selectionIsComplete {
                 Text("还需选择 \(lease.gpuIDs.count - selectedGPUIDs.count) 块 GPU。")
-                    .font(.system(size: 11, weight: .semibold))
+                    .font(.subheadline.weight(.semibold))
                     .foregroundStyle(DesignTokens.warning)
             }
 
@@ -785,11 +814,11 @@ private struct LeaseReassignmentSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
-                .font(.system(size: 11, weight: .medium))
+                .font(.subheadline.weight(.medium))
                 .padding(11)
                 .background(
-                    (succeeded ? DesignTokens.success : DesignTokens.danger).opacity(0.10),
-                    in: RoundedRectangle(cornerRadius: 10, style: .continuous)
+                    (succeeded ? DesignTokens.success : DesignTokens.danger).opacity(DesignTokens.Alpha.fill),
+                    in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
                 )
             }
 
@@ -837,25 +866,25 @@ private struct LeaseReassignmentSheet: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(.body.weight(.semibold))
                     .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
                         Text("\(endpointName(for: gpu)) · GPU \(gpu.index)")
-                            .font(.system(size: 11.5, weight: .semibold, design: .monospaced))
+                            .font(.system(.callout, design: .monospaced).weight(.semibold))
                             .foregroundStyle(DesignTokens.ink)
                         if current {
                             Text("当前")
-                                .font(.system(size: 9, weight: .semibold))
+                                .font(.caption2.weight(.semibold))
                                 .foregroundStyle(DesignTokens.interaction)
                         }
                     }
                     Text(gpuPresentationLabel(gpu))
-                        .font(.system(size: 10.5, weight: .medium))
+                        .font(.subheadline.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                     Text(workspacePath(for: gpu))
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
+                        .font(.system(.caption2, design: .monospaced).weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -865,12 +894,12 @@ private struct LeaseReassignmentSheet: View {
             .padding(11)
             .frame(maxWidth: .infinity, alignment: .leading)
             .background(
-                selected ? DesignTokens.interaction.opacity(0.11) : DesignTokens.ink.opacity(0.025),
-                in: RoundedRectangle(cornerRadius: 9, style: .continuous)
+                selected ? DesignTokens.interaction.opacity(DesignTokens.Alpha.fill) : DesignTokens.ink.opacity(DesignTokens.Alpha.hairline),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 9, style: .continuous)
-                    .stroke(selected ? DesignTokens.interaction.opacity(0.35) : DesignTokens.surfaceStroke, lineWidth: 1)
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                    .stroke(selected ? DesignTokens.interaction.opacity(DesignTokens.Alpha.muted) : DesignTokens.surfaceStroke, lineWidth: 1)
             )
             .contentShape(Rectangle())
         }
@@ -897,68 +926,6 @@ private struct LeaseReassignmentSheet: View {
     }
 }
 
-private struct ResourceRequestDetailRow: View {
-    let request: AllocationRequestRecord
-
-    var body: some View {
-        ResourceUsageRecordShell {
-            HStack(spacing: 10) {
-                ResourceRecordIcon(systemName: "hourglass")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(request.taskReference)
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(request.projectID) · \(usageTimestamp(request.createdAt))")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(DesignTokens.mutedInk)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 10)
-                Text("\(request.gpuCount) GPU")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(DesignTokens.ink)
-                Text(request.stateLabel)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(DesignTokens.warning)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("等待中的 GPU 申请 \(request.taskReference)")
-        .accessibilityValue("\(request.gpuCount) GPU，\(request.stateLabel)")
-    }
-}
-
-private struct ResourceReservationDetailRow: View {
-    let reservation: ReservationRecord
-
-    var body: some View {
-        ResourceUsageRecordShell {
-            HStack(spacing: 10) {
-                ResourceRecordIcon(systemName: "calendar.badge.clock")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(reservation.purpose ?? "预约资源")
-                        .font(.system(size: 11, weight: .semibold))
-                        .lineLimit(1)
-                    Text("\(reservation.projectID ?? "未标注项目") · \(usageTimestamp(reservation.startsAt))")
-                        .font(.system(size: 9, weight: .medium))
-                        .foregroundStyle(DesignTokens.mutedInk)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 10)
-                Text("\(reservation.gpuIDs.count) GPU")
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
-                    .foregroundStyle(DesignTokens.ink)
-                Text(reservation.stateLabel)
-                    .font(.system(size: 9, weight: .semibold))
-                    .foregroundStyle(DesignTokens.warning)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("预约 \(reservation.purpose ?? reservation.id)")
-        .accessibilityValue("\(reservation.gpuIDs.count) GPU，\(reservation.stateLabel)")
-    }
-}
-
 private struct ResourceActualDetailRow: View {
     let actual: ResourceRunActualRecord
 
@@ -968,20 +935,20 @@ private struct ResourceActualDetailRow: View {
                 ResourceRecordIcon(systemName: "checklist.checked")
                 VStack(alignment: .leading, spacing: 2) {
                     Text(actual.taskReference.isEmpty ? actual.id : actual.taskReference)
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(.subheadline.weight(.semibold))
                         .lineLimit(1)
                     Text(actual.projectID)
-                        .font(.system(size: 9, weight: .medium))
+                        .font(.caption2.weight(.medium))
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 10)
                 Text(actual.quantities.compactLabel)
-                    .font(.system(size: 10, weight: .semibold, design: .rounded))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                     .lineLimit(1)
                 Text("时长 \(usageDuration(actual.actualDurationSeconds))")
-                    .font(.system(size: 9, weight: .medium))
+                    .font(.caption2.weight(.medium))
                     .foregroundStyle(DesignTokens.mutedInk)
             }
         }
@@ -995,11 +962,12 @@ private struct ResourceUsageRecordShell<Content: View>: View {
     @ViewBuilder let content: Content
 
     var body: some View {
+        // Each row used to carry its own fill and stroke, so a section of six
+        // read as six competing cards.  The rows now sit inside one HomeCard
+        // and are separated by hairlines, the way a Home accessory list is.
         content
-            .padding(.horizontal, 11)
-            .frame(minHeight: 44)
-            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: 7, style: .continuous))
-            .overlay(RoundedRectangle(cornerRadius: 7, style: .continuous).stroke(DesignTokens.surfaceStroke, lineWidth: 1))
+            .frame(minHeight: 40)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }
 
@@ -1008,10 +976,13 @@ private struct ResourceRecordIcon: View {
 
     var body: some View {
         Image(systemName: systemName)
-            .font(.system(size: 10, weight: .semibold))
+            .font(.caption2.weight(.semibold))
             .foregroundStyle(DesignTokens.mutedInk)
-            .frame(width: 25, height: 25)
-            .background(DesignTokens.mutedInk.opacity(0.08), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+            .frame(width: 26, height: 26)
+            .background(
+                DesignTokens.mutedInk.opacity(DesignTokens.Alpha.fill),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+            )
     }
 }
 
