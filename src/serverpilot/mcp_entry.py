@@ -36,9 +36,17 @@ def resolve_mcp_command() -> str:
     found = shutil.which("serverpilot-mcp")
     if found is not None:
         return found
-    sibling = Path(sys.executable).resolve().with_name(mcp_executable_name())
-    if sibling.is_file():
-        return str(sibling)
+    name = mcp_executable_name()
+    # A virtualenv's `python` is a symlink to the base interpreter, so resolving
+    # it first walks out of the directory that holds the console scripts. The
+    # daemon runs from launchd with no PATH of its own, which makes this the
+    # normal case rather than the exotic one.
+    for candidate in (
+        Path(sys.executable).with_name(name),
+        Path(sys.executable).resolve().with_name(name),
+    ):
+        if candidate.is_file():
+            return str(candidate)
     raise MCPEntryUnavailable()
 
 

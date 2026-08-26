@@ -44,6 +44,32 @@ def test_resolve_mcp_command_uses_packaged_sibling(
     assert resolve_mcp_command() == str(sibling.resolve())
 
 
+def test_resolve_mcp_command_looks_beside_the_unresolved_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A venv's `python` is a symlink to the base interpreter.
+
+    Resolving it before looking for the sibling walks out of the directory that
+    holds the console scripts, so the daemon reported no MCP entry at all for
+    every `uv tool install`, which is the ordinary macOS layout.
+    """
+
+    base = tmp_path / "cpython" / "bin"
+    base.mkdir(parents=True)
+    interpreter = base / "python3.12"
+    interpreter.write_bytes(b"")
+    venv = tmp_path / "tools" / "serverpilot" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(interpreter)
+    sibling = venv / "serverpilot-mcp"
+    sibling.write_bytes(b"")
+    monkeypatch.setattr(mcp_entry.shutil, "which", lambda name: None)
+    monkeypatch.setattr(mcp_entry.sys, "executable", str(venv / "python"))
+
+    assert resolve_mcp_command() == str(sibling)
+    assert not (base / "serverpilot-mcp").exists()
+
+
 def test_mcp_executable_name_uses_exe_suffix_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(mcp_entry.os, "name", "nt")
     assert mcp_entry.mcp_executable_name() == "serverpilot-mcp.exe"

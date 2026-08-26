@@ -4,6 +4,12 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## 1.9.1 - 2026-08-27
+
+**ServerPilot 1.9.1 makes the new MCP entry panel work on an ordinary installation.**
+
+- The Settings page reported no MCP entry at all after `uv tool install`, which is the ordinary macOS layout. The lookup followed the interpreter symlink before looking beside it, which walks out of the directory that holds `serverpilot-mcp` and into the base interpreter's own. The daemon runs from launchd with no PATH of its own, so nothing else could find it either.
+
 ## 1.9.0 - 2026-08-27
 
 **ServerPilot 1.9.0 lets an agent reach it from a Windows machine and read everything it says, and stops the allocator breaking up your fleet one card at a time.**
