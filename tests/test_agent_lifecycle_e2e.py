@@ -8,35 +8,23 @@ projection, the REST route and the domain service fails here.
 from __future__ import annotations
 
 from datetime import timedelta
-from pathlib import Path
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
 from serverpilot import mcp_server
-from serverpilot.api import create_app
 from serverpilot.client import BrokerClientError
-from serverpilot.config import Settings
 from serverpilot.models import Lease, LeaseResource
 from serverpilot.timeutil import utcnow
-from tests.helpers import observation, process_for_gpu
+from tests.helpers import observation, process_for_gpu, tools
 
 
 @pytest.fixture()
-def routine(tmp_path: Path, inventory, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+def routine(build_app, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
     """A live broker wired to the routine MCP tools through HTTP."""
 
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'e2e.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("e2e")
     rest = TestClient(app)
     headers = {"X-ServerPilot-Actor": "agent"}
 
@@ -94,13 +82,13 @@ def _age_idle(service, lease_id: str, seconds: int, *, gpu_ids=None) -> None:  #
 def test_apply_use_release_round_trip(routine) -> None:  # type: ignore[no-untyped-def]
     routine.ingest_observation(observation(count=2))
 
-    status = mcp_server.gpu_status()
+    status = tools.gpu_status()
     assert len(status["servers"]) == 1
     assert len(status["gpus"]) == 2
     assert "busy_gpus" not in status
     server_id = status["servers"][0]["server_id"]
 
-    claimed = mcp_server.gpu_apply(server_id=server_id, gpu_count=2, task="端到端训练")
+    claimed = tools.gpu_apply(server_id=server_id, gpu_count=2, task="端到端训练")
     assert claimed["cuda_device_order"] == "PCI_BUS_ID"
     assert len(claimed["gpus"]) == 2
     assert claimed["cuda_visible_devices"] == ",".join(
@@ -108,41 +96,41 @@ def test_apply_use_release_round_trip(routine) -> None:  # type: ignore[no-untyp
     )
 
     # A claimed card leaves the allocatable list and is named in busy_gpus.
-    after = mcp_server.gpu_status()
+    after = tools.gpu_status()
     assert after["gpus"] == []
     assert {item["task"] for item in after["busy_gpus"]} == {"端到端训练"}
     assert after["no_capacity"]["reason"] == "all_gpus_busy_or_unavailable"
 
-    released = mcp_server.gpu_release(claimed["lease_id"])
+    released = tools.gpu_release(claimed["lease_id"])
     assert released == {
         "released": True,
         "lease_id": claimed["lease_id"],
         "state": "RELEASED",
     }
-    assert len(mcp_server.gpu_status()["gpus"]) == 2
+    assert len(tools.gpu_status()["gpus"]) == 2
 
 
 def test_second_agent_sees_no_capacity_then_reclaims_the_idle_card(routine) -> None:  # type: ignore[no-untyped-def]
     """The whole point of reclaim: a forgotten claim stops blocking others."""
 
     routine.ingest_observation(observation(count=1))
-    claimed = mcp_server.gpu_apply(gpu_count=1, task="忘记释放的任务")
+    claimed = tools.gpu_apply(gpu_count=1, task="忘记释放的任务")
 
     with pytest.raises(BrokerClientError) as blocked:
-        mcp_server.gpu_apply(gpu_count=1, task="被挡住的任务")
+        tools.gpu_apply(gpu_count=1, task="被挡住的任务")
     assert "no_capacity" in str(blocked.value)
 
     _age_idle(routine, claimed["lease_id"], routine.inventory.idle_lease_reclaim_seconds + 5)
     routine.ingest_observation(observation(count=1))
 
-    assert len(mcp_server.gpu_status()["gpus"]) == 1
-    second = mcp_server.gpu_apply(gpu_count=1, task="被挡住的任务")
+    assert len(tools.gpu_status()["gpus"]) == 1
+    second = tools.gpu_apply(gpu_count=1, task="被挡住的任务")
     assert second["lease_id"] != claimed["lease_id"]
 
 
 def test_partly_used_claim_keeps_its_working_card_and_returns_the_rest(routine) -> None:  # type: ignore[no-untyped-def]
     routine.ingest_observation(observation(count=2))
-    claimed = mcp_server.gpu_apply(gpu_count=2, task="只用一张卡")
+    claimed = tools.gpu_apply(gpu_count=2, task="只用一张卡")
     lease_id = claimed["lease_id"]
     busy_uuid = "GPU-endpoint-a-0"
     busy_id, idle_id = f"endpoint-a:{busy_uuid}", "endpoint-a:GPU-endpoint-a-1"
@@ -158,7 +146,7 @@ def test_partly_used_claim_keeps_its_working_card_and_returns_the_rest(routine) 
 
     assert _active_gpu_ids(routine, lease_id) == {busy_id}
     # The returned card is immediately usable by another claim.
-    other = mcp_server.gpu_apply(gpu_count=1, task="接手空闲卡")
+    other = tools.gpu_apply(gpu_count=1, task="接手空闲卡")
     assert other["gpus"][0]["gpu_id"] == "GPU-endpoint-a-1"
     # And the original claim is still alive on its working card.
     def lease_state(session):  # type: ignore[no-untyped-def]
@@ -171,28 +159,28 @@ def test_releasing_one_of_two_leases_does_not_touch_the_other(routine) -> None: 
     """The contract asks agents to confirm each lease; the broker must honour it."""
 
     routine.ingest_observation(observation(count=2))
-    first = mcp_server.gpu_apply(gpu_count=1, task="任务甲")
-    second = mcp_server.gpu_apply(gpu_count=1, task="任务乙")
+    first = tools.gpu_apply(gpu_count=1, task="任务甲")
+    second = tools.gpu_apply(gpu_count=1, task="任务乙")
     assert first["lease_id"] != second["lease_id"]
 
-    assert mcp_server.gpu_release(first["lease_id"])["state"] == "RELEASED"
+    assert tools.gpu_release(first["lease_id"])["state"] == "RELEASED"
 
-    status = mcp_server.gpu_status()
+    status = tools.gpu_status()
     assert len(status["gpus"]) == 1
     assert [item["task"] for item in status["busy_gpus"]] == ["任务乙"]
-    assert mcp_server.gpu_release(second["lease_id"])["state"] == "RELEASED"
-    assert len(mcp_server.gpu_status()["gpus"]) == 2
+    assert tools.gpu_release(second["lease_id"])["state"] == "RELEASED"
+    assert len(tools.gpu_status()["gpus"]) == 2
 
 
 def test_server_id_filter_narrows_status_to_one_server(routine) -> None:  # type: ignore[no-untyped-def]
     routine.ingest_observation(observation(count=2))
-    full = mcp_server.gpu_status()
+    full = tools.gpu_status()
     server_id = full["servers"][0]["server_id"]
 
-    narrowed = mcp_server.gpu_status(server_id=server_id)
+    narrowed = tools.gpu_status(server_id=server_id)
     assert [item["server_id"] for item in narrowed["servers"]] == [server_id]
     assert {item["server_id"] for item in narrowed["gpus"]} == {server_id}
 
-    missing = mcp_server.gpu_status(server_id="no-such-server")
+    missing = tools.gpu_status(server_id="no-such-server")
     assert missing["gpus"] == []
     assert missing["servers"] == []

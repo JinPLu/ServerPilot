@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "serverpilot"
-version = "1.8.0"
+dynamic = ["version"]
 description = "ServerPilot: agent-coordinated server compute scheduling with human supervision."
 readme = "README.md"
 requires-python = ">=3.12"
@@ -13,12 +13,18 @@ license-files = ["LICENSE"]
 authors = [{ name = "Jinpeng Lu" }]
 keywords = ["server-scheduling", "compute-coordination", "gpu", "mcp", "agent"]
 classifiers = [
-  "Development Status :: 3 - Alpha",
+  "Development Status :: 4 - Beta",
   "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
   "Operating System :: MacOS",
   "Operating System :: Microsoft :: Windows",
+  # The control plane runs on macOS or Windows; the collector and keepalive
+  # entry points run on the Linux GPU servers it coordinates.
+  "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
   "Topic :: System :: Distributed Computing",
+  "Topic :: System :: Systems Administration",
 ]
 dependencies = [
   "alembic>=1.14,<2",
@@ -36,7 +42,10 @@ dependencies = [
 ]
 
 [project.urls]
+Homepage = "https://github.com/JinPLu/ServerPilot"
 Repository = "https://github.com/JinPLu/ServerPilot"
+Documentation = "https://github.com/JinPLu/ServerPilot/tree/master/docs"
+Changelog = "https://github.com/JinPLu/ServerPilot/blob/master/CHANGELOG.en.md"
 Issues = "https://github.com/JinPLu/ServerPilot/issues"
 
 [project.optional-dependencies]
@@ -58,6 +67,9 @@ serverpilot-mcp = "serverpilot.mcp_server:main"
 serverpilot-collect = "serverpilot.server_collector:main"
 serverpilot-keepalive = "serverpilot.server_keepalive:main"
 
+[tool.setuptools.dynamic]
+version = {attr = "serverpilot.__version__"}
+
 [tool.setuptools.packages.find]
 where = ["src"]
 
@@ -72,6 +84,7 @@ serverpilot = [
   "web/static/assets/*",
   "web/static/vendor/*",
   "web/static/vendor/phosphor/*",
+  "bundled_plugins/*",
 ]
 
 [tool.pytest.ini_options]
@@ -84,4 +97,7 @@ target-version = "py312"
 exclude = ["build", ".venv"]
 
 [tool.ruff.lint]
-select = ["F"]
+select = ["F", "E", "W", "I", "UP", "B", "SIM", "C4", "RET"]
+# E501 is left to a separate `ruff format` adoption; enforcing it now would
+# rewrap the codebase and bury every other change in the same diff.
+ignore = ["E501"]

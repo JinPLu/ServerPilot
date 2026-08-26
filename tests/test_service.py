@@ -13,8 +13,8 @@ from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.database import Database
 from serverpilot.models import (
     Actor,
-    AllocationRequest,
     Alert,
+    AllocationRequest,
     AuditEvent,
     EndpointTelemetryCurrent,
     EndpointTelemetrySnapshot,
@@ -30,8 +30,8 @@ from serverpilot.schemas import (
     EndpointObservation,
     EndpointUpdate,
     LeaseObservedBind,
-    ReservationCreate,
     RequestCreate,
+    ReservationCreate,
     ResourceClaim,
     RetentionPrune,
     WorkloadProfileClaim,

@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-from pathlib import Path
-
-import yaml
 from fastapi.testclient import TestClient
 
 from serverpilot import API_CAPABILITIES
-from serverpilot.api import create_app
-from serverpilot.config import Settings
 from serverpilot.schemas import RequestCreate
+from serverpilot.timeutil import utcnow
 from tests.helpers import observation
 
 
@@ -23,16 +19,8 @@ def _request(task_ref: str) -> RequestCreate:
     )
 
 
-def test_control_plane_state_route_groups_current_and_history(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'state.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_control_plane_state_route_groups_current_and_history(build_app) -> None:
+    app = build_app("state")
     service = app.state.service
     actor = service.local_actor("state-agent")
     service.ingest_observation(observation(count=1))
@@ -96,29 +84,31 @@ def test_idempotent_mutation_replay_retains_committed_revision(service, admin) -
     assert first["committed"] == {"snapshot_revision": first["snapshot_revision"]}
 
 
-def test_control_plane_state_can_omit_advanced_projections(tmp_path: Path, inventory) -> None:
+def test_control_plane_state_can_omit_advanced_projections(
+    build_app, monkeypatch
+) -> None:
     """The App renders no generic-resource or scheduler projection.
 
     Asking for the state without them keeps the observe/allocate sections
     byte-identical, so narrowing the request cannot change what the desktop
     table shows.
+
+    The clock is frozen because the comparison is total: `data_age_seconds` is
+    measured against `utcnow()` once per request, so two live requests
+    straddling a 0.1s boundary would differ for reasons that have nothing to do
+    with narrowing.
     """
 
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'state-narrow.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("state-narrow")
     service = app.state.service
     actor = service.local_actor("state-agent")
     service.ingest_observation(observation(count=1))
     service.create_request(actor, _request("state-lease"), idempotency_key="state-lease")
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "state-agent"}
+
+    frozen = utcnow()
+    monkeypatch.setattr("serverpilot.service.utcnow", lambda: frozen)
 
     full = client.get("/api/v1/state", headers=headers).json()["data"]
     narrowed = client.get(

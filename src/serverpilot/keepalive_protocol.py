@@ -7,9 +7,9 @@ import re
 from dataclasses import dataclass
 from typing import Any, Literal
 
+from serverpilot import __version__ as KEEPALIVE_IMPLEMENTATION_VERSION
 
 KEEPALIVE_SCHEMA_VERSION = 3
-KEEPALIVE_IMPLEMENTATION_VERSION = "1.8.0"
 KEEPALIVE_PROTOCOL_INFO_CAPABILITIES = (
     "per_gpu_keepalive",
     "pidfd_identity",

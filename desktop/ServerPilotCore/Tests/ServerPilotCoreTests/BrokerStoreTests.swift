@@ -219,29 +219,34 @@ final class BrokerStoreTests: XCTestCase {
         XCTAssertEqual(gpu.recentTelemetryAverage?.memoryFraction, 0.35)
     }
 
-    func testEndpointDraftUsesStructuredSealedObservationProfile() throws {
+    func testEndpointDraftUsesServerListedObservationProfileId() throws {
+        // Intentionally replaces the former sealed CaseIterable enum: a
+        // plugin id cannot be represented by that enum, so drafts now store
+        // the server-validated profile id as a String.
         let draft = try EndpointDraft(
             host: "gpu.example.test",
             port: 2201,
             sshUser: "collector",
             workspacePath: "/srv/storyboard",
-            observationProfile: .serverScript,
+            observationProfile: "server-script-v1",
             suppliedID: ""
         )
 
         XCTAssertEqual(draft.id, "gpu-example-test-p2201")
         XCTAssertEqual(draft.host, "gpu.example.test")
         XCTAssertEqual(draft.workspacePath, "/srv/storyboard")
-        XCTAssertEqual(draft.observationProfile, .serverScript)
-        XCTAssertEqual(draft.observationProfile.label, "服务器采集脚本")
-        XCTAssertFalse(draft.observationProfile.scriptInfo.contains("Docker"))
+        XCTAssertEqual(draft.observationProfile, "server-script-v1")
+        XCTAssertEqual(
+            ObservationProfileRecord.serverCatalogFallback.first { $0.id == draft.observationProfile }?.displayName,
+            "服务器采集脚本"
+        )
         XCTAssertThrowsError(
             try EndpointDraft(
                 host: "",
                 port: 0,
                 sshUser: "collector",
                 workspacePath: "relative/path",
-                observationProfile: .linuxNvidia,
+                observationProfile: "linux-nvidia",
                 suppliedID: "bad id"
             )
         )
@@ -654,7 +659,7 @@ final class BrokerStoreTests: XCTestCase {
             draft: try EndpointUpdateDraft(
                 sshUser: "collector",
                 workspacePath: "/srv/storyboard",
-                observationProfile: .serverScript
+                observationProfile: "server-script-v1"
             )
         ) { success, message in
             updateRecorder.success = success
@@ -877,6 +882,120 @@ final class BrokerStoreTests: XCTestCase {
         XCTAssertFalse(store.canUpdateCollectorSettings)
         XCTAssertEqual(store.collectorSettings?.intervalSeconds, 10)
         XCTAssertEqual(store.collectorSettings?.allowedIntervals, [5, 10, 30])
+    }
+
+    func testMCPEntryRecordAcceptsResolvedEntryAndRejectsContradictoryPayload() throws {
+        let available = try XCTUnwrap(MCPEntryRecord(raw: [
+            "available": true,
+            "command": "/opt/serverpilot/bin/serverpilot-mcp",
+            "mcpServers": [
+                "serverpilot": [
+                    "command": "/opt/serverpilot/bin/serverpilot-mcp",
+                    "env": ["SERVERPILOT_URL": "http://127.0.0.1:8787"],
+                ]
+            ],
+        ]))
+        XCTAssertTrue(available.available)
+        XCTAssertEqual(available.command, "/opt/serverpilot/bin/serverpilot-mcp")
+        XCTAssertNotNil(available.configJSON)
+        XCTAssertTrue(available.configJSON?.contains("\"mcpServers\"") == true)
+        XCTAssertTrue(available.configJSON?.contains("/opt/serverpilot/bin/serverpilot-mcp") == true)
+        XCTAssertTrue(available.configJSON?.contains("SERVERPILOT_URL") == true)
+
+        XCTAssertNil(MCPEntryRecord(raw: [
+            "available": true,
+            "command": "/opt/serverpilot/bin/serverpilot-mcp",
+        ]))
+        XCTAssertNil(MCPEntryRecord(raw: [
+            "available": false,
+            "command": "/opt/serverpilot/bin/serverpilot-mcp",
+            "mcpServers": NSNull(),
+            "hint": "cannot find serverpilot-mcp",
+        ]))
+    }
+
+    func testMCPEntryReadsAbsolutePathAndPasteableConfig() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StateRouteURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let snapshot = try Self.snapshot(named: "1")
+        let store = BrokerStore(
+            actorID: "tester",
+            refreshTimeoutSeconds: 1,
+            refreshIntervalSeconds: 0,
+            mutationSession: session
+        )
+        defer { StateRouteURLProtocol.reset() }
+        store.connectForTesting(
+            snapshotClient: ScriptedClient(results: [.success(snapshot)]),
+            serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: ["mcp_entry"]),
+            baseURL: URL(string: "http://broker.test/")!
+        )
+        try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
+
+        StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
+            "data": [
+                "available": true,
+                "command": "/opt/serverpilot/bin/serverpilot-mcp",
+                "mcpServers": [
+                    "serverpilot": [
+                        "command": "/opt/serverpilot/bin/serverpilot-mcp",
+                        "env": ["SERVERPILOT_URL": "http://127.0.0.1:8787"],
+                    ]
+                ],
+                "hint": NSNull(),
+            ]
+        ])
+        store.requestMcpEntry()
+        try await waitUntil { store.mcpEntry?.available == true }
+        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "GET")
+        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/mcp-entry")
+        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor"), "tester")
+        XCTAssertEqual(store.mcpEntry?.command, "/opt/serverpilot/bin/serverpilot-mcp")
+        XCTAssertTrue(store.mcpEntry?.configJSON?.contains("\"mcpServers\"") == true)
+    }
+
+    func testMCPEntryUnavailablePayloadDoesNotInventAPath() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StateRouteURLProtocol.self]
+        let session = URLSession(configuration: configuration)
+        let snapshot = try Self.snapshot(named: "1")
+        let store = BrokerStore(
+            actorID: "tester",
+            refreshTimeoutSeconds: 1,
+            refreshIntervalSeconds: 0,
+            mutationSession: session
+        )
+        defer { StateRouteURLProtocol.reset() }
+        store.connectForTesting(
+            snapshotClient: ScriptedClient(results: [.success(snapshot)]),
+            serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: ["mcp_entry"]),
+            baseURL: URL(string: "http://broker.test/")!
+        )
+        try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
+
+        StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
+            "data": [
+                "available": false,
+                "command": NSNull(),
+                "mcpServers": NSNull(),
+                "hint": "cannot find serverpilot-mcp; install this project with `uv tool install --force .` or use the packaged desktop archive",
+            ]
+        ])
+        store.requestMcpEntry()
+        try await waitUntil { store.mcpEntry != nil }
+        XCTAssertEqual(store.mcpEntry?.available, false)
+        XCTAssertNil(store.mcpEntry?.command)
+        XCTAssertNil(store.mcpEntry?.configJSON)
+        XCTAssertTrue(store.mcpEntry?.hint?.contains("uv tool install") == true)
+    }
+
+    func testMCPEntryStaysHiddenInFixtureMode() throws {
+        let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
+        store.useFixture(snapshot: try Self.snapshot(named: "1"))
+
+        XCTAssertFalse(store.supportsMcpEntry)
+        XCTAssertNil(store.mcpEntry)
     }
 
     func testEndpointAndControlPlaneMutationsStayAvailableWhenOneEndpointHasOldTelemetry() async throws {

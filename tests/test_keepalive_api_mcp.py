@@ -6,22 +6,19 @@ import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-import pytest
-import yaml
 import httpx
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from serverpilot import API_CAPABILITIES
-from serverpilot import mcp_server
+from serverpilot import API_CAPABILITIES, mcp_server
 from serverpilot.adapters import AdapterCommandError
 from serverpilot.api import (
     _keepalive_adapter_failure_code,
     _public_error_message,
     _public_keepalive_result,
-    create_app,
 )
-from serverpilot.config import InventoryConfig, Settings
+from serverpilot.config import InventoryConfig
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_WORKER_MARKER,
     KeepaliveAttestationResponse,
@@ -33,8 +30,7 @@ from serverpilot.mcp_server import mcp
 from serverpilot.models import Lease
 from serverpilot.schemas import LeaseObservedBind, RequestCreate
 from serverpilot.service import BrokerError
-from tests.helpers import observation, process_for_gpu
-
+from tests.helpers import observation, process_for_gpu, tools
 
 GPU_UUIDS = (
     "GPU-00000000-0000-0000-0000-000000000001",
@@ -345,7 +341,7 @@ class WorkloadConflictCollector(FakeTargetedCollector):
 
 
 def _keepalive_app(
-    tmp_path: Path,
+    build_app,
     inventory: InventoryConfig,
     *,
     adapter: FakeKeepaliveAdapter,
@@ -355,21 +351,16 @@ def _keepalive_app(
     configured.collector.enabled = False
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].expected_gpu_count = len(collector.gpu_uuids)
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(configured.model_dump(mode="json")), encoding="utf-8")
     resolved: list[str] = []
 
     def resolve(adapter_id: str):  # type: ignore[no-untyped-def]
         resolved.append(adapter_id)
         return adapter
 
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'keepalive-api.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="k" * 32,
-        ),
-        collector=collector,  # type: ignore[arg-type]
+    app = build_app(
+        "keepalive-api",
+        inventory_config=configured,
+        collector=collector,
         keepalive_adapter_resolver=resolve,
     )
     app.state.service.ingest_observation(
@@ -388,11 +379,11 @@ def _headers(key: str) -> dict[str, str]:
 
 
 def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, resolved = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, resolved = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -445,7 +436,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
 
 
 def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcile(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = True
@@ -455,18 +446,13 @@ def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcil
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].keepalive_policy = "idle_keepalive"
     configured.endpoints[0].expected_gpu_count = 1
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(configured.model_dump_json(), encoding="utf-8")
     adapter = BlockingKeepaliveAdapter()
     collector = PeriodicFakeCollector()
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'periodic-collector.sqlite3'}",
-            inventory_path=inventory_path,
-            project_root=Path(__file__).resolve().parents[1],
-            session_secret="test-secret",
-        ),
-        collector=collector,  # type: ignore[arg-type]
+    app = build_app(
+        "periodic-collector",
+        inventory_config=configured,
+        project_root=Path(__file__).resolve().parents[1],
+        collector=collector,
         keepalive_adapter_resolver=lambda _adapter_id: adapter,
     )
 
@@ -485,11 +471,11 @@ def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcil
 
 
 def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = BlockingKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     async def scenario() -> tuple[httpx.Response, httpx.Response]:
         transport = httpx.ASGITransport(app=app)
@@ -528,7 +514,7 @@ def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
 
 
 def test_periodic_collection_starts_four_endpoints_together_with_existing_limit(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = True
@@ -544,17 +530,12 @@ def test_periodic_collection_starts_four_endpoints_together_with_existing_limit(
         )
         for suffix in ("a", "b", "c", "d")
     ]
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(configured.model_dump_json(), encoding="utf-8")
     collector = SchedulingCollector()
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'parallel-collector.sqlite3'}",
-            inventory_path=inventory_path,
-            project_root=Path(__file__).resolve().parents[1],
-            session_secret="test-secret",
-        ),
-        collector=collector,  # type: ignore[arg-type]
+    app = build_app(
+        "parallel-collector",
+        inventory_config=configured,
+        project_root=Path(__file__).resolve().parents[1],
+        collector=collector,
     )
 
     with TestClient(app):
@@ -568,7 +549,7 @@ def test_periodic_collection_starts_four_endpoints_together_with_existing_limit(
 
 
 def test_shutdown_waits_for_inflight_start_cleanup_without_leaving_ownership(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = True
@@ -578,18 +559,13 @@ def test_shutdown_waits_for_inflight_start_cleanup_without_leaving_ownership(
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].keepalive_policy = "idle_keepalive"
     configured.endpoints[0].expected_gpu_count = 1
-    inventory_path = tmp_path / "shutdown-inflight-inventory.yaml"
-    inventory_path.write_text(configured.model_dump_json(), encoding="utf-8")
     adapter = BlockingKeepaliveAdapter()
     collector = PeriodicFakeCollector()
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'shutdown-inflight.sqlite3'}",
-            inventory_path=inventory_path,
-            project_root=Path(__file__).resolve().parents[1],
-            session_secret="test-secret",
-        ),
-        collector=collector,  # type: ignore[arg-type]
+    app = build_app(
+        "shutdown-inflight",
+        inventory_config=configured,
+        project_root=Path(__file__).resolve().parents[1],
+        collector=collector,
         keepalive_adapter_resolver=lambda _adapter_id: adapter,
     )
     client = TestClient(app)
@@ -631,11 +607,11 @@ def test_shutdown_waits_for_inflight_start_cleanup_without_leaving_ownership(
 
 
 def test_keepalive_api_starts_sibling_when_one_gpu_has_workload_conflict(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     claimed = service.create_request(
@@ -703,11 +679,11 @@ def test_keepalive_api_starts_sibling_when_one_gpu_has_workload_conflict(
 
 
 def test_keepalive_api_disable_without_managed_coverage_never_targets_foreign_gpu(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[0],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -722,11 +698,11 @@ def test_keepalive_api_disable_without_managed_coverage_never_targets_foreign_gp
 
 
 def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -767,11 +743,11 @@ def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
 
 
 def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertain(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = PartiallyFailingStopAdapter(GPU_UUIDS[1])
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -801,11 +777,11 @@ def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertai
 
 
 def test_keepalive_api_missing_endpoint_does_not_resolve_adapter_or_collect(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
         "/api/v1/endpoints/missing/keepalive",
@@ -819,11 +795,11 @@ def test_keepalive_api_missing_endpoint_does_not_resolve_adapter_or_collect(
 
 
 def test_keepalive_api_strict_body_and_mutation_headers(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     path = "/api/v1/endpoints/endpoint-a/keepalive"
     assert client.post(path, json={"enabled": True}).status_code == 422
@@ -846,7 +822,7 @@ def test_keepalive_api_strict_body_and_mutation_headers(
 
 @pytest.mark.parametrize("failure_kind", ["adapter", "collector"])
 def test_keepalive_api_failures_are_reported_as_errors(
-    tmp_path: Path, inventory: InventoryConfig, failure_kind: str
+    build_app, inventory: InventoryConfig, failure_kind: str
 ) -> None:
     adapter = FakeKeepaliveAdapter(
         failure=AdapterCommandError("remote secret", uncertain=True)
@@ -854,7 +830,7 @@ def test_keepalive_api_failures_are_reported_as_errors(
         else None
     )
     collector = FakeTargetedCollector(adapter, fail=failure_kind == "collector")
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -877,7 +853,7 @@ def test_keepalive_api_failures_are_reported_as_errors(
 
 
 def test_incompatible_helper_is_reported_without_cleanup_mutation(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter(
         failure=AdapterCommandError(
@@ -886,7 +862,7 @@ def test_incompatible_helper_is_reported_without_cleanup_mutation(
         )
     )
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -905,7 +881,7 @@ def test_incompatible_helper_is_reported_without_cleanup_mutation(
 
 
 def test_incompatible_helper_on_stop_is_not_collapsed_to_partial_stop(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     class StopIncompatibleAdapter(FakeKeepaliveAdapter):
         async def set_enabled(  # type: ignore[no-untyped-def]
@@ -921,7 +897,7 @@ def test_incompatible_helper_on_stop_is_not_collapsed_to_partial_stop(
 
     adapter = StopIncompatibleAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -946,7 +922,7 @@ def test_incompatible_helper_on_stop_is_not_collapsed_to_partial_stop(
 
 
 def test_keepalive_api_reports_known_cuda_worker_failure_in_chinese_without_remote_stderr(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     class CudaStartFailingAdapter(FakeKeepaliveAdapter):
         async def set_enabled(  # type: ignore[no-untyped-def]
@@ -964,7 +940,7 @@ def test_keepalive_api_reports_known_cuda_worker_failure_in_chinese_without_remo
 
     adapter = CudaStartFailingAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -1067,11 +1043,11 @@ def test_keepalive_public_protocol_rejects_unknown_values(field: str, value: str
 
 
 def test_keepalive_api_exposes_public_reconcile_hook(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -1088,11 +1064,11 @@ def test_keepalive_api_exposes_public_reconcile_hook(
 
 
 def test_keepalive_reconcile_starts_eight_gpus_with_one_helper_call_and_collection(
-    tmp_path: Path, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
+    build_app, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, gpu_uuids=EIGHT_GPU_UUIDS)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -1131,11 +1107,11 @@ def test_keepalive_reconcile_starts_eight_gpus_with_one_helper_call_and_collecti
 
 
 def test_batch_activation_conflict_on_second_gpu_cleans_all_helpers_and_adds_no_keepalive(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = WorkloadConflictCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -1165,11 +1141,11 @@ def test_batch_activation_conflict_on_second_gpu_cleans_all_helpers_and_adds_no_
 
 
 def test_unexpected_mid_transaction_activation_failure_cleans_batch_and_rolls_back(
-    tmp_path: Path, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
+    build_app, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -1212,11 +1188,11 @@ def test_unexpected_mid_transaction_activation_failure_cleans_batch_and_rolls_ba
 
 
 def test_partial_batch_start_cleans_all_eight_gpus_with_no_keepalive_lease(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = PartiallyStartingBatchAdapter()
     collector = FakeTargetedCollector(adapter, gpu_uuids=EIGHT_GPU_UUIDS)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     service = app.state.service
     actor = service.local_actor("agent-a")
     service.configure_keepalive_policy(
@@ -1243,11 +1219,11 @@ def test_partial_batch_start_cleans_all_eight_gpus_with_no_keepalive_lease(
 
 
 def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1334,11 +1310,11 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
 
 
 def test_immediate_claim_stop_failure_does_not_create_workload_lease(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = PartiallyFailingStopAdapter(GPU_UUIDS[0])
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1372,11 +1348,11 @@ def test_immediate_claim_stop_failure_does_not_create_workload_lease(
 
 
 def test_missing_keeper_is_still_publicly_available_and_claimable(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1431,11 +1407,11 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
 
 
 def test_quick_claim_uses_the_same_selected_keeper_handoff(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1474,11 +1450,11 @@ def test_quick_claim_uses_the_same_selected_keeper_handoff(
 
 
 def test_release_restores_the_selected_keeper_on_the_next_collection(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1534,11 +1510,11 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
 
 
 def test_routine_agent_path_handles_keepalive_on_and_off(
-    tmp_path: Path, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
+    build_app, inventory: InventoryConfig, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     rest = TestClient(app)
     headers = {"X-ServerPilot-Actor": "agent"}
 
@@ -1567,13 +1543,13 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
         headers=_headers("agent-path-on"),
     )
     assert enabled.status_code == 200, enabled.text
-    status_on = mcp_server.gpu_status()
+    status_on = tools.gpu_status()
     assert len(status_on["gpus"]) == len(GPU_UUIDS)
     # Keepalive is how ServerPilot holds an idle card for itself.  A routine
     # caller can act only on whether the card can be claimed, so the mechanism
     # never reaches it: one status, no keepalive field, no telemetry carrying
     # the hold.
-    assert {gpu["status"] for gpu in status_on["gpus"]} == {"可用"}
+    assert {gpu["status"] for gpu in status_on["gpus"]} == {"available"}
     assert all("keepalive" not in gpu and "telemetry" not in gpu for gpu in status_on["gpus"])
 
     # Simulate the exact production failure: the workload has already been
@@ -1595,10 +1571,10 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
         await collector.collect_once(app.state.service, endpoints=[endpoint])
 
     asyncio.run(collect_restarted_workers())
-    unavailable = mcp_server.gpu_status()
+    unavailable = tools.gpu_status()
     assert unavailable["gpus"] == []
     assert unavailable["no_capacity"]["reason"] == "all_gpus_busy_or_unavailable"
-    assert {gpu["status"] for gpu in unavailable["busy_gpus"]} == {"占卡校验失败，暂不可申请"}
+    assert {gpu["status"] for gpu in unavailable["busy_gpus"]} == {"ownership_conflict"}
     assert len(unavailable["busy_gpus"]) == len(GPU_UUIDS)
 
     async def recover_restarted_workers() -> None:
@@ -1611,11 +1587,11 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     asyncio.run(recover_restarted_workers())
     assert adapter.calls == calls_before_recovery
     assert adapter.attest_calls[-1] == ("endpoint-a", GPU_UUIDS)
-    recovered_status = mcp_server.gpu_status()
+    recovered_status = tools.gpu_status()
     assert len(recovered_status["gpus"]) == len(GPU_UUIDS)
-    assert {gpu["status"] for gpu in recovered_status["gpus"]} == {"可用"}
+    assert {gpu["status"] for gpu in recovered_status["gpus"]} == {"available"}
 
-    allocation_on = mcp_server.gpu_apply(
+    allocation_on = tools.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡开启申请验收"
     )
     assert len(allocation_on["gpus"]) == 1
@@ -1624,7 +1600,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     selected_uuid = allocation_on["gpus"][0]["gpu_id"]
     assert selected_uuid not in adapter.active_pids
     assert len(adapter.active_pids) == len(GPU_UUIDS) - 1
-    mcp_server.gpu_release(allocation_on["lease_id"])
+    tools.gpu_release(allocation_on["lease_id"])
 
     async def restore_then_disable() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
@@ -1648,29 +1624,29 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
         headers=_headers("agent-path-off"),
     )
     assert disabled.status_code == 200, disabled.text
-    status_off = mcp_server.gpu_status()
+    status_off = tools.gpu_status()
     assert len(status_off["gpus"]) == len(GPU_UUIDS)
     # Turning the policy off changes nothing a routine caller can see: the card
     # was claimable before and is claimable now.
-    assert {gpu["status"] for gpu in status_off["gpus"]} == {"可用"}
+    assert {gpu["status"] for gpu in status_off["gpus"]} == {"available"}
     assert all("keepalive" not in gpu for gpu in status_off["gpus"])
 
-    allocation_off = mcp_server.gpu_apply(
+    allocation_off = tools.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡关闭申请验收"
     )
     assert len(allocation_off["gpus"]) == 1
     assert adapter.active_pids == {}
-    mcp_server.gpu_release(allocation_off["lease_id"])
+    tools.gpu_release(allocation_off["lease_id"])
 
 
 def test_keepalive_recovery_rejects_mismatched_helper_attestation(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     """A collector process is not enough to re-adopt a keeper after restart."""
 
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     enabled = client.post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -1705,13 +1681,13 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
 
 
 def test_keepalive_recovery_never_adopts_additional_foreign_processes(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     """A verified keeper plus any extra process remains fail-closed."""
 
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     enabled = client.post(
         "/api/v1/endpoints/endpoint-a/keepalive",
@@ -1746,11 +1722,11 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
 
 
 def test_restart_preserves_keepalive_ownership_without_remote_churn(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    first_app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    first_app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     first_client = TestClient(first_app)
 
     enabled = first_client.post(
@@ -1768,7 +1744,7 @@ def test_restart_preserves_keepalive_ownership_without_remote_churn(
             ).all()
         )
 
-    restarted_app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    restarted_app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     reconciled = asyncio.run(
         restarted_app.state.reconcile_endpoint_keepalive(
@@ -1792,11 +1768,11 @@ def test_restart_preserves_keepalive_ownership_without_remote_churn(
 
 
 def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
 
     enabled = client.post(
@@ -1842,11 +1818,11 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
 
 
 def test_profile_claim_reclaims_only_its_selected_verified_keeper_gpu(
-    tmp_path: Path, inventory: InventoryConfig
+    build_app, inventory: InventoryConfig
 ) -> None:
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(tmp_path, inventory, adapter=adapter, collector=collector)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     service = app.state.service
 
@@ -1913,8 +1889,8 @@ def test_profile_claim_reclaims_only_its_selected_verified_keeper_gpu(
 
 def test_keepalive_capability_and_mcp_schema_and_delegation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     assert "endpoint_keepalive" in API_CAPABILITIES
-    tools = asyncio.run(mcp.list_tools())
-    tool = next(item for item in tools if item.name == "gpu_set_keepalive")
+    listed = asyncio.run(mcp.list_tools())
+    tool = next(item for item in listed if item.name == "gpu_set_keepalive")
     assert set(tool.inputSchema["required"]) == {
         "agent_name",
         "server_id",
@@ -1938,10 +1914,10 @@ def test_keepalive_capability_and_mcp_schema_and_delegation(monkeypatch) -> None
 
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
     with pytest.raises(ValueError, match="approval_ref"):
-        mcp_server.gpu_set_keepalive("agent", "endpoint-a", True, "", "stable")
+        tools.gpu_set_keepalive("agent", "endpoint-a", True, "", "stable")
     with pytest.raises(ValueError, match="idempotency_key"):
-        mcp_server.gpu_set_keepalive("agent", "endpoint-a", True, "approved", "")
-    result = mcp_server.gpu_set_keepalive(
+        tools.gpu_set_keepalive("agent", "endpoint-a", True, "approved", "")
+    result = tools.gpu_set_keepalive(
         "agent", "endpoint-a", False, "approved-task", "stable-key"
     )
     assert result["keepalive"]["enabled"] is False
@@ -1953,9 +1929,11 @@ def test_keepalive_capability_and_mcp_schema_and_delegation(monkeypatch) -> None
         )
     ]
     instructions = mcp_server.MCP_INSTRUCTIONS.lower()
-    assert "常规 gpu 任务" in instructions
-    assert "serverpilot 占卡" in instructions
-    assert "分配前会停" in instructions
+    assert "three tools cover routine gpu work" in instructions
+    assert "serverpilot's own hold" in instructions
+    assert "stopped before allocation" in instructions
+    assert "workspace.path (workspace_path)=the cwd to enter" in instructions
+    # The field name matters: an agent that is not told about code_location
+    # reads workspace_path as a checkout and starts looking for source there.
     assert "code_location=not_provided" in instructions
-    assert "不得把 workspace_path 当代码仓库路径" in instructions
-    assert "以它为工作目录" in instructions
+    assert "never a code repository" in instructions

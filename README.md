@@ -5,16 +5,17 @@
 <h1 align="center">ServerPilot</h1>
 
 <p align="center">
-  <strong>Agent 自己拿卡，人类实时监控。</strong><br>
-  MCP for Agent · Native Desktop Apps · Open Source
+  <strong>Agents take their own GPUs. You watch the whole fleet.</strong><br>
+  MCP for agents · Native desktop apps · Open source
 </p>
 
 <p align="center">
-  <a href="#-核心功能">核心功能</a> ·
-  <a href="#-快速开始">快速开始</a> ·
-  <a href="#-agent-用法">Agent 用法</a> ·
-  <a href="#-边界与安全">边界与安全</a> ·
-  <a href="#-文档">文档</a>
+  <a href="https://github.com/JinPLu/ServerPilot/blob/master/README.zh-CN.md">中文</a> ·
+  <a href="#-what-it-does">What it does</a> ·
+  <a href="#-quick-start">Quick start</a> ·
+  <a href="#-how-an-agent-uses-it">Agent usage</a> ·
+  <a href="#-boundaries-and-security">Boundaries</a> ·
+  <a href="#-documentation">Docs</a>
 </p>
 
 <p align="center">
@@ -22,59 +23,93 @@
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
   <img src="https://img.shields.io/badge/Windows-native%20App-147AF3?logo=windows&logoColor=white" alt="Native Windows App">
   <img src="https://img.shields.io/badge/MCP-3%20routine%20tools-7C3AED" alt="Three routine MCP tools">
-  <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
+  <a href="https://github.com/JinPLu/ServerPilot/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
 
 <p align="center">
-  <img src="docs/assets/serverpilot-workflow-cartoon.png" width="960" alt="ServerPilot：将零散 GPU 汇总为可供 Agent 协作的资源池，并由人类监控">
+  <img src="docs/assets/serverpilot-workflow-cartoon.png" width="960" alt="ServerPilot gathers scattered GPUs into a pool agents can coordinate over, with a human watching">
 </p>
 
-<p align="center"><sub>概念示意图，不代表真实资源状态或 App 页面。</sub></p>
+<p align="center"><sub>Illustration only; not a real resource state or app screen.</sub></p>
 
-> 🤖 Agent 会写代码、跑实验了，GPU 还需要一张张指定吗？
+> Your agents write code and run experiments on their own. Are you still handing
+> them GPUs one card at a time?
 
-对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还。对人，它是一个 macOS 或 Windows App：看多台服务器的空闲、占用、任务和异常。
+To an agent, ServerPilot is an MCP server: look at cards, take some, give them
+back. To you, it is a macOS or Windows app showing what is free, what is busy,
+whose job is where, and what is failing across every server you registered.
 
-一个本机用户，管理多台服务器与协作 Agent；资源状态、申请和人工纠错始终围绕同一份本机控制面快照。
+One local user, several servers, several agents. Resource state, requests, and
+human correction all read the same committed snapshot from one local control
+plane.
 
-| 核心价值 | ServerPilot 提供什么 |
+| What it gives you | How |
 | --- | --- |
-| 统一资源事实 | GUI、CLI 和 MCP 共用 daemon 的已提交快照，不再分别推算或采集状态。 |
-| Agent 三步闭环 | Agent 通过 `gpu_status → gpu_apply → gpu_release` 完成日常 GPU 协调。 |
-| 人类实时监控 | 人可以查看服务器、任务、归属和异常，并在需要时执行受限纠错。 |
-| 逐卡空闲占卡 | 可选的 keepalive 只让出被申请的卡，用后按策略恢复，不影响同机其它卡。 |
+| One source of truth | The GUI, the CLI, and MCP all read the daemon's committed snapshot instead of each deriving state. |
+| A three-step loop for agents | `gpu_status → gpu_apply → gpu_release` covers routine coordination. |
+| A view for humans | Servers, tasks, ownership, and failures, with bounded manual correction when something is wrong. |
+| Per-card idle holding | Optional keepalive yields only the card being requested and restores the rest. |
 
-## ✨ 核心功能
+## ✨ What it does
 
-### 🛰️ 人类实时监控：多台服务器，一张图
+### 🛰️ One picture of every server
 
-按设置的采集间隔更新服务器状态；GPU 空闲、占用、任务归属和采集异常，都在 App 里直接看。
+Server state refreshes on the collection interval you set. Free cards, busy
+cards, which task owns what, and collector failures are all visible in the app.
 
-### 🧩 Agent 自主调度：有空卡，Agent 自己领
+### 🧩 Agents allocate for themselves
 
-默认 MCP 只有三个日常工具：
+The default MCP surface is three tools:
 
-- 🔍 `gpu_status`：查看可用 GPU 及最近显存、利用率遥测
-- 🔑 `gpu_apply`：申请 GPU
-- ♻️ `gpu_release`：明确归还
+- 🔍 `gpu_status` — what is allocatable, what is busy and to whom, and telemetry
+  for cards you already hold
+- 🔑 `gpu_apply` — take GPUs
+- ♻️ `gpu_release` — give them back
 
-申请成功后，Agent 会拿到 SSH 连接、远端工作目录、CUDA selector 和 `lease_id`，不用再猜服务器、目录或 GPU 编号。
+A successful request returns the SSH connection, the remote working directory,
+a CUDA selector, and a `lease_id`, so an agent never has to guess a server, a
+directory, or a GPU index.
 
-### 🛠️ 人类纠错反馈：平时不打扰，需要时再纠正
+### 🛠️ You step in only when something is wrong
 
-Agent 正常干活时，人只看全局。发现归属不对、连接异常或遗留占用，再人工确认和纠正；可处理遗留租约，或在保持卡数不变的前提下改派 GPU。
+While agents work normally you only watch. When ownership looks wrong, a
+connection fails, or a hold is left behind, you confirm and correct it: settle a
+stale lease, or move a task to different GPUs while keeping the card count.
 
-### 🐶 一个小彩蛋：空闲 GPU，先占着（可选）
+### 🐶 Optional: hold idle GPUs so nobody else takes them
 
-逐卡 keepalive 可让确认空闲的 GPU 按策略保持待命。Agent 申请时只让出目标卡，用完归还后再恢复待命，不影响同机其他 GPU。
+Per-card keepalive can keep confirmed-idle GPUs on standby. When an agent
+requests one, only that card is yielded, and it returns to standby after
+release. Other cards on the same machine are untouched.
 
-只用于你有管理权限的服务器，不碰未知或他人正在运行的任务。
+Use it only on servers you administer. It never touches an unknown process or
+someone else's running job.
 
-## 🚀 快速开始
+Keepalive workers run detached from the control plane. If the control plane
+stops, those GPUs stay occupied until it comes back and reconciles, or until
+someone stops them. There is no automatic release on shutdown.
 
-从源码启动需要 [Python 3.12+](https://www.python.org/)、[uv](https://docs.astral.sh/uv/) 和 macOS 或 Windows。Windows 用户也可以直接下载下方的桌面 App，无需预先安装 Python 或 uv。
+When the control plane is unreachable, these commands put things back. None of
+them needs the daemon to be running. They act on the macOS control plane's data
+directory, so they do not apply to a Windows install:
 
-### 1. 🧰 启动本机控制面
+```bash
+serverpilot keepalive inspect --endpoint <server-id>   # what is still holding cards
+serverpilot keepalive stop --endpoint <server-id>      # stop it and free them
+serverpilot daemon reclaim                             # take port 8787 back
+```
+
+`daemon reclaim` only resolves the case where a ServerPilot service answers on
+8787 without launchd owning it; when the daemon is properly owned it does
+nothing. The port-ownership error names the holding process and its command
+line.
+
+## 🚀 Quick start
+
+### 1. 🧰 Start the local control plane
+
+**macOS**, from source, with [Python 3.12+](https://www.python.org/) and
+[uv](https://docs.astral.sh/uv/):
 
 ```bash
 git clone https://github.com/JinPLu/ServerPilot.git
@@ -84,52 +119,124 @@ serverpilot daemon install --source-root "$PWD"
 serverpilot daemon status
 ```
 
-服务默认监听 `http://127.0.0.1:8787`。
+`daemon install` registers a user LaunchAgent and is macOS-only.
 
-### 2. 🖥️ 登记你的 GPU 服务器
+**Windows**: download the desktop app under [The desktop app](#-the-desktop-app)
+below. It carries its own Python and starts the control plane itself, so there
+is nothing to install first. To run from source instead, use
+`serverpilot serve --db <path> --inventory <path>` and keep that process
+running; there is no supervised install on Windows yet.
 
-在有管理权限的服务器部署同版本采集入口，并保证非交互 SSH 可以执行：
+Either way it listens on `http://127.0.0.1:8787`.
 
-```text
-serverpilot-collect --schema-version 2
-```
+### 2. 🖥️ Register your GPU servers
 
-在 App 中添加 SSH 连接和绝对远端工作目录。新鲜采集成功后，GPU 才进入可申请状态。详细要求见[服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)。
-
-### 3. 🤖 接入 Agent
-
-以 Codex 为例：
+ServerPilot reads a server only through one fixed command, so that command has
+to exist there first. On each Linux GPU server you administer, install the same
+version of this package for the user you will SSH in as:
 
 ```bash
-codex mcp add serverpilot \
-  --env SERVERPILOT_URL=http://127.0.0.1:8787 \
-  -- serverpilot-mcp
+# ServerPilot is not on PyPI; install the same tag you run locally.
+uv tool install --force "git+https://github.com/JinPLu/ServerPilot.git@v1.8.0"
+serverpilot-collect --schema-version 2       # must print JSON
+```
+
+The version must match your control plane, and the entry point must be on the
+`PATH` of a **non-interactive** SSH session. That is the check that matters:
+
+```bash
+ssh user@host serverpilot-collect --schema-version 2
+```
+
+A `PATH` set up only for login shells is the usual reason this step looks fine
+when you SSH in by hand and then fails from the control plane.
+
+Then add the SSH connection and an absolute remote working directory in the app.
+A GPU becomes allocatable only after a fresh collection succeeds. The full
+protocol, including what the output must contain, is in the
+[collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md) (Chinese).
+
+Do not register a shared scheduler cluster (Slurm, LSF, PBS) as bare metal. Use
+a local plugin to take over observation so only your own jobs are registered,
+and let requests go through an immediate allocation such as `srun --immediate`.
+See [server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md) for the contract and the reference
+implementation.
+
+### 3. 🤖 Connect an agent
+
+```bash
+serverpilot mcp install --client codex     # or claude, cursor
 python3 scripts/install_agent_policy.py codex --install
 ```
 
-Claude Code 与 Cursor 的接入方式见 [Agent / MCP 指南](docs/AGENT_MCP_zh.md)。
+`serverpilot mcp install` registers through each client's own mechanism: Codex
+and Claude Code get their `mcp add`, and Cursor is merged into
+`~/.cursor/mcp.json` without disturbing servers already there.
 
-## 🤖 Agent 用法
+To paste it yourself, `serverpilot mcp config --client all` prints the
+registration without writing anything. The standard block is:
 
-```text
-gpu_status → gpu_apply(task="任务名") → 使用返回的分配 → gpu_release(lease_id)
+```json
+{
+  "mcpServers": {
+    "serverpilot": {
+      "command": "serverpilot-mcp",
+      "env": { "SERVERPILOT_URL": "http://127.0.0.1:8787" }
+    }
+  }
+}
 ```
 
-- Agent 不传 GPU ID，`gpu_apply` 负责选卡。
-- `gpu_status` 的可申请卡只讲容量（`name`、`vram_mib`、`status`），不带遥测：空闲卡上能观测到的负载是 ServerPilot 自己的占卡程序，分配前会被停止，不是这张卡被占用的证据。遥测随租约投影——`gpu_status(lease_id=…)` 才返回 `leased_gpus` 的近 10 分钟均值与 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用于判断自己的任务是否用好了卡。GUI 与 MCP 都读取 daemon 的同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测走各自的 REST 投影。首次只读采集会把端点记录为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，并以说明性的 `cpu_only_servers` 返回给 Agent，但不会参与 GPU 分配。
-- SSH 后先进入返回的 `workspace.path`，再使用 CUDA selector。`workspace.path` 是远端工作目录，不是代码仓库。
-- CUDA 初始化或 workload 启动失败时，立即 `gpu_release`。
-- `no_capacity` 表示不分配、不排队；不要在同一轮反复申请。
+With the Windows desktop app, `serverpilot-mcp` is not on PATH, so use the
+absolute path to `serverpilot-mcp.exe` from the archive. The desktop app
+Settings page shows that resolved path and a pasteable `mcpServers` block —
+copy them rather than reconstructing the command. Full per-client notes
+are in the [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md).
 
-## 🖥️ 打开桌面 App
+## 🤖 How an agent uses it
+
+```text
+gpu_status → gpu_apply(task="my task") → use what it returns → gpu_release(lease_id)
+```
+
+- Agents never pass GPU IDs. `gpu_apply` picks the cards, and one lease always
+  lands on a single server.
+- Allocatable cards report capacity only (`name`, `vram_mib`, `status`) and
+  carry no telemetry. Load observable on a free card comes from ServerPilot's
+  own keepalive hold, which is stopped before the card is handed over, so it is
+  not evidence that the card is busy. Telemetry follows the lease:
+  `gpu_status(lease_id=…)` returns rolling ten-minute averages for
+  `leased_gpus` plus a `lease` summary (`min_memory_free_mib`, `slowest_gpu`)
+  for judging whether your own job is using the cards well.
+- SSH in, `cd` to the returned `workspace.path`, then apply the CUDA selector.
+  That path is a working directory, not a code repository.
+- Release immediately if CUDA fails to initialise or the workload does not
+  start.
+- `no_capacity` means nothing was allocated and nothing was queued. It comes
+  back as data, not as an error, and it is not worth retrying in the same turn.
+
+## 🖥️ The desktop app
+
+The Settings page shows this installation's MCP entry as an absolute path and
+the pasteable `mcpServers` JSON. Copy either into Codex, Claude Code, or
+Cursor. If the executable is missing, the same panel says so and repeats the
+install hint instead of inventing a path.
 
 ### Windows
 
-从 [GitHub Releases](https://github.com/JinPLu/ServerPilot/releases/latest) 下载 `ServerPilot-*-windows-x64.zip`，解压后运行其中的 `ServerPilot.exe`。App 会在 `%LOCALAPPDATA%\ServerPilot` 保存本机 inventory 与控制面状态，启动后直接打开与 macOS 版相同的信息架构：服务器总览、服务器详情、逐 GPU 显存环图和 2×2 资源历史。
+Download `ServerPilot-*-windows-x64.zip` from
+[GitHub Releases](https://github.com/JinPLu/ServerPilot/releases/latest), unpack
+it, and run `ServerPilot.exe`. The `serverpilot-mcp.exe` next to it is the MCP
+entry point for agents: put its absolute path in the `mcpServers` block above.
+No separate Python installation is needed. The app keeps its inventory and
+control-plane state in `%LOCALAPPDATA%\ServerPilot`.
 
-Windows 10/11 需要 Microsoft Edge WebView2 Runtime（多数系统已自带）；缺失时 App 会给出明确提示，不会降级为外部浏览器页面。关闭窗口只停止本次由 App 启动的本机服务；已经在运行的控制面保持不受影响。
+Windows 10 and 11 need the Microsoft Edge WebView2 Runtime, which most systems
+already have. If it is missing the app says so rather than falling back to a
+browser window. Closing the window stops only a control plane this app started;
+one that was already running is left alone.
 
-如需从 Windows 源码构建，可在 PowerShell 中运行：
+To build from source on Windows, in PowerShell:
 
 ```powershell
 .\desktop\build-windows-app.ps1
@@ -142,23 +249,54 @@ zsh desktop/build-macos-app.sh
 open "./ServerPilot.app"
 ```
 
-App 负责看状态、看归属、看异常。人工改派只更新 lease 和 CUDA selector，不迁移正在运行的进程；对应 Agent 需按新 selector 重启 workload。
+The app is for seeing state, ownership, and failures. Manual reassignment
+updates the lease and the CUDA selector; it does not migrate a running process,
+so the agent has to restart its workload against the new selector.
 
-## 🛡️ 边界与安全
+## 🛡️ Boundaries and security
 
-- ServerPilot **只协调 GPU 归属**，不替项目启动、停止、迁移或抢占 workload。
-- 服务器状态只来自固定的只读 SSH 采集入口；不接收任意远端命令，也不提供密码或私钥。
-- 采集过期、连接异常、未知进程或资源冲突时，一律拒绝分配（fail closed）。
-- 控制面默认只监听本机 loopback；GPU UUID 与 endpoint 是资源身份边界。
+- ServerPilot manages the lifecycle of its own occupancy processes and of
+  plugin-side allocations. It does not start, stop, migrate, or preempt your
+  workloads. Keepalive starts and stops a per-GPU CUDA process on the remote
+  host holding about 80% of that card's VRAM, and `gpu_apply` stops it before
+  handing the card over. A plugin that declares `apply` / `release` performs the
+  matching cluster allocation on request and release.
+- Server state comes from fixed collection: a built-in SSH probe, or a local
+  plugin's `observe`. The plugin calling contract is four fixed verbs — `info`,
+  `observe`, `apply`, `release`. No arbitrary remote command is accepted, and no
+  password or private key is provided. See [PLUGINS_zh.md](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md).
+- Stale collection, connection errors, unknown processes, and resource conflicts
+  all refuse allocation locally. That holds for what collection **reports**: the
+  SSH user and the remote `serverpilot-collect` entry point are trusted. A
+  replaced or malicious collector that omits compute processes will make a card
+  look allocatable.
+- The control plane listens on loopback by default. **There is no
+  authentication.** `X-ServerPilot-Actor` is an audit label; any local process
+  can send it, take the `allocator` role, create endpoints, change keepalive
+  policy, claim GPUs, or name another actor and release that actor's leases.
+  Local processes under the same user account are not isolated from each other.
+  GPU UUID and endpoint are the resource identity boundary.
 
-## 📚 文档
+## 📚 Documentation
 
-- [Agent / MCP 指南](docs/AGENT_MCP_zh.md)
-- [服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)
-- [keepalive 与 Adapter](docs/ADAPTERS_zh.md)
-- [当前实现与验证状态](docs/IMPLEMENTATION_STATUS_zh.md)
-- [安全说明](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
+In English:
+
+- [Agent operating rules](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_policy.en.md) — the short contract you
+  can paste into an agent's global rules
+- [Security](https://github.com/JinPLu/ServerPilot/blob/master/SECURITY.md) · [Contributing](https://github.com/JinPLu/ServerPilot/blob/master/CONTRIBUTING.md) · [Code of conduct](https://github.com/JinPLu/ServerPilot/blob/master/CODE_OF_CONDUCT.md) · [Changelog](https://github.com/JinPLu/ServerPilot/blob/master/CHANGELOG.en.md)
+
+In Chinese:
+
+- [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md)
+- [Collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md)
+- [Server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md)
+- [Keepalive and adapters](https://github.com/JinPLu/ServerPilot/blob/master/docs/ADAPTERS_zh.md)
+- [Implementation and verification status](https://github.com/JinPLu/ServerPilot/blob/master/docs/IMPLEMENTATION_STATUS_zh.md)
+
+Reference documentation is currently written in Chinese, and so are the desktop
+app and the descriptions an agent reads over MCP. This README, the changelog,
+and the agent operating rules are the English surfaces today.
 
 ## License
 
-[MIT](LICENSE)
+[MIT](https://github.com/JinPLu/ServerPilot/blob/master/LICENSE)

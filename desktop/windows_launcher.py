@@ -13,9 +13,10 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Any, Callable, Mapping
+from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
 from urllib.request import Request, urlopen
@@ -25,7 +26,6 @@ import uvicorn
 from serverpilot import __version__
 from serverpilot.api import create_app
 from serverpilot.config import Settings
-
 
 APP_NAME = "ServerPilot"
 DATA_DIRECTORY_NAME = "ServerPilot"
@@ -217,6 +217,9 @@ class DesktopBridge:
     def snapshot(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/state")
 
+    def observation_profiles(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/observation-profiles")
+
     def endpoint_history(self, endpoint_id: str, window_seconds: int) -> dict[str, Any]:
         if window_seconds not in {3_600, 21_600, 86_400}:
             return self._invalid("资源历史范围无效。")
@@ -253,6 +256,9 @@ class DesktopBridge:
 
     def collector_settings(self) -> dict[str, Any]:
         return self._request("GET", "/api/v1/settings/collector")
+
+    def mcp_entry(self) -> dict[str, Any]:
+        return self._request("GET", "/api/v1/mcp-entry")
 
     def update_collector_interval(self, interval_seconds: int) -> dict[str, Any]:
         if interval_seconds not in {5, 10, 30}:

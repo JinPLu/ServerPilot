@@ -8,6 +8,7 @@ from alembic import command
 from alembic.config import Config
 from pydantic import ValidationError
 from sqlalchemy import inspect, text
+from sqlalchemy.exc import IntegrityError
 
 from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.database import Database
@@ -347,7 +348,7 @@ def test_0015_upgrades_a_legacy_0014_database(tmp_path: Path) -> None:
     assert "kind" in {column["name"] for column in inspector.get_columns("leases")}
     with database.engine.begin() as connection:
         assert connection.execute(text("SELECT kind FROM leases")).all() == []
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             connection.execute(text("INSERT INTO leases (id, kind) VALUES ('bad', 'arbitrary')"))
 
 
@@ -376,7 +377,7 @@ def test_0019_defaults_endpoint_policy_and_marks_old_keepalive_scope(tmp_path: P
         assert connection.execute(
             text("SELECT id, keepalive_scope FROM leases ORDER BY id")
         ).all() == [("old-keepalive", "legacy_endpoint"), ("ordinary", None)]
-        with pytest.raises(Exception):
+        with pytest.raises(IntegrityError):
             connection.execute(
                 text("INSERT INTO endpoints (id, keepalive_policy) VALUES ('bad', 'always-on')")
             )

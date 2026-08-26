@@ -1,6 +1,9 @@
 """Global, cooperative GPU resource control plane."""
 
-__version__ = "1.8.0"
+# The remote collector and keepalive entrypoints import this package from a
+# plain source tree, where no distribution metadata exists. The literal is the
+# single source; pyproject.toml reads it back out at build time.
+__version__ = "1.9.0"
 SCHEMA_VERSION = "v1"
 
 # Lets an upgraded MCP fail clearly when the loopback service has not yet been
@@ -24,4 +27,6 @@ API_CAPABILITIES = (
     "keepalive_protocol_v3",
     "keepalive_worker_attestation",
     "collector_settings",
+    "observation_profiles",
+    "mcp_entry",
 )

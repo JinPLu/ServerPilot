@@ -9,10 +9,9 @@ classified as ordinary workload leases. No controller, lock, or fence state is
 introduced here.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy import inspect
-
 
 revision = "20260811_0015"
 down_revision = "20260810_0014"

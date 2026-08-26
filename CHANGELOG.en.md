@@ -4,7 +4,27 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 1.9.0 - 2026-08-27
+
+**ServerPilot 1.9.0 lets an agent reach it from a Windows machine and read everything it says, and stops the allocator breaking up your fleet one card at a time.**
+
+- Connecting an agent is one command: `serverpilot mcp install --client codex|claude|cursor` registers through each client's own mechanism, and merges into `~/.cursor/mcp.json` without disturbing servers already there. `serverpilot mcp config` prints the registration instead of writing it, and the README and agent guide now carry the standard `mcpServers` block.
+- The desktop app Settings page now shows this installation's MCP entry as an absolute path and a pasteable `mcpServers` block, so you can copy them into Codex, Claude, or Cursor without reconstructing the command. If the executable is missing, the same panel says so and tells you how to install it.
+- The Windows archive ships `serverpilot-mcp.exe` next to the app. The download previously contained only the GUI, so there was no MCP entry point on the machine at all and the documented registration commands only ever worked from a source install.
+- The MCP instructions, the three tool descriptions, and every value ServerPilot sends back are English. An allocatable card reports `available`; a busy one reports why in a stable code such as `running`, `held_idle`, or `busy_unmanaged`. The desktop app stays in Chinese — the two are separate surfaces now, so changing one no longer disturbs the other.
+- `gpu_apply` takes the server with the fewest free GPUs that can still serve the whole request, and one lease always lands on a single machine. This is the difference between a fleet that keeps working and one that fills with holes: cards used to be taken in alphabetical server order, so a single-card request landed on the first eight-GPU machine, and a few of those left nothing able to start an eight-GPU run. An eight-GPU request could also come back as 5+3 across two machines — useless for a single-node job, while holding all eight away from someone who could use them.
+- `no_capacity` comes back as data rather than an error string, so an agent can tell a full fleet from a broken connection instead of retrying an answer. Releasing a lease that is already released confirms it instead of failing.
+- Shared scheduler clusters register through a local plugin instead of as bare metal. The plugin registers only the cards in your own jobs; `gpu_status` reports cluster headroom as `scheduler_servers` before you request anything, real GPU identities appear after, and idle reclaim cancels the job. A Slurm reference plugin, `slurm-immediate`, ships with the package.
+- A cluster that refused you no longer looks like a cluster that is merely full. A quota refusal, an unreachable scheduler, or a broken plugin reaches you as a failure with its reason, instead of `no_capacity` for an agent to wait out.
+- Two ways a cluster job could be left running are fixed: ServerPilot no longer asks a plugin to allocate again after the cards are already assigned, and on a lease spanning several machines every job is now recorded, so releasing leaves nothing behind. Requesting or releasing cluster resources also no longer blocks everything else — other local work previously waited up to a minute.
+- A cluster job ServerPilot could not cancel while reclaiming an idle lease is now recorded in the audit trail. It used to vanish silently, leaving the job running against your quota with nothing here pointing at it. Releasing a lease yourself still refuses outright rather than reporting a success it did not achieve.
+- When the control plane is unreachable, `serverpilot keepalive inspect` and `serverpilot keepalive stop` report and stop the workers still holding cards, and `serverpilot daemon reclaim` takes the port back. None of them needs the daemon running. The port-ownership error now names the process holding it and its command line instead of only saying the port is foreign.
+- The MCP handshake reports ServerPilot's own version rather than the MCP SDK's, and each tool declares its effect, so a client can tell a read from a lease mutation instead of gating all three the same way.
+- The standalone Windows app can create its database again. The packaged build was dropping the migration scripts, which left a source deployment as the only working option.
+- ServerPilot installs from PyPI. A release refuses to publish when the tag and the package version disagree, or when the wheel is missing its migration scripts or arrives with a bundled plugin that is not executable — a plugin without that bit is invisible to discovery rather than failing loudly.
+- `serverpilot --version` exists.
+- The security documentation matches the implementation: the control plane has no authentication, ServerPilot manages its own occupancy processes and plugin-side allocations but never your workloads, and fail-closed admission trusts the SSH user and the remote collector. Keepalive workers keep holding GPUs after the control plane stops, until it returns and reconciles or someone stops them on the server.
+- A slow or hanging local daemon call no longer stalls every other MCP tool on the same connection, and each tool now advertises a real input schema instead of free-form arguments.
 
 ## 1.8.0 - 2026-08-24
 
@@ -12,7 +32,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 - `gpu_status` now answers three questions in three groups: an allocatable card reports capacity only (model, VRAM, available), a busy card reports who holds it, and telemetry appears only on cards the caller holds. Free cards used to carry telemetry too — and every bit of load observable on a free card comes from ServerPilot's own keepalive hold (80% of VRAM, released only when the card is actually allocated), so a machine with eight free cards read as eight-tenths full and an agent that checked availability against it concluded there was nothing to claim.
 - New `gpu_status(lease_id=…)` returns your own lease: per-GPU rolling ten-minute averages and the latest sample, plus a lease summary — average utilisation, the smallest free VRAM across the lease, and on multi-GPU leases the utilisation spread and the card lagging behind. These are the numbers behind "is my job using these cards well, can I raise the batch size, is one card holding the rest back"; a card you held previously fell into the compact `busy_gpus` list with nothing but its task name.
-- `gpu_status` no longer takes `include_busy`: busy cards always come back in `busy_gpus` with their task, and your own cards come from `lease_id`. Allocatable cards report one status, "available", instead of exposing keepalive's internal variants. A `gpu_status` response for an eight-GPU machine went from 5,957 to 1,749 bytes.
+- `gpu_status` no longer takes `include_busy`: busy cards always come back in `busy_gpus` with their task, and your own cards come from `lease_id`. Allocatable cards report a single status instead of exposing keepalive's internal variants. A `gpu_status` response for an eight-GPU machine went from 5,957 to 1,749 bytes.
 
 ## 1.7.0 - 2026-08-23
 
@@ -23,7 +43,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 - Column headers are the sort controls: click one to sort by it, click again to reverse, and the active column darkens and carries an arrow. The headers now have accessibility names too, so screen readers no longer meet a row of unnamed buttons.
 - Rows no longer print the absence of a task, and a host with no GPUs shows its core count and total memory where a GPU model would go — that is what that machine actually is.
 - Idle reclaim is now per GPU: a claim that takes eight cards and uses one returns the other seven individually as each idle window elapses, while the working card keeps its claim. Previously a single running process protected every other GPU in the same claim.
-- CPU cores, total memory, peak temperature, absolute VRAM and the full remote workspace path move into a new "host" card in the detail sheet. The workspace path could only ever render as `…Data/tmp/ljp` in a row, which carries no information; all of it also stays in the row's tooltip.
+- CPU cores, total memory, peak temperature, absolute VRAM and the full remote workspace path move into a new "host" card in the detail sheet. The workspace path could only ever render as `…workspace/tmp/user` in a row, which carries no information; all of it also stays in the row's tooltip.
 - The usage and settings pages now speak the same card language as the servers page: a group of facts sits in one white card, rows are separated by hairlines instead of each carrying its own fill and border. Usage detail gains a "resource total" card, and settings gains a "data state" card (connection, snapshot freshness and revision, server / GPU / lease counts, and whether resource changes can run).
 - The server detail sheet drops its translucent material for the same plane as every other page, and the per-GPU grid's minimum column width now fits its whole contents, so mid-word truncations like `4 / 8…`, `32 / …` and `task: …` are gone.
 - Turning on the system Increase Contrast setting now actually changes the interface: cards gain an outline, hairlines deepen, status colours re-solve to 7:1, and bar tracks darken — applied immediately, with no restart.
@@ -107,14 +127,10 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## 1.5.5 - 2026-08-14
 
-**ServerPilot 1.5.5 upgrades the keepalive protocol to v3 and tightens GPU/control-plane reliability.**
+**ServerPilot 1.5.5 upgrades the keepalive protocol to v3 and tightens device selection and control-plane reliability across GPU and driver environments.**
 
 - The keepalive adapter performs a read-only `--protocol-info` preflight before every mutation and requires v3, pidfd identity, and PCI bus ID capabilities; incompatible helpers return `keepalive_helper_incompatible` without receiving a mutation payload.
 - Keepalive wire/state use v3 and `workers.v3.json`; v2 payloads/state are rejected fail-closed and are never adopted, deleted, or signaled.
-
-## 1.5.4 - 2026-08-14
-
-**ServerPilot 1.5.4 fixes device selection across GPU and driver environments and tightens occupancy and control-plane reliability.**
 
 - `gpu_index` remains the server's display index, while collector schema v2 derives a separate PCI-bus-ordered `cuda_ordinal`. `gpu_apply` returns `cuda_device_order=PCI_BUS_ID`, a lease-wide ordinal set, and per-GPU ordinals instead of placing GPU UUIDs in `CUDA_VISIBLE_DEVICES`.
 - GPUs without a current CUDA ordinal are not allocated. Old collector schemas and PID-only occupancy state fail closed instead of being adopted or downgraded.

@@ -31,6 +31,24 @@ jobs:
       - name: Build Windows desktop app
         shell: pwsh
         run: ./desktop/build-windows-app.ps1
+      - name: Verify packaged runtime assets
+        shell: pwsh
+        run: |
+          $root = "dist\windows\ServerPilot"
+          $envPy = Get-ChildItem -Path $root -Recurse -File -Filter "env.py" |
+            Where-Object { $_.DirectoryName -like "*serverpilot\migrations" }
+          if (-not $envPy) { throw "packaged app is missing serverpilot/migrations/env.py" }
+          $versions = Get-ChildItem -Path $root -Recurse -File -Filter "*.py" |
+            Where-Object { $_.DirectoryName -like "*serverpilot\migrations\versions" }
+          if ($versions.Count -lt 1) { throw "packaged app is missing serverpilot/migrations/versions/*.py" }
+          $templates = Get-ChildItem -Path $root -Recurse -File -Filter "*.html" |
+            Where-Object { $_.DirectoryName -like "*serverpilot\web\templates" }
+          if ($templates.Count -lt 1) { throw "packaged app is missing serverpilot/web/templates/*.html" }
+          if (-not (Test-Path (Join-Path $root "serverpilot-mcp.exe"))) {
+            throw "packaged app is missing serverpilot-mcp.exe; agents would have no MCP entry point"
+          }
+          "packaged migrations: env.py plus $($versions.Count) version scripts"
+
       - name: Package Windows desktop app
         shell: pwsh
         run: |

@@ -8,7 +8,6 @@ configuration.
 
 from __future__ import annotations
 
-
 SERVER_SCRIPT_SCHEMA_VERSION = 2
 SERVER_SCRIPT_ENTRYPOINT = "serverpilot-collect"
 SERVER_SCRIPT_REMOTE_COMMAND = (

@@ -82,10 +82,12 @@ class Database:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
-            with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as source_db:
-                with sqlite3.connect(temporary) as destination_db:
-                    source_db.backup(destination_db)
-                    destination_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+            with (
+                sqlite3.connect(f"file:{source}?mode=ro", uri=True) as source_db,
+                sqlite3.connect(temporary) as destination_db,
+            ):
+                source_db.backup(destination_db)
+                destination_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
             with sqlite3.connect(f"file:{temporary}?mode=ro", uri=True) as copied_db:
                 integrity = copied_db.execute("PRAGMA integrity_check").fetchone()
             if integrity is None or integrity[0] != "ok":

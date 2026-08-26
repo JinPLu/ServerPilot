@@ -9,7 +9,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from serverpilot.config import KeepaliveAdapterId, KeepalivePolicy
 
-
 DEFAULT_LEASE_WINDOW_SECONDS = 8 * 60 * 60
 
 
@@ -69,7 +68,7 @@ class ResourceConstraints(StrictModel):
         return values
 
     @model_validator(mode="after")
-    def validate_topology(self) -> "ResourceConstraints":
+    def validate_topology(self) -> ResourceConstraints:
         if self.nodes > 1 and self.gpus_per_node is None:
             raise ValueError("nodes > 1 requires explicit gpus_per_node")
         if self.gpus_per_node is not None and self.gpus_per_node * self.nodes != self.gpu_count:
@@ -90,7 +89,7 @@ class SchedulerResourceConstraints(ResourceConstraints):
     gpu_count: int = Field(ge=0, le=1024)
 
     @model_validator(mode="after")
-    def validate_topology(self) -> "SchedulerResourceConstraints":
+    def validate_topology(self) -> SchedulerResourceConstraints:
         if self.gpu_count == 0:
             gpu_specific_constraints = any(
                 (
@@ -159,7 +158,7 @@ class ResourceClaim(StrictModel):
     forecast: ResourceForecast | None = None
 
     @model_validator(mode="after")
-    def reject_zero_resource(self) -> "ResourceClaim":
+    def reject_zero_resource(self) -> ResourceClaim:
         if not self.quantities.has_resource():
             raise ValueError("resource claim must request at least one CPU, memory, GPU, node, or scheduler unit")
         return self
@@ -177,7 +176,7 @@ class ResourcePlanCandidateInput(StrictModel):
     rejection_reason: str | None = Field(default=None, max_length=500)
 
     @model_validator(mode="after")
-    def validate_candidate(self) -> "ResourcePlanCandidateInput":
+    def validate_candidate(self) -> ResourcePlanCandidateInput:
         if not self.quantities.has_resource():
             raise ValueError("resource plan candidate must include at least one resource")
         if self.selected and self.rejection_reason:
@@ -195,7 +194,7 @@ class ResourcePlanEvaluationInput(StrictModel):
     selected_candidate_key: str | None = Field(default=None, min_length=1, max_length=120)
 
     @model_validator(mode="after")
-    def validate_selected_candidate(self) -> "ResourcePlanEvaluationInput":
+    def validate_selected_candidate(self) -> ResourcePlanEvaluationInput:
         candidate_keys = [candidate.candidate_key for candidate in self.candidates]
         if len(candidate_keys) != len(set(candidate_keys)):
             raise ValueError("resource plan candidate keys must be unique")
@@ -219,7 +218,7 @@ class ResourceRunActualInput(StrictModel):
     outcome: Literal["succeeded", "failed", "cancelled", "unknown"]
 
     @model_validator(mode="after")
-    def validate_actual(self) -> "ResourceRunActualInput":
+    def validate_actual(self) -> ResourceRunActualInput:
         if not self.quantities.has_resource():
             raise ValueError("resource run actual must include at least one resource")
         if self.started_at.tzinfo is None:
@@ -243,7 +242,7 @@ class RequestCreate(StrictModel):
     constraints: ResourceConstraints
 
     @model_validator(mode="after")
-    def validate_times(self) -> "RequestCreate":
+    def validate_times(self) -> RequestCreate:
         if self.constraints.gpu_count == 0:
             raise ValueError("bare-metal requests require gpu_count >= 1")
         if self.start_after and self.start_after.tzinfo is None:
@@ -329,7 +328,7 @@ class ReservationCreate(StrictModel):
     constraints: ResourceConstraints | None = None
 
     @model_validator(mode="after")
-    def validate_window(self) -> "ReservationCreate":
+    def validate_window(self) -> ReservationCreate:
         if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
             raise ValueError("reservation times must include a timezone")
         if self.end_at <= self.start_at:
@@ -349,7 +348,7 @@ class MaintenanceCreate(StrictModel):
     reason: str = Field(min_length=1, max_length=1000)
 
     @model_validator(mode="after")
-    def validate_target_and_window(self) -> "MaintenanceCreate":
+    def validate_target_and_window(self) -> MaintenanceCreate:
         if (self.endpoint_id is None) == (self.gpu_id is None):
             raise ValueError("maintenance must target exactly one endpoint_id or gpu_id")
         if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
@@ -372,7 +371,7 @@ class WorkloadProfileUpsert(StrictModel):
     scheduler_target_id: str | None = Field(
         default=None, pattern=r"^[a-z][a-z0-9-]{1,63}$"
     )
-    scheduler: "SlurmJobSpec | None" = None
+    scheduler: SlurmJobSpec | None = None
     scheduler_script: str | None = Field(default=None, min_length=1, max_length=128_000)
     grant_project_ids: list[str] = Field(default_factory=list, max_length=256)
     grant_all_projects: bool = False
@@ -389,7 +388,7 @@ class WorkloadProfileUpsert(StrictModel):
         return values
 
     @model_validator(mode="after")
-    def validate_placement(self) -> "WorkloadProfileUpsert":
+    def validate_placement(self) -> WorkloadProfileUpsert:
         if self.constraints.gpu_ids or self.constraints.placement == "exact":
             raise ValueError("workload profile cannot pin exact gpu_ids")
         if self.runtime_kind == "direct-gpu":
@@ -488,7 +487,7 @@ class SchedulerTargetUpsert(StrictModel):
         return values
 
     @model_validator(mode="after")
-    def upload_matches_capability(self) -> "SchedulerTargetUpsert":
+    def upload_matches_capability(self) -> SchedulerTargetUpsert:
         has_capability = "data-transfer" in self.capabilities
         if has_capability != (self.upload is not None):
             raise ValueError(
@@ -515,7 +514,7 @@ class SchedulerOneOffSubmit(StrictModel):
     retain_submission_body: bool = False
 
     @model_validator(mode="after")
-    def validate_scheduler_constraints(self) -> "SchedulerOneOffSubmit":
+    def validate_scheduler_constraints(self) -> SchedulerOneOffSubmit:
         if self.constraints.gpu_ids or self.constraints.endpoint_ids:
             raise ValueError(
                 "external scheduler submissions cannot pin ServerPilot endpoint_ids or gpu_ids"
@@ -556,7 +555,7 @@ class EndpointCreate(StrictModel):
     ssh_user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
     workspace_path: str = Field(min_length=1, max_length=2000)
-    observation_profile: Literal["linux-nvidia", "linux-host", "server-script-v1"] = "server-script-v1"
+    observation_profile: str = Field(default="server-script-v1", min_length=1, max_length=40)
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     keepalive_policy: KeepalivePolicy = "disabled"
     labels: list[str] = Field(default_factory=list)
@@ -584,8 +583,17 @@ class EndpointCreate(StrictModel):
             raise ValueError("workspace_path must be an absolute single-line path")
         return value
 
+    @field_validator("observation_profile")
+    @classmethod
+    def known_observation_profile(cls, value: str) -> str:
+        from serverpilot.plugins import is_known_observation_profile
+
+        if not is_known_observation_profile(value):
+            raise ValueError(f"unknown observation profile: {value}")
+        return value
+
     @model_validator(mode="after")
-    def resolve_owner(self) -> "EndpointCreate":
+    def resolve_owner(self) -> EndpointCreate:
         if self.owner_project_id and self.project_ids and self.project_ids != [self.owner_project_id]:
             raise ValueError("project_ids may only repeat owner_project_id for legacy imports")
         if self.owner_project_id is None and len(self.project_ids) == 1:
@@ -601,7 +609,7 @@ class EndpointUpdate(StrictModel):
     ssh_user: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
     workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
-    observation_profile: Literal["linux-nvidia", "linux-host", "server-script-v1"] | None = None
+    observation_profile: str | None = Field(default=None, min_length=1, max_length=40)
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     labels: list[str] | None = None
     storage_group: str | None = Field(default=None, max_length=120)
@@ -625,8 +633,17 @@ class EndpointUpdate(StrictModel):
             raise ValueError("workspace_path must be an absolute single-line path")
         return value
 
+    @field_validator("observation_profile")
+    @classmethod
+    def known_observation_profile(cls, value: str | None) -> str | None:
+        from serverpilot.plugins import is_known_observation_profile
+
+        if value is not None and not is_known_observation_profile(value):
+            raise ValueError(f"unknown observation profile: {value}")
+        return value
+
     @model_validator(mode="after")
-    def has_update(self) -> "EndpointUpdate":
+    def has_update(self) -> EndpointUpdate:
         if not self.model_fields_set:
             raise ValueError("endpoint update must include at least one mutable field")
         if "workspace_path" in self.model_fields_set and self.workspace_path is None:
@@ -772,7 +789,7 @@ class HostTelemetryInput(StrictModel):
     memory_current_mib: int | None = Field(default=None, ge=0)
 
     @model_validator(mode="after")
-    def available_memory_is_bounded(self) -> "HostTelemetryInput":
+    def available_memory_is_bounded(self) -> HostTelemetryInput:
         if self.memory_available_mib > self.memory_total_mib:
             raise ValueError("memory_available_mib must not exceed memory_total_mib")
         if (
@@ -795,6 +812,7 @@ class EndpointObservation(StrictModel):
     # ``cpu_only`` is a positive hardware discovery result. ``unknown`` keeps
     # a failed NVIDIA probe fail-closed without overwriting earlier GPU facts.
     gpu_probe_status: Literal["gpu", "cpu_only", "unknown"] = "unknown"
+    scheduler: dict[str, Any] | None = None
 
     @field_validator("observed_at")
     @classmethod
@@ -804,7 +822,7 @@ class EndpointObservation(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def gpu_identity_is_unique(self) -> "EndpointObservation":
+    def gpu_identity_is_unique(self) -> EndpointObservation:
         gpu_uuids = [gpu.gpu_uuid for gpu in self.gpus]
         if len(gpu_uuids) != len(set(gpu_uuids)):
             raise ValueError("observation gpus must contain unique gpu_uuid values")

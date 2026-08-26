@@ -7,6 +7,7 @@ import pytest
 
 from serverpilot import mcp_server
 from serverpilot.mcp_server import mcp
+from tests.helpers import tools
 
 
 class FakeClient:
@@ -79,7 +80,7 @@ def test_wait_for_claim_returns_held_or_active_matching_lease(
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: client)
     monkeypatch.setattr(mcp_server.time, "sleep", lambda seconds: sleeps.append(seconds))
 
-    result = mcp_server.gpu_wait_for_claim(
+    result = tools.gpu_wait_for_claim(
         "agent-a",
         "req-1",
         timeout_seconds=5,
@@ -101,7 +102,7 @@ def test_wait_for_claim_returns_terminal_request_without_writes(
     client = FakeClient([[_request("CANCELLED")]], [[]])
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: client)
 
-    result = mcp_server.gpu_wait_for_claim("agent-a", "req-1")
+    result = tools.gpu_wait_for_claim("agent-a", "req-1")
 
     assert result["state"] == "terminal"
     assert result["snapshot_revision"] == 1
@@ -116,7 +117,7 @@ def test_wait_for_claim_timeout_keeps_last_request_and_lease(
     client = FakeClient([[_request("QUEUED")]], [[]])
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: client)
 
-    result = mcp_server.gpu_wait_for_claim("agent-a", "req-1", timeout_seconds=0)
+    result = tools.gpu_wait_for_claim("agent-a", "req-1", timeout_seconds=0)
 
     assert result["state"] == "timeout"
     assert result["snapshot_revision"] == 1
@@ -143,7 +144,7 @@ def test_wait_for_claim_validates_bounded_inputs(
     message: str,
 ) -> None:
     with pytest.raises(ValueError, match=message):
-        mcp_server.gpu_wait_for_claim(**kwargs)
+        tools.gpu_wait_for_claim(**kwargs)
 
 
 def test_wait_for_claim_is_not_exposed_as_mcp_tool() -> None:
@@ -153,5 +154,5 @@ def test_wait_for_claim_is_not_exposed_as_mcp_tool() -> None:
     assert "gpu_wait_for_claim" not in by_name
     claim_description = by_name["gpu_apply"].description.lower()
     assert "no_capacity" in claim_description
-    assert "不排队" in claim_description
+    assert "nothing is queued" in claim_description
     assert " or queue" not in claim_description

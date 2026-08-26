@@ -9,6 +9,31 @@ permissions:
 
 jobs:
   test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        python-version: ["3.12", "3.13"]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: ${{ matrix.python-version }}
+      - run: uv lock --check
+      - run: uv sync --extra dev --reinstall-package serverpilot
+      - run: uv run --reinstall-package serverpilot pytest
+      - run: uv run --reinstall-package serverpilot ruff check .
+
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Swift package tests
+        working-directory: desktop/ServerPilotCore
+        run: swift test
+
+  package:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -16,26 +41,7 @@ jobs:
         with:
           python-version: "3.12"
       - run: uv lock --check
-      - run: uv sync --extra dev --reinstall-package serverpilot
-      - run: uv run --reinstall-package serverpilot pytest
-      - run: uv run --reinstall-package serverpilot ruff check .
       - name: Build wheel and verify runtime assets
         run: |
           uv build --wheel --out-dir .ci-dist
-          python - <<'PY'
-          from pathlib import Path
-          from zipfile import ZipFile
-
-          wheel = next(Path(".ci-dist").glob("*.whl"))
-          required = {
-              "serverpilot/web/static/assets/server-room-background.jpg",
-              "serverpilot/web/static/vendor/phosphor/style.css",
-              "serverpilot/web/static/vendor/phosphor/Phosphor.woff2",
-              "serverpilot/migrations/env.py",
-              "serverpilot/migrations/script.py.mako",
-          }
-          with ZipFile(wheel) as archive:
-              missing = required.difference(archive.namelist())
-          if missing:
-              raise SystemExit(f"wheel is missing: {sorted(missing)}")
-          PY
+          python scripts/verify_wheel.py .ci-dist

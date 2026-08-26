@@ -2,14 +2,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import re
 import secrets
 import threading
 from collections import defaultdict
+from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Callable, Iterable, Mapping, TypeVar
+from typing import Any, TypeVar
 
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
@@ -40,8 +42,6 @@ from serverpilot.models import (
     ProviderState,
     Reservation,
     ResourceAllocation,
-    ResourceClaim as ResourceClaimModel,
-    ResourcePlanCandidate as ResourcePlanCandidateModel,
     ResourcePlanEvaluation,
     ResourceProvider,
     ResourceRunActual,
@@ -57,9 +57,17 @@ from serverpilot.models import (
     WorkloadProfile,
     WorkloadProfileGrant,
 )
+from serverpilot.models import (
+    ResourceClaim as ResourceClaimModel,
+)
+from serverpilot.models import (
+    ResourcePlanCandidate as ResourcePlanCandidateModel,
+)
+from serverpilot.planner import ResourcePlanCandidate, select_smallest_useful_plan
 from serverpilot.schemas import (
     ActorCreate,
     AlertAcknowledge,
+    CollectorSettingsUpdate,
     EndpointCreate,
     EndpointObservation,
     EndpointUpdate,
@@ -67,15 +75,13 @@ from serverpilot.schemas import (
     LeaseBind,
     LeaseObservedBind,
     MaintenanceCreate,
-    RetentionPrune,
     RequestCreate,
     ReservationCreate,
-    ResourceClaim as ResourceClaimInput,
     ResourceConstraints,
     ResourcePlanEvaluationInput,
     ResourceQuantities,
     ResourceRunActualInput,
-    CollectorSettingsUpdate,
+    RetentionPrune,
     SchedulerJobCancel,
     SchedulerOneOffSubmit,
     SchedulerProfileSubmit,
@@ -83,6 +89,9 @@ from serverpilot.schemas import (
     SchedulerUploadRequest,
     WorkloadProfileClaim,
     WorkloadProfileUpsert,
+)
+from serverpilot.schemas import (
+    ResourceClaim as ResourceClaimInput,
 )
 from serverpilot.slurm import (
     CommandSlurmProvider,
@@ -92,8 +101,6 @@ from serverpilot.slurm import (
     broker_state,
 )
 from serverpilot.timeutil import ensure_utc, json_dump, json_load, utcnow
-from serverpilot.planner import ResourcePlanCandidate, select_smallest_useful_plan
-
 
 ACTIVE_LEASE_STATES = {"HELD", "ACTIVE", "ORPHANED_BUSY", "CONFLICT"}
 SYSTEM_ACTOR_ID = RESERVED_SYSTEM_ID
@@ -115,6 +122,7 @@ MUTATING_ROLES = {"allocator", "operator", "admin"}
 RESOURCE_SNAPSHOT_HISTORY_LIMIT = 50
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
 COLLECTOR_INTERVAL_SETTING_KEY = "collector_interval_seconds"
+PLUGIN_CAPACITY_SETTING_PREFIX = "pc:"
 # Routine coordination is cooperative, not an administrative workflow.
 # Endpoint inventory is shared on loopback; owner_project_id is attribution,
 # not an endpoint-management permission boundary. Lease/request ownership still
@@ -1004,7 +1012,175 @@ class BrokerService:
         )
 
     @staticmethod
-    def _endpoint_dict(endpoint: Endpoint) -> dict[str, Any]:
+    def _plugin_capacity_key(endpoint_id: str) -> str:
+        digest = hashlib.sha256(endpoint_id.encode("utf-8")).hexdigest()[:60]
+        return f"{PLUGIN_CAPACITY_SETTING_PREFIX}{digest}"
+
+    @staticmethod
+    def _encode_plugin_capacity(capacity: Mapping[str, Any]) -> str:
+        count = int(capacity["free_gpu_count"])
+        name = str(capacity["gpu_name"]).replace("|", "/")[:200]
+        return f"{count}|{name}"
+
+    @staticmethod
+    def _decode_plugin_capacity(value: str | None) -> dict[str, Any] | None:
+        if not value or "|" not in value:
+            return None
+        count_text, name = value.split("|", 1)
+        try:
+            count = int(count_text)
+        except ValueError:
+            return None
+        if count < 0 or not name:
+            return None
+        return {"free_gpu_count": count, "gpu_name": name}
+
+    def _persist_plugin_capacity(
+        self,
+        session: Session,
+        endpoint: Endpoint,
+        capacity: Mapping[str, Any] | None,
+        *,
+        now: datetime,
+    ) -> None:
+        key = self._plugin_capacity_key(endpoint.id)
+        setting = session.get(RuntimeSetting, key)
+        if capacity is None:
+            from serverpilot.plugins import get_plugin, is_plugin_profile
+
+            if setting is None:
+                return
+            if not is_plugin_profile(endpoint.observation_profile):
+                return
+            plugin = get_plugin(endpoint.observation_profile)
+            if plugin is None or "apply" not in plugin.capabilities:
+                return
+            session.delete(setting)
+            return
+        value = self._encode_plugin_capacity(capacity)
+        if setting is None:
+            session.add(RuntimeSetting(key=key, value=value, updated_at=now))
+            return
+        setting.value = value
+        setting.updated_at = now
+
+    @staticmethod
+    def _request_resource_constraints(request: AllocationRequest) -> ResourceConstraints:
+        payload = json_load(request.constraints_json)
+        if isinstance(payload, dict):
+            payload = {
+                key: value for key, value in payload.items() if key != "plugin_allocation"
+            }
+        return ResourceConstraints.model_validate(payload)
+
+    @staticmethod
+    def _plugin_allocation_payload(request: AllocationRequest | None) -> dict[str, str] | None:
+        if request is None:
+            return None
+        constraints = json_load(request.constraints_json)
+        if not isinstance(constraints, dict):
+            return None
+        allocation = constraints.get("plugin_allocation")
+        if not isinstance(allocation, dict):
+            return None
+        plugin_id = allocation.get("plugin_id")
+        allocation_ref = allocation.get("allocation_ref")
+        if isinstance(plugin_id, str) and isinstance(allocation_ref, str):
+            return {"plugin_id": plugin_id, "allocation_ref": allocation_ref}
+        return None
+
+    def _release_plugin_allocations(self, allocations: list[dict[str, str]]) -> None:
+        """Release cluster allocations, then record any the plugin would not give up.
+
+        This is the automatic path: idle reclaim and purging during observation,
+        where no caller is waiting to be told. An explicit release refuses with
+        ``plugin_release_failed`` instead, but reclaim cannot refuse, so a
+        failure here drops the last local reference to a job still running
+        against the user's cluster quota. There is no logger in this service, so
+        the audit trail is the only place a human or an agent can find the leak.
+
+        Every entry is still attempted: one uncooperative plugin must not keep
+        the other allocations alive.
+        """
+
+        from serverpilot.plugins import PluginError, release_plugin
+
+        seen: set[tuple[str, str]] = set()
+        failures: list[tuple[str, str, str]] = []
+        for allocation in allocations:
+            plugin_id = allocation.get("plugin_id")
+            allocation_ref = allocation.get("allocation_ref")
+            if not isinstance(plugin_id, str) or not isinstance(allocation_ref, str):
+                continue
+            key = (plugin_id, allocation_ref)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                release_plugin(plugin_id, allocation_ref=allocation_ref)
+            except PluginError as error:
+                failures.append((plugin_id, allocation_ref, str(error)))
+        if failures:
+            self._record_plugin_release_failures(failures)
+
+    def _record_plugin_release_failures(self, failures: list[tuple[str, str, str]]) -> None:
+        def operation(session: Session) -> None:
+            now = utcnow()
+            for plugin_id, allocation_ref, reason in failures:
+                self._audit(
+                    session,
+                    actor_id=SYSTEM_ACTOR_ID,
+                    action="plugin.release_failed",
+                    resource_type="cluster",
+                    resource_id=allocation_ref,
+                    result="failure",
+                    summary={"plugin_id": plugin_id, "reason": reason},
+                    now=now,
+                )
+
+        self._write(operation)
+
+    def _purge_unobserved_plugin_gpus(
+        self,
+        session: Session,
+        *,
+        endpoint: Endpoint,
+        observed_gpu_ids: set[str],
+        now: datetime,
+    ) -> int:
+        from serverpilot.plugins import get_plugin, is_plugin_profile
+
+        if not is_plugin_profile(endpoint.observation_profile):
+            return 0
+        plugin = get_plugin(endpoint.observation_profile)
+        if plugin is None or "apply" not in plugin.capabilities:
+            return 0
+        prior_gpus = session.scalars(
+            select(GPUDevice).where(GPUDevice.endpoint_id == endpoint.id)
+        ).all()
+        removed = 0
+        for gpu in prior_gpus:
+            if gpu.id in observed_gpu_ids:
+                continue
+            resources = session.scalars(
+                select(LeaseResource).where(LeaseResource.gpu_id == gpu.id)
+            ).all()
+            if any(resource.active for resource in resources):
+                if gpu.present:
+                    gpu.present = False
+                    gpu.absent_at = now
+                continue
+            for resource in resources:
+                session.delete(resource)
+            session.flush()
+            session.delete(gpu)
+            removed += 1
+        return removed
+
+    @staticmethod
+    def _endpoint_dict(
+        endpoint: Endpoint, *, scheduler_capacity: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
         return {
             "id": endpoint.id,
             "host": endpoint.host,
@@ -1020,6 +1196,7 @@ class BrokerService:
             "expected_gpu_count": endpoint.expected_gpu_count,
             "expected_gpu_total_vram_mib": endpoint.expected_gpu_total_vram_mib,
             "resource_kind": endpoint.resource_kind,
+            "scheduler_capacity": scheduler_capacity,
             "owner_project_id": endpoint.owner_project_id,
             "lifecycle_state": endpoint.lifecycle_state,
             "enabled": endpoint.lifecycle_state == "active",
@@ -1303,6 +1480,26 @@ class BrokerService:
                         },
                     }
                 )
+        allocation = None
+        if request is not None:
+            constraints = json_load(request.constraints_json)
+            if isinstance(constraints, dict) and isinstance(constraints.get("plugin_allocation"), dict):
+                allocation = constraints["plugin_allocation"]
+        if allocation:
+            ssh = allocation.get("ssh") if isinstance(allocation.get("ssh"), dict) else {}
+            for resource in executable_resources:
+                endpoint_payload = resource.get("endpoint")
+                if isinstance(endpoint_payload, dict):
+                    if isinstance(allocation.get("workspace_path"), str):
+                        endpoint_payload["workspace_path"] = allocation["workspace_path"]
+                    if isinstance(ssh.get("host"), str):
+                        endpoint_payload["host"] = ssh["host"]
+                    if type(ssh.get("port")) is int:
+                        endpoint_payload["port"] = ssh["port"]
+                    if isinstance(ssh.get("user"), str):
+                        endpoint_payload["ssh_user"] = ssh["user"]
+                if isinstance(allocation.get("cuda_visible_devices"), str):
+                    resource["cuda_visible_devices"] = allocation["cuda_visible_devices"]
         return {
             "id": lease.id,
             "request_id": lease.request_id,
@@ -2115,9 +2312,7 @@ class BrokerService:
 
     @staticmethod
     def _gpu_payload_is_publicly_available(gpu: dict[str, Any]) -> bool:
-        if gpu.get("state") in {"AVAILABLE", "KEEPALIVE"}:
-            return True
-        return False
+        return gpu.get("state") in {"AVAILABLE", "KEEPALIVE"}
 
     @classmethod
     def _gpu_public_projection(
@@ -3475,6 +3670,14 @@ class BrokerService:
             maintenance_by_endpoint: dict[str, MaintenanceWindow] = {}
             current_reservation_by_gpu: dict[str, Reservation] = {}
             endpoint_payloads: list[dict[str, Any]] = []
+            plugin_capacity_values = {
+                item.key: item.value
+                for item in session.scalars(
+                    select(RuntimeSetting).where(
+                        RuntimeSetting.key.like(f"{PLUGIN_CAPACITY_SETTING_PREFIX}%")
+                    )
+                ).all()
+            }
 
             def endpoint_snapshot(endpoint: Endpoint) -> dict[str, Any]:
                 provider_state = provider_states.get(endpoint.id)
@@ -3510,7 +3713,12 @@ class BrokerService:
                         recent_host_telemetry_samples_by_endpoint[endpoint.id]
                     )
                 return {
-                    **self._endpoint_dict(endpoint),
+                    **self._endpoint_dict(
+                        endpoint,
+                        scheduler_capacity=self._decode_plugin_capacity(
+                            plugin_capacity_values.get(self._plugin_capacity_key(endpoint.id))
+                        ),
+                    ),
                     # Filled from the final per-GPU projection below, so a
                     # busy sibling GPU never invalidates an independent
                     # keepalive worker.
@@ -5830,7 +6038,7 @@ class BrokerService:
             resources_by_lease[resource.lease_id].append(resource)
 
         released_any = False
-        for lease_id, lease_resources in resources_by_lease.items():
+        for lease_id in resources_by_lease:
             lease = session.get(Lease, lease_id)
             if (
                 lease is None
@@ -5922,6 +6130,9 @@ class BrokerService:
             elif observation.gpus:
                 endpoint.resource_kind = "gpu"
                 endpoint.updated_at = now
+            self._persist_plugin_capacity(
+                session, endpoint, observation.scheduler, now=now
+            )
             host_cpu_total_ticks = observation.host.cpu_total_ticks
             host_cpu_idle_ticks = observation.host.cpu_idle_ticks
             host_cpu_usage_usec = observation.host.cpu_usage_usec
@@ -6112,6 +6323,12 @@ class BrokerService:
                     history_points_written += 1
             absent_gpu_count = 0
             if observation.observation_complete:
+                purged = self._purge_unobserved_plugin_gpus(
+                    session,
+                    endpoint=endpoint,
+                    observed_gpu_ids=observed_gpu_ids,
+                    now=observed_at,
+                )
                 prior_gpus = session.scalars(
                     select(GPUDevice).where(GPUDevice.endpoint_id == endpoint.id)
                 ).all()
@@ -6127,6 +6344,8 @@ class BrokerService:
                     now=now,
                     revision=revision,
                 )
+                if purged:
+                    session.flush()
             session.flush()
             observed_process_keys: set[tuple[str, int, str, datetime]] = set()
             for process in observation.processes:
@@ -6295,7 +6514,9 @@ class BrokerService:
                 observation_complete=observation.observation_complete,
                 now=now,
             )
-            self._reconcile_leases(session, now, actor_id=f"collector:{endpoint.id}")
+            plugin_releases = self._reconcile_leases(
+                session, now, actor_id=f"collector:{endpoint.id}"
+            )
             # A fresh observation can make a previously fail-closed request eligible.
             self._allocate_queued(session, now, revision)
             event = None
@@ -6325,9 +6546,12 @@ class BrokerService:
                 "history_points_written": history_points_written,
                 "endpoint_history_points_written": endpoint_history_points_written,
                 "ignored": False,
+                "_plugin_releases": plugin_releases,
             }
 
-        return self._write(operation)
+        result = self._write(operation)
+        self._release_plugin_allocations(result.pop("_plugin_releases", []))
+        return result
 
     def _bind_new_workload_processes(
         self,
@@ -6843,14 +7067,20 @@ class BrokerService:
             capacity = card["capacity"]
             excluded_reason = card["admission_reason"]
             eligible = card["admission_state"] == "available"
-            if eligible and claim_data.quantities.cpu_cores:
-                if capacity["available_cpu_cores"] < claim_data.quantities.cpu_cores:
-                    eligible = False
-                    excluded_reason = "insufficient_cpu"
-            if eligible and claim_data.quantities.memory_mib:
-                if capacity["available_memory_mib"] < claim_data.quantities.memory_mib:
-                    eligible = False
-                    excluded_reason = "insufficient_memory"
+            if (
+                eligible
+                and claim_data.quantities.cpu_cores
+                and capacity["available_cpu_cores"] < claim_data.quantities.cpu_cores
+            ):
+                eligible = False
+                excluded_reason = "insufficient_cpu"
+            if (
+                eligible
+                and claim_data.quantities.memory_mib
+                and capacity["available_memory_mib"] < claim_data.quantities.memory_mib
+            ):
+                eligible = False
+                excluded_reason = "insufficient_memory"
             candidates.append({**card, "eligible": eligible, "excluded_reason": excluded_reason})
         eligible_candidates = [candidate for candidate in candidates if candidate["eligible"]]
         if not eligible_candidates:
@@ -6889,7 +7119,7 @@ class BrokerService:
         now: datetime,
         include_reclaimable_keepalive: bool = False,
     ) -> tuple[list[GPUDevice], dict[str, int]]:
-        constraints = ResourceConstraints.model_validate(json_load(request.constraints_json))
+        constraints = self._request_resource_constraints(request)
         lease_end = now + timedelta(seconds=request.duration_seconds)
         excluded: dict[str, int] = defaultdict(int)
         values: list[GPUDevice] = []
@@ -7112,36 +7342,49 @@ class BrokerService:
             except KeyError:
                 return None
 
+        # Best fit is the single host-ordering rule: prefer the host with the
+        # fewest eligible GPUs that can still serve what is asked of it, so a
+        # host holding a large free block stays intact for a request that needs
+        # the whole block. A single card must not break the last eight-card
+        # machine. Ties resolve on endpoint id, which is unique, so the order is
+        # total. Placement does not participate: once the host count is fixed,
+        # pack and spread would choose the same hosts.
+        def best_fit(hosts: list[tuple[str, list[GPUDevice]]]) -> list[tuple[str, list[GPUDevice]]]:
+            return sorted(hosts, key=lambda item: (len(item[1]), item[0]))
+
         per_node = constraints.gpus_per_node
         if per_node is not None:
-            hosts = [
-                (endpoint_id, values)
-                for endpoint_id, values in sorted(by_endpoint.items())
-                if len(values) >= per_node
-            ]
+            hosts = best_fit(
+                [item for item in by_endpoint.items() if len(item[1]) >= per_node]
+            )
             if len(hosts) < constraints.nodes:
                 return None
-            if constraints.placement == "spread":
-                hosts.sort(key=lambda item: (len(item[1]), item[0]))
             selected: list[GPUDevice] = []
             for _endpoint_id, values in hosts[: constraints.nodes]:
                 selected.extend(values[:per_node])
             return selected if len(selected) == constraints.gpu_count else None
 
+        fitting = best_fit(
+            [item for item in by_endpoint.items() if len(item[1]) >= constraints.gpu_count]
+        )
+
         if constraints.same_host:
-            hosts = [
-                (endpoint_id, values)
-                for endpoint_id, values in sorted(by_endpoint.items())
-                if len(values) >= constraints.gpu_count
-            ]
-            if not hosts:
+            if not fitting:
                 return None
-            if constraints.placement == "spread":
-                hosts.sort(key=lambda item: (len(item[1]), item[0]))
-            return hosts[0][1][: constraints.gpu_count]
+            return fitting[0][1][: constraints.gpu_count]
 
         if constraints.placement == "pack":
-            ordered = [gpu for _endpoint, values in sorted(by_endpoint.items()) for gpu in values]
+            if fitting:
+                return fitting[0][1][: constraints.gpu_count]
+            # Nothing fits alone. Spanning stays possible, but consume the
+            # largest blocks first so it costs the fewest hosts.
+            ordered = [
+                gpu
+                for _endpoint_id, values in sorted(
+                    by_endpoint.items(), key=lambda item: (-len(item[1]), item[0])
+                )
+                for gpu in values
+            ]
             return ordered[: constraints.gpu_count]
 
         # spread: take one GPU per endpoint in rounds, then fill deterministically.
@@ -7223,8 +7466,8 @@ class BrokerService:
             ordered.append(selected_request)
             # Virtual usage makes the order deficit-like: a project cannot win
             # every tie merely because several of its requests were submitted first.
-            gpu_usage[selected_project] += ResourceConstraints.model_validate(
-                json_load(selected_request.constraints_json)
+            gpu_usage[selected_project] += self._request_resource_constraints(
+                selected_request
             ).gpu_count
             if not by_project[selected_project]:
                 del by_project[selected_project]
@@ -7254,7 +7497,7 @@ class BrokerService:
                 request.blocked_reason = "project no longer exists"
                 request.updated_at = now
                 continue
-            constraints = ResourceConstraints.model_validate(json_load(request.constraints_json))
+            constraints = self._request_resource_constraints(request)
             gpu_usage, lease_usage = self._project_usage(session)
             policy_block = self._project_can_allocate(
                 session, project, constraints, gpu_usage, lease_usage
@@ -7368,6 +7611,7 @@ class BrokerService:
         persistent_lease: bool = False,
         profile_id: str | None = None,
         idempotency_checked: bool = False,
+        plugin_allocation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not idempotency_checked and idempotency_key is not None:
             existing = self._idempotent(
@@ -7380,6 +7624,9 @@ class BrokerService:
         if not project.enabled:
             raise BrokerError("project_disabled", "project is disabled", status_code=409)
         revision = self._bump_revision(session, now)
+        constraints_payload = request_data.constraints.model_dump(mode="json")
+        if plugin_allocation is not None:
+            constraints_payload["plugin_allocation"] = plugin_allocation
         request = AllocationRequest(
             id=secrets.token_hex(16),
             actor_id=actor.id,
@@ -7388,7 +7635,7 @@ class BrokerService:
             auto_activate=activate_if_allocated,
             task_ref=request_data.task_ref,
             purpose=request_data.purpose,
-            constraints_json=json_dump(request_data.constraints.model_dump(mode="json")),
+            constraints_json=json_dump(constraints_payload),
             duration_seconds=request_data.duration_seconds,
             expected_duration_seconds=None,
             start_after=ensure_utc(request_data.start_after) if request_data.start_after else None,
@@ -7445,6 +7692,52 @@ class BrokerService:
             )
         return result
 
+    def _release_plugin_allocation_before_write(
+        self, actor: ActorContext, lease_id: str, operator_override: bool
+    ) -> None:
+        """Give a plugin allocation back before taking the writer lock.
+
+        Only a lease this actor may release and that is not already settled
+        gets this far, so a caller cannot cancel someone else's cluster job by
+        naming their lease id.
+        """
+
+        def operation(session: Session) -> AllocationRequest | None:
+            lease = session.get(Lease, lease_id)
+            if lease is None or lease.state in TERMINAL_LEASE_STATES:
+                return None
+            if not self._can_manage_lease(actor, lease) and not operator_override:
+                return None
+            return session.get(AllocationRequest, lease.request_id)
+
+        request = self._read(operation)
+        if request is None:
+            return
+        try:
+            self._release_plugin_allocation_if_needed(request)
+        except Exception as exc:
+            from serverpilot.plugins import PluginError
+
+            if not isinstance(exc, PluginError):
+                raise
+            raise BrokerError("plugin_release_failed", str(exc), status_code=409) from exc
+
+    def _release_plugin_allocation_if_needed(self, request: AllocationRequest | None) -> None:
+        from serverpilot.plugins import release_plugin
+
+        if request is None:
+            return
+        constraints = json_load(request.constraints_json)
+        if not isinstance(constraints, dict):
+            return
+        allocation = constraints.get("plugin_allocation")
+        if not isinstance(allocation, dict):
+            return
+        plugin_id = allocation.get("plugin_id")
+        allocation_ref = allocation.get("allocation_ref")
+        if isinstance(plugin_id, str) and isinstance(allocation_ref, str):
+            release_plugin(plugin_id, allocation_ref=allocation_ref)
+
     def create_request(
         self,
         actor: ActorContext,
@@ -7453,6 +7746,7 @@ class BrokerService:
         idempotency_key: str | None,
         activate_if_allocated: bool = False,
         persistent_lease: bool = False,
+        plugin_allocation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_role(actor, MUTATING_ROLES)
 
@@ -7465,6 +7759,7 @@ class BrokerService:
                 idempotency_action="request.create",
                 activate_if_allocated=activate_if_allocated,
                 persistent_lease=persistent_lease,
+                plugin_allocation=plugin_allocation,
             )
 
         return self._write(operation)
@@ -7692,6 +7987,12 @@ class BrokerService:
         if not reason.strip():
             raise BrokerError("release_reason_required", "释放 GPU 时需要提供原因", status_code=422)
 
+        # A plugin release runs a subprocess, which must not happen while the
+        # single writer lock is held. Doing it first means a failed write leaves
+        # a cluster allocation already given back, so the ledger is repaired by
+        # the next reconcile rather than by holding the lock.
+        self._release_plugin_allocation_before_write(actor, lease_id, operator_override)
+
         def operation(session: Session) -> dict[str, Any]:
             lease = session.get(Lease, lease_id)
             if lease is None:
@@ -7712,6 +8013,7 @@ class BrokerService:
                     "lease_already_released", "这个 GPU 租约已经结束", status_code=409
                 )
             now = utcnow()
+            request = session.get(AllocationRequest, lease.request_id)
             revision = self._bump_revision(session, now)
             before = self._lease_dict(session, lease)
             lease.state = "RELEASED"
@@ -7724,7 +8026,6 @@ class BrokerService:
             ).all():
                 resource.active = False
                 resource.released_at = now
-            request = session.get(AllocationRequest, lease.request_id)
             if request is not None:
                 request.state = "RELEASED"
                 request.updated_at = now
@@ -7937,9 +8238,7 @@ class BrokerService:
             )
             request = session.get(AllocationRequest, lease.request_id)
             constraints = (
-                ResourceConstraints.model_validate(json_load(request.constraints_json))
-                if request is not None
-                else None
+                self._request_resource_constraints(request) if request is not None else None
             )
             endpoint_ids = sorted({gpu.endpoint_id for gpu in target_gpus})
             for endpoint_id in endpoint_ids:
@@ -8608,13 +8907,26 @@ class BrokerService:
         )
         return True
 
-    def _reconcile_leases(self, session: Session, now: datetime, *, actor_id: str) -> None:
+    def _remember_plugin_release(
+        self,
+        session: Session,
+        lease: Lease,
+        releases: list[dict[str, str]],
+    ) -> None:
+        payload = self._plugin_allocation_payload(
+            session.get(AllocationRequest, lease.request_id)
+        )
+        if payload is not None:
+            releases.append(payload)
+
+    def _reconcile_leases(self, session: Session, now: datetime, *, actor_id: str) -> list[dict[str, str]]:
         """Reconcile expiry and legacy attribution state; never kill/restart anything."""
 
         self._normalize_legacy_workload_conflicts(session, now, actor_id=actor_id)
         self._resolve_stale_lease_alerts(session, now)
         leases = session.scalars(select(Lease).where(Lease.state.in_(ACTIVE_LEASE_STATES))).all()
         expired_released = False
+        plugin_releases: list[dict[str, str]] = []
         for lease in leases:
             if lease.kind == "keepalive":
                 # Keepalive is durable controller ownership, not a timed user
@@ -8638,6 +8950,7 @@ class BrokerService:
                     # may now fit into.
                     expired_released = True
                 if lease.state == "EXPIRED_EMPTY":
+                    self._remember_plugin_release(session, lease, plugin_releases)
                     continue
             expires_at = _as_utc(lease.expires_at)
             if lease.state in {"HELD", "ACTIVE"} and expires_at is not None and expires_at <= now:
@@ -8665,6 +8978,7 @@ class BrokerService:
                         request.state = "EXPIRED"
                         request.updated_at = now
                     expired_released = True
+                    self._remember_plugin_release(session, lease, plugin_releases)
                 self._audit(
                     session,
                     actor_id=actor_id,
@@ -8680,6 +8994,7 @@ class BrokerService:
         self._resolve_stale_lease_alerts(session, now)
         if expired_released:
             self._allocate_queued(session, now, self._revision(session))
+        return plugin_releases
 
     def reconcile(self, actor: ActorContext) -> dict[str, Any]:
         self._require_role(actor, MUTATING_ROLES)
@@ -8687,7 +9002,7 @@ class BrokerService:
         def operation(session: Session) -> dict[str, Any]:
             now = utcnow()
             revision = self._bump_revision(session, now)
-            self._reconcile_leases(session, now, actor_id=actor.id)
+            plugin_releases = self._reconcile_leases(session, now, actor_id=actor.id)
             self._allocate_queued(session, now, revision)
             event = self._audit(
                 session,
@@ -8699,9 +9014,15 @@ class BrokerService:
                 summary={"revision": revision},
                 now=now,
             )
-            return {"event_id": event.id, "snapshot_revision": revision}
+            return {
+                "event_id": event.id,
+                "snapshot_revision": revision,
+                "_plugin_releases": plugin_releases,
+            }
 
-        return self._write(operation)
+        result = self._write(operation)
+        self._release_plugin_allocations(result.pop("_plugin_releases", []))
+        return result
 
     # ---- reservation, maintenance, alert and administration -------------------
 
@@ -8737,12 +9058,11 @@ class BrokerService:
                     < constraints.min_available_cpu_cores
                 ):
                     continue
-            if constraints.min_available_memory_mib is not None:
-                if (
-                    host_telemetry is None
-                    or host_telemetry.memory_available_mib < constraints.min_available_memory_mib
-                ):
-                    continue
+            if constraints.min_available_memory_mib is not None and (
+                host_telemetry is None
+                or host_telemetry.memory_available_mib < constraints.min_available_memory_mib
+            ):
+                continue
             if constraints.gpu_ids and gpu.id not in constraints.gpu_ids:
                 continue
             if gpu.id in constraints.deny_gpu_ids:

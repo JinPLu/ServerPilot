@@ -11,7 +11,7 @@ import secrets
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Any
 from urllib.parse import quote
@@ -38,12 +38,13 @@ from serverpilot.config import Settings, load_inventory
 from serverpilot.database import Database
 from serverpilot.importer import ParsedSSHCommand, parse_ssh_command
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
+from serverpilot.mcp_entry import mcp_entry_status
 from serverpilot.schemas import (
     ActorCreate,
     AlertAcknowledge,
-    EndpointCreate,
-    ControlPlaneSnapshot,
     CollectorSettingsUpdate,
+    ControlPlaneSnapshot,
+    EndpointCreate,
     EndpointKeepaliveRequest,
     EndpointUpdate,
     EndpointUpsert,
@@ -52,10 +53,10 @@ from serverpilot.schemas import (
     LeaseObservedBind,
     RequestCreate,
     RequestCreateFlat,
-    RetentionPrune,
     ResourceClaim,
     ResourcePlanEvaluationInput,
     ResourceRunActualInput,
+    RetentionPrune,
     SchedulerJobCancel,
     SchedulerOneOffSubmit,
     SchedulerProfileSubmit,
@@ -293,6 +294,20 @@ def _public_keepalive_result(
         "snapshot_revision": snapshot_revision,
         "keepalive": public,
     }
+
+
+def _plugin_overlay_gpu_ids(endpoint_id: str, overlay: Mapping[str, Any]) -> list[str]:
+    gpus = overlay.get("gpus")
+    if not isinstance(gpus, list):
+        return []
+    gpu_ids: list[str] = []
+    for item in gpus:
+        if not isinstance(item, dict):
+            continue
+        uuid = item.get("gpu_uuid")
+        if isinstance(uuid, str) and uuid:
+            gpu_ids.append(f"{endpoint_id}:{uuid}")
+    return gpu_ids
 
 
 def create_app(
@@ -854,6 +869,73 @@ def create_app(
         async with keepalive_endpoint_locks(endpoint_ids):
             return await execute_locked()
 
+    async def apply_plugin_for_claim(
+        actor: ActorContext,
+        request_data: RequestCreate,
+        *,
+        idempotency_key: str | None,
+        persistent_lease: bool,
+    ) -> dict[str, Any] | None:
+        from serverpilot.plugins import (
+            PluginError,
+            apply_plugin,
+            get_plugin,
+            is_plugin_profile,
+            release_plugin,
+        )
+
+        endpoint_ids = request_data.constraints.endpoint_ids
+        if len(endpoint_ids) != 1:
+            return None
+        try:
+            endpoint = service.collector_endpoint(endpoint_ids[0])
+        except BrokerError:
+            return None
+        if not is_plugin_profile(endpoint.observation_profile):
+            return None
+        plugin = get_plugin(endpoint.observation_profile)
+        if plugin is None or "apply" not in plugin.capabilities:
+            return None
+        try:
+            overlay = apply_plugin(
+                plugin.plugin_id,
+                gpu_count=request_data.constraints.gpu_count,
+                task_ref=request_data.task_ref,
+            )
+        except PluginError as exc:
+            if exc.no_capacity:
+                return None
+            raise BrokerError("plugin_apply_failed", str(exc), status_code=409) from exc
+        try:
+            await collect_keepalive_endpoint(endpoint)
+        except BrokerError:
+            with contextlib.suppress(PluginError):
+                release_plugin(plugin.plugin_id, allocation_ref=str(overlay["allocation_ref"]))
+            raise
+        gpu_ids = _plugin_overlay_gpu_ids(endpoint.id, overlay)
+        retry_data = request_data
+        if gpu_ids and len(gpu_ids) == request_data.constraints.gpu_count:
+            retry_data = request_data.model_copy(
+                update={
+                    "constraints": request_data.constraints.model_copy(
+                        update={"gpu_ids": gpu_ids, "placement": "exact"}
+                    )
+                }
+            )
+        try:
+            return service.create_request(
+                actor,
+                retry_data,
+                idempotency_key=idempotency_key,
+                activate_if_allocated=True,
+                persistent_lease=persistent_lease,
+                plugin_allocation=overlay,
+            )
+        except Exception:
+            with contextlib.suppress(PluginError):
+                release_plugin(plugin.plugin_id, allocation_ref=str(overlay["allocation_ref"]))
+            raise
+
     async def claim_request_now(
         actor: ActorContext,
         request_data: RequestCreate,
@@ -891,6 +973,14 @@ def create_app(
                     ),
                     idempotency_key=idempotency_key,
                     locked_endpoint_ids=endpoint_ids,
+                )
+                if claimed is not None:
+                    return claimed
+                claimed = await apply_plugin_for_claim(
+                    actor,
+                    request_data,
+                    idempotency_key=idempotency_key,
+                    persistent_lease=persistent_lease,
                 )
                 if claimed is None:
                     raise exc
@@ -933,6 +1023,29 @@ def create_app(
                     raise exc
                 return claimed
 
+    # Reconcile tasks outlive the collection cycle that spawned them, so the
+    # identity they run under is bound once instead of per cycle.
+    collector_system_actor = ActorContext(
+        id=SYSTEM_ACTOR_ID,
+        role="admin",
+        project_ids=frozenset(),
+    )
+
+    async def reconcile_collected(endpoint: Any, result: dict[str, Any]) -> None:
+        # An explicit action or the previous collection cycle may still be
+        # coordinating this endpoint. Do not queue a duplicate; the next
+        # ordinary collection will see it.
+        if keepalive_reconcile_lock(endpoint.id).locked():
+            return
+        revision = result.get("snapshot_revision")
+        key_suffix = revision if isinstance(revision, int) else int(time.time())
+        with contextlib.suppress(Exception):
+            await reconcile_endpoint_keepalive(
+                collector_system_actor,
+                endpoint.id,
+                idempotency_key=f"keepalive-reconcile:{endpoint.id}:{key_suffix}",
+            )
+
     async def collector_loop() -> None:
         next_prune_at = 0.0
         while True:
@@ -946,27 +1059,6 @@ def create_app(
                     endpoints=endpoints,
                     stagger_seconds=0.0,
                 )
-                system_actor = ActorContext(
-                    id=SYSTEM_ACTOR_ID,
-                    role="admin",
-                    project_ids=frozenset(),
-                )
-
-                async def reconcile_collected(endpoint: Any, result: dict[str, Any]) -> None:
-                    # An explicit action or the previous collection cycle may
-                    # still be coordinating this endpoint. Do not queue a
-                    # duplicate; the next ordinary collection will see it.
-                    if keepalive_reconcile_lock(endpoint.id).locked():
-                        return
-                    revision = result.get("snapshot_revision")
-                    key_suffix = revision if isinstance(revision, int) else int(time.time())
-                    with contextlib.suppress(Exception):
-                        await reconcile_endpoint_keepalive(
-                            system_actor,
-                            endpoint.id,
-                            idempotency_key=f"keepalive-reconcile:{endpoint.id}:{key_suffix}",
-                        )
-
                 for endpoint in endpoints:
                     result = collected.get(endpoint.id)
                     if not isinstance(result, dict) or "error" in result:
@@ -1183,6 +1275,18 @@ def create_app(
         include_advanced: bool = True,
     ) -> dict[str, Any]:
         return service.control_plane_state(actor, include_advanced=include_advanced)
+
+    @app.get("/api/v1/observation-profiles")
+    def observation_profiles(actor: ApiActor) -> dict[str, Any]:
+        from serverpilot.plugins import list_observation_profiles
+
+        _ = actor
+        return {"data": list_observation_profiles()}
+
+    @app.get("/api/v1/mcp-entry")
+    def mcp_entry(actor: ApiActor) -> dict[str, Any]:
+        _ = actor
+        return {"data": mcp_entry_status()}
 
     @app.get("/api/v1/endpoints")
     def endpoints(actor: ApiActor) -> dict[str, Any]:

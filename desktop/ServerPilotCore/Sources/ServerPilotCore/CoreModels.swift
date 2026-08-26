@@ -23,7 +23,7 @@ public struct ServiceInfo: Equatable, Sendable {
     public static let fixture = ServiceInfo(
         schemaVersion: "v1",
         version: "fixture",
-        capabilities: ["instant_claims", "endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup", "operator_lease_release", "operator_lease_reassignment", "collector_settings", "telemetry_recent_averages"]
+        capabilities: ["instant_claims", "endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup", "operator_lease_release", "operator_lease_reassignment", "collector_settings", "telemetry_recent_averages", "observation_profiles"]
     )
 
     public var supportsEndpointUpdate: Bool {
@@ -58,6 +58,14 @@ public struct ServiceInfo: Equatable, Sendable {
         supports("collector_settings")
     }
 
+    public var supportsObservationProfiles: Bool {
+        supports("observation_profiles")
+    }
+
+    public var supportsMcpEntry: Bool {
+        supports("mcp_entry")
+    }
+
     /// Services predating capability advertisement are allowed to make the
     /// request and return a compatibility error.  A service which explicitly
     /// advertises capabilities is authoritative, so the UI can fail closed.
@@ -76,6 +84,46 @@ public struct CollectorSettingsRecord: Equatable, Sendable {
         self.intervalSeconds = intervalSeconds
         staleAfterSeconds = raw.int("stale_after_seconds", default: intervalSeconds * 3)
         allowedIntervals = (raw["allowed_intervals"] as? [Int] ?? [5, 10, 30]).sorted()
+    }
+}
+
+public struct MCPEntryRecord: Equatable, Sendable {
+    public let available: Bool
+    public let command: String?
+    public let configJSON: String?
+    public let hint: String?
+
+    public init?(raw: [String: Any]) {
+        guard raw["available"] != nil else { return nil }
+        let available = raw.bool("available", default: false)
+        let command = raw.string("command")
+        let hint = raw.string("hint")
+        if available {
+            guard
+                let command, !command.isEmpty,
+                let servers = raw["mcpServers"] as? [String: Any],
+                JSONSerialization.isValidJSONObject(["mcpServers": servers]),
+                let data = try? JSONSerialization.data(
+                    withJSONObject: ["mcpServers": servers],
+                    options: [.prettyPrinted, .sortedKeys]
+                ),
+                let configJSON = String(data: data, encoding: .utf8)
+            else {
+                return nil
+            }
+            self.available = true
+            self.command = command
+            self.configJSON = configJSON
+            self.hint = hint
+        } else {
+            guard command == nil, raw["mcpServers"] == nil || raw["mcpServers"] is NSNull else {
+                return nil
+            }
+            self.available = false
+            self.command = nil
+            self.configJSON = nil
+            self.hint = hint
+        }
     }
 }
 
@@ -695,6 +743,9 @@ public struct GPURecentTelemetryAverage: Equatable, Sendable {
 }
 
 public struct GPURecord: Identifiable, Equatable, Sendable {
+    /// The states the broker projects as allocatable capacity.
+    static let allocatableStates: Set<String> = ["AVAILABLE", "KEEPALIVE"]
+
     public let id: String
     public let endpointID: String
     public let gpuUUID: String?
@@ -755,8 +806,11 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
         self.projectedPubliclyAvailable = raw["publicly_available"] == nil
             ? nil
             : raw.bool("publicly_available", default: false)
+        // Reject a row that says "not allocatable" while carrying an allocatable
+        // state. Keying this on the state code rather than the localized label
+        // keeps the check alive if that label is ever reworded or translated.
         if self.projectedPubliclyAvailable == false,
-           self.publicStatus?.hasPrefix("可用") == true {
+           GPURecord.allocatableStates.contains(self.state) {
             return nil
         }
         guard let keepalive = GPUKeepaliveStatus(
@@ -1565,14 +1619,14 @@ public struct EndpointDraft: Equatable, Sendable {
     public let port: Int
     public let sshUser: String
     public let workspacePath: String
-    public let observationProfile: EndpointObservationProfile
+    public let observationProfile: String
 
     public init(
         host: String,
         port: Int,
         sshUser: String,
         workspacePath: String,
-        observationProfile: EndpointObservationProfile,
+        observationProfile: String,
         suppliedID: String
     ) throws {
         let cleanedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1636,52 +1690,76 @@ public enum EndpointDraftError: LocalizedError, Equatable, Sendable {
     }
 }
 
-public enum EndpointObservationProfile: String, CaseIterable, Equatable, Sendable, Identifiable {
-    case linuxNvidia = "linux-nvidia"
-    case linuxHost = "linux-host"
-    case serverScript = "server-script-v1"
+public struct ObservationProfileRecord: Equatable, Sendable, Identifiable, Hashable {
+    public let id: String
+    public let displayName: String
+    public let description: String
+    public let source: String
+    public let capabilities: [String]
 
-    public var id: String { rawValue }
-
-    public var label: String {
-        switch self {
-        case .linuxNvidia: return "标准 NVIDIA 采集"
-        case .linuxHost: return "主机容量采集"
-        case .serverScript: return "服务器采集脚本"
-        }
+    public init(
+        id: String,
+        displayName: String,
+        description: String,
+        source: String,
+        capabilities: [String]
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.description = description
+        self.source = source
+        self.capabilities = capabilities
     }
 
-    public var scriptInfo: String {
-        switch self {
-        case .linuxNvidia:
-            return "使用内置、只读的 Linux NVIDIA 观测配置。"
-        case .linuxHost:
-            return "使用内置、只读的 Linux 主机容量观测配置。"
-        case .serverScript:
-            return "使用管理员配置的密封只读服务器采集脚本；此处不能输入命令或容器参数。"
-        }
+    public init?(raw: [String: Any]) {
+        guard let id = raw.string("id"), !id.isEmpty else { return nil }
+        self.id = id
+        self.displayName = raw.string("display_name") ?? id
+        self.description = raw.string("description") ?? ""
+        self.source = raw.string("source") ?? "builtin"
+        self.capabilities = (raw["capabilities"] as? [String]) ?? []
     }
 
-    public init(rawValueOrDefault value: String?) {
-        self = EndpointObservationProfile(rawValue: value ?? "") ?? .linuxNvidia
-    }
+    public static let serverCatalogFallback: [ObservationProfileRecord] = [
+        ObservationProfileRecord(
+            id: "linux-nvidia",
+            displayName: "标准 NVIDIA 采集",
+            description: "使用内置、只读的 Linux NVIDIA 观测配置。",
+            source: "builtin",
+            capabilities: ["observe"]
+        ),
+        ObservationProfileRecord(
+            id: "linux-host",
+            displayName: "主机容量采集",
+            description: "使用内置、只读的 Linux 主机容量观测配置。",
+            source: "builtin",
+            capabilities: ["observe"]
+        ),
+        ObservationProfileRecord(
+            id: "server-script-v1",
+            displayName: "服务器采集脚本",
+            description: "使用远端密封只读采集脚本；不能输入命令或容器参数。",
+            source: "builtin",
+            capabilities: ["observe"]
+        ),
+    ]
 }
 
 public struct EndpointUpdateDraft: Equatable, Sendable {
     public let sshUser: String
     public let workspacePath: String
-    public let observationProfile: EndpointObservationProfile
+    public let observationProfile: String
 
     public init(endpoint: EndpointRecord) {
         sshUser = endpoint.sshUser
         workspacePath = endpoint.workspacePath ?? ""
-        observationProfile = EndpointObservationProfile(rawValueOrDefault: endpoint.observationProfile)
+        observationProfile = endpoint.observationProfile
     }
 
     public init(
         sshUser: String,
         workspacePath: String,
-        observationProfile: EndpointObservationProfile
+        observationProfile: String
     ) throws {
         let cleanedUser = sshUser.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedWorkspacePath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)

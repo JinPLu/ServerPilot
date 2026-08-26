@@ -1,0 +1,69 @@
+name: Bug report
+description: Something behaves differently from what the documentation says.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Do not paste credentials, private keys, or internal hostnames. If a log
+        line contains them, replace them before posting. For a suspected
+        security issue use
+        [private reporting](https://github.com/JinPLu/ServerPilot/security/advisories/new)
+        instead of this form.
+
+  - type: input
+    id: version
+    attributes:
+      label: ServerPilot version
+      description: "`serverpilot --version`, or the release you downloaded."
+    validations:
+      required: true
+
+  - type: dropdown
+    id: surface
+    attributes:
+      label: Where did it happen
+      options:
+        - MCP (an agent calling gpu_status / gpu_apply / gpu_release)
+        - Desktop app (macOS)
+        - Desktop app (Windows)
+        - CLI
+        - Collector or keepalive on a remote server
+        - Somewhere else
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: What you expected
+      description: Quote the documentation or the tool description you were going by.
+    validations:
+      required: true
+
+  - type: textarea
+    id: actual
+    attributes:
+      label: What happened instead
+      description: Include the exact error, and the command or tool call that produced it.
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction
+      description: |
+        The smallest sequence that shows the problem. `serverpilot doctor --json`
+        and `serverpilot daemon status --json` are usually the most useful
+        starting points; scrub hostnames before pasting.
+    validations:
+      required: true
+
+  - type: input
+    id: environment
+    attributes:
+      label: Environment
+      description: "Host OS and Python version; the remote server's OS and driver if relevant."
+    validations:
+      required: true

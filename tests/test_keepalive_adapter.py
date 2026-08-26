@@ -4,15 +4,15 @@ import asyncio
 import json
 import math
 import os
-import stat
 import signal
+import stat
 import threading
 from pathlib import Path
 from typing import Any
 
 import pytest
-import serverpilot.server_keepalive as keepalive_module
 
+import serverpilot.server_keepalive as keepalive_module
 from serverpilot.adapters import (
     AdapterCommandError,
     AdapterRegistryError,
@@ -21,8 +21,8 @@ from serverpilot.adapters import (
 )
 from serverpilot.config import EndpointConfig
 from serverpilot.keepalive_protocol import (
-    KEEPALIVE_INSPECT_COMMAND,
     KEEPALIVE_IMPLEMENTATION_VERSION,
+    KEEPALIVE_INSPECT_COMMAND,
     KEEPALIVE_PROTOCOL_INFO_CAPABILITIES,
     KEEPALIVE_SCHEMA_VERSION,
     KeepaliveAttestationRequest,
@@ -39,15 +39,14 @@ from serverpilot.server_keepalive import (
     DUTY_PERIOD_SECONDS,
     TARGET_MEMORY_FRACTION,
     WORKER_PROCESS_MARKER,
-    keepalive_target_bytes,
     KeepaliveProcessIdentity,
     LocalKeepaliveController,
     TorchSubprocessProvider,
     default_state_directory,
     handle_attestation,
     handle_request,
+    keepalive_target_bytes,
 )
-
 
 GPU_A = "GPU-00000000-0000-0000-0000-000000000001"
 GPU_B = "GPU-00000000-0000-0000-0000-000000000002"

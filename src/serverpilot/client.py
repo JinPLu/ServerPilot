@@ -10,7 +10,19 @@ import httpx
 
 
 class BrokerClientError(RuntimeError):
-    pass
+    """A broker call that did not return a success envelope.
+
+    ``code`` carries the broker's own error code when the response had one, so
+    a caller can tell a business outcome such as ``no_capacity`` apart from a
+    transport failure without parsing the message.
+    """
+
+    def __init__(
+        self, message: str, *, code: str | None = None, status_code: int | None = None
+    ) -> None:
+        super().__init__(message)
+        self.code = code
+        self.status_code = status_code
 
 
 class BrokerClient:
@@ -29,7 +41,7 @@ class BrokerClient:
         self._last_state_revision: int | None = None
 
     @classmethod
-    def from_env(cls, *, url: str | None = None, actor: str | None = None) -> "BrokerClient":
+    def from_env(cls, *, url: str | None = None, actor: str | None = None) -> BrokerClient:
         configured_actor = actor or os.environ.get("SERVERPILOT_ACTOR")
         return cls(
             url or os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787"),
@@ -73,8 +85,12 @@ class BrokerClient:
             ) from exc
         if response.is_error:
             error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            code = error.get("code")
+            message = error.get("message", "request failed")
             raise BrokerClientError(
-                f"broker HTTP {response.status_code}: {error.get('code', 'unknown')}: {error.get('message', 'request failed')}"
+                f"broker HTTP {response.status_code}: {code or 'unknown'}: {message}",
+                code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
             )
         if not isinstance(payload, dict):
             raise BrokerClientError("broker returned an invalid JSON envelope")

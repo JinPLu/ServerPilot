@@ -4,7 +4,11 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import secrets
+import shutil
+import subprocess
+import tempfile
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -12,6 +16,7 @@ import typer
 import uvicorn
 import yaml
 
+from serverpilot import __version__
 from serverpilot.api import create_app
 from serverpilot.client import BrokerClient, BrokerClientError
 from serverpilot.collector import SSHCollector
@@ -24,6 +29,14 @@ from serverpilot.daemon import (
 )
 from serverpilot.database import Database
 from serverpilot.importer import import_servers_files, write_inventory
+from serverpilot.mcp_entry import (
+    MCP_CLIENTS,
+    MCP_SERVER_NAME,
+    MCPEntryUnavailable,
+    mcp_registration,
+    mcp_server_entry,
+    resolve_mcp_command,
+)
 from serverpilot.schemas import (
     RequestCreate,
     RequestCreateFlat,
@@ -31,13 +44,29 @@ from serverpilot.schemas import (
     ResourcePlanEvaluationInput,
     ResourceRunActualInput,
 )
-from serverpilot.service import BrokerService
-
+from serverpilot.service import BrokerError, BrokerService
 
 app = typer.Typer(
     no_args_is_help=True,
     help="Single-user GPU/CPU coordination across projects and agents.",
 )
+
+
+@app.callback(invoke_without_command=True)
+def _root(
+    ctx: typer.Context,
+    version: Annotated[
+        bool, typer.Option("--version", help="Print the installed version and exit.")
+    ] = False,
+) -> None:
+    if version:
+        typer.echo(__version__)
+        raise typer.Exit
+    if ctx.invoked_subcommand is None:
+        typer.echo(ctx.get_help())
+        raise typer.Exit
+
+
 endpoint_app = typer.Typer(no_args_is_help=True)
 gpu_app = typer.Typer(no_args_is_help=True)
 request_app = typer.Typer(no_args_is_help=True)
@@ -61,8 +90,20 @@ app.add_typer(request_app, name="request")
 app.add_typer(lease_app, name="lease")
 app.add_typer(reservation_app, name="reservation")
 app.add_typer(resource_app, name="resource")
+plugin_app = typer.Typer(no_args_is_help=True, help="Discover and install local server plugins.")
+keepalive_app = typer.Typer(
+    no_args_is_help=True,
+    help="Inspect or stop remote keepalive workers without the control plane.",
+)
+mcp_app = typer.Typer(
+    no_args_is_help=True,
+    help="Register this installation's MCP server with an agent client.",
+)
 app.add_typer(collect_app, name="collect")
 app.add_typer(daemon_app, name="daemon")
+app.add_typer(plugin_app, name="plugin")
+app.add_typer(keepalive_app, name="keepalive")
+app.add_typer(mcp_app, name="mcp")
 
 
 def _database_url(value: str) -> str:
@@ -81,7 +122,7 @@ def _print(value: Any, as_json: bool) -> None:
             typer.echo("(empty)")
             return
         if all(isinstance(item, dict) for item in data):
-            keys = list(dict.fromkeys(key for item in data for key in item.keys()))
+            keys = list(dict.fromkeys(key for item in data for key in item))
             keys = [key for key in keys if not isinstance(data[0].get(key), (dict, list))][:8]
             widths = {key: min(36, max(len(key), *(len(str(item.get(key, ""))) for item in data))) for key in keys}
             typer.echo("  ".join(key.ljust(widths[key]) for key in keys))
@@ -269,6 +310,16 @@ def daemon_stop() -> None:
     typer.echo("stopped")
 
 
+@daemon_app.command("reclaim")
+def daemon_reclaim(
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+) -> None:
+    """Stop a ServerPilot service that holds the daemon port without launchd owning it."""
+
+    result = _daemon_call(lambda: MacOSDaemonManager().reclaim())
+    typer.echo(format_status(result, as_json=as_json))
+
+
 @daemon_app.command("uninstall")
 def daemon_uninstall(
     as_json: Annotated[bool, typer.Option("--json")] = False,
@@ -420,8 +471,8 @@ def lease_release(lease_id: str, reason: Annotated[str, typer.Option("--reason")
 
 
 @lease_app.command("bind")
-def lease_bind(lease_id: str, run_id: Annotated[str, typer.Option("--run-id")], process_key: Annotated[list[str], typer.Option("--process-key")]=[], idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None, as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None, actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None) -> None:
-    _print(_call(lambda: _client(url, actor).post(f"/api/v1/leases/{lease_id}/bind-workload", {"run_id": run_id, "process_keys": process_key}, idempotency_key=_idempotency_key(idempotency_key))), as_json)
+def lease_bind(lease_id: str, run_id: Annotated[str, typer.Option("--run-id")], process_key: Annotated[list[str] | None, typer.Option("--process-key")]=None, idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None, as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None, actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None) -> None:
+    _print(_call(lambda: _client(url, actor).post(f"/api/v1/leases/{lease_id}/bind-workload", {"run_id": run_id, "process_keys": process_key or []}, idempotency_key=_idempotency_key(idempotency_key))), as_json)
 
 
 @lease_app.command("bind-observed")
@@ -627,6 +678,215 @@ def import_servers(
     )
     write_inventory(output, report, projects=projects)
     typer.echo(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))
+
+
+def _keepalive_target(endpoint_id: str) -> tuple[Any, Any, list[str]]:
+    """Resolve one endpoint's sealed adapter and the GPU UUIDs it currently exposes.
+
+    Connection facts are read from the control-plane database, which owns
+    endpoint inventory after bootstrap. A paused endpoint must stay reachable
+    here, so this uses the single-endpoint accessor rather than the collector
+    filter. The UUID set comes from a fresh read-only observation because the
+    database is likely stale whenever this command is needed.
+    """
+
+    from sqlalchemy.exc import SQLAlchemyError
+
+    from serverpilot.adapters import endpoint_keepalive_adapter
+    from serverpilot.config import ConfigurationError
+    from serverpilot.daemon import resolve_daemon_config
+
+    daemon_config = resolve_daemon_config()
+    try:
+        inventory = load_inventory(daemon_config.inventory_path)
+        service = BrokerService(
+            Database(_database_url(str(daemon_config.database_path)), Path.cwd()), inventory
+        )
+        endpoint = service.collector_endpoint(endpoint_id)
+    except (ConfigurationError, SQLAlchemyError, OSError) as exc:
+        typer.echo(f"cannot read the control plane at {daemon_config.data_dir}: {exc}", err=True)
+        raise typer.Exit(code=1) from exc
+    except BrokerError as exc:
+        typer.echo(f"endpoint {endpoint_id} is not in {daemon_config.database_path}", err=True)
+        raise typer.Exit(code=1) from exc
+    if endpoint.keepalive_adapter_id is None:
+        typer.echo(f"endpoint {endpoint_id} has no sealed keepalive adapter", err=True)
+        raise typer.Exit(code=1)
+    adapter = endpoint_keepalive_adapter(endpoint.keepalive_adapter_id)
+    observation = asyncio.run(SSHCollector(inventory).observe_endpoint(endpoint))
+    gpu_uuids = [gpu.gpu_uuid for gpu in observation.gpus]
+    if not gpu_uuids:
+        typer.echo(f"endpoint {endpoint_id} reported no GPUs", err=True)
+        raise typer.Exit(code=1)
+    return endpoint, adapter, gpu_uuids
+
+
+@keepalive_app.command("inspect")
+def keepalive_inspect(
+    endpoint: Annotated[str, typer.Option("--endpoint")],
+) -> None:
+    """Report which keepalive workers the endpoint helper is holding; changes nothing."""
+
+    target, adapter, gpu_uuids = _keepalive_target(endpoint)
+    attestation = asyncio.run(adapter.attest_workers(target, gpu_uuids))
+    _print(
+        {
+            "data": {
+                "endpoint_id": target.id,
+                "observed_gpu_count": len(gpu_uuids),
+                "workers": [
+                    {
+                        "gpu_uuid": worker.gpu_uuid,
+                        "pid": worker.pid,
+                        "driver_pid": worker.driver_pid,
+                    }
+                    for worker in attestation.workers
+                ],
+            }
+        },
+        as_json=True,
+    )
+
+
+@keepalive_app.command("stop")
+def keepalive_stop(
+    endpoint: Annotated[str, typer.Option("--endpoint")],
+) -> None:
+    """Stop every keepalive worker on one endpoint, freeing the GPUs it occupies."""
+
+    target, adapter, gpu_uuids = _keepalive_target(endpoint)
+    response = asyncio.run(adapter.set_enabled(target, False, gpu_uuids))
+    _print(
+        {
+            "data": {
+                "endpoint_id": target.id,
+                "enabled": response.enabled,
+                "results": [
+                    {
+                        "gpu_uuid": result.gpu_uuid,
+                        "status": result.status,
+                        "outcome": result.outcome,
+                    }
+                    for result in response.results
+                ],
+            }
+        },
+        as_json=True,
+    )
+
+
+def _mcp_command() -> str:
+    try:
+        return resolve_mcp_command()
+    except MCPEntryUnavailable as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+
+
+_mcp_registration = mcp_registration
+_mcp_server_entry = mcp_server_entry
+
+
+def _write_cursor_config(target: Path, entry: dict[str, Any]) -> None:
+    document: dict[str, Any] = {}
+    if target.is_file():
+        try:
+            loaded = json.loads(target.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            typer.echo(f"{target} is not valid JSON: {exc}", err=True)
+            raise typer.Exit(code=1) from exc
+        if not isinstance(loaded, dict):
+            typer.echo(f"{target} must contain a JSON object", err=True)
+            raise typer.Exit(code=1)
+        document = loaded
+    servers = document.get("mcpServers")
+    if not isinstance(servers, dict):
+        servers = {}
+    servers[MCP_SERVER_NAME] = entry
+    document["mcpServers"] = servers
+    target.parent.mkdir(parents=True, exist_ok=True)
+    # A truncated write here would take every other MCP server down with it.
+    staged: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", encoding="utf-8", dir=target.parent, prefix=f".{target.name}.", delete=False
+        ) as handle:
+            json.dump(document, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+            staged = Path(handle.name)
+        os.replace(staged, target)
+        staged = None
+    finally:
+        if staged is not None:
+            staged.unlink(missing_ok=True)
+
+
+@mcp_app.command("config")
+def mcp_config(
+    client: Annotated[str, typer.Option("--client", help=f"One of {', '.join(MCP_CLIENTS)}, or all.")] = "all",
+) -> None:
+    """Print the MCP registration for one client without changing anything."""
+
+    clients = MCP_CLIENTS if client == "all" else (client,)
+    if any(item not in MCP_CLIENTS for item in clients):
+        typer.echo(f"--client must be one of {', '.join(MCP_CLIENTS)}, or all", err=True)
+        raise typer.Exit(code=1)
+    command = _mcp_command()
+    _print({"data": [mcp_registration(item, command) for item in clients]}, as_json=True)
+
+
+@mcp_app.command("install")
+def mcp_install(
+    client: Annotated[str, typer.Option("--client", help=f"One of {', '.join(MCP_CLIENTS)}.")],
+) -> None:
+    """Register the MCP server with one agent client through that client's own mechanism."""
+
+    if client not in MCP_CLIENTS:
+        typer.echo(f"--client must be one of {', '.join(MCP_CLIENTS)}", err=True)
+        raise typer.Exit(code=1)
+    command = _mcp_command()
+    registration = mcp_registration(client, command)
+    if client == "cursor":
+        target = Path(registration["target"])
+        _write_cursor_config(target, mcp_server_entry(command))
+        typer.echo(f"registered {MCP_SERVER_NAME} in {target}")
+        return
+    argv = registration["command_line"]
+    if shutil.which(argv[0]) is None:
+        typer.echo(
+            f"{argv[0]} is not on PATH; install that client or run "
+            f"`serverpilot mcp config --client {client}` and register it yourself",
+            err=True,
+        )
+        raise typer.Exit(code=1)
+    result = subprocess.run(argv, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        typer.echo((result.stderr or result.stdout).strip(), err=True)
+        raise typer.Exit(code=1)
+    typer.echo(f"registered {MCP_SERVER_NAME} with {client}")
+
+
+@plugin_app.command("list")
+def plugin_list() -> None:
+    """List built-in observation profiles and discovered local plugins."""
+
+    from serverpilot.plugins import list_observation_profiles
+
+    _print({"data": list_observation_profiles()}, as_json=True)
+
+
+@plugin_app.command("add")
+def plugin_add(path: Annotated[Path, typer.Argument(exists=True, readable=True)]) -> None:
+    """Validate a plugin executable and copy it into the user plugin directory."""
+
+    from serverpilot.plugins import PluginError, add_plugin
+
+    try:
+        info = add_plugin(path)
+    except PluginError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(f"installed {info.plugin_id} -> {info.path}")
 
 
 if __name__ == "__main__":

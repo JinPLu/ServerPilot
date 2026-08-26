@@ -43,6 +43,8 @@ fi
 
 mkdir -p "${macos_dir}" "${resources_dir}" "${runtime_dir}/configs"
 cp "${script_dir}/Info.plist" "${app_bundle}/Contents/Info.plist"
+release_version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${project_root}/src/serverpilot/__init__.py")"
+plutil -replace CFBundleShortVersionString -string "${release_version}" "${app_bundle}/Contents/Info.plist"
 cp "${script_dir}/assets/ServerPilot.icns" "${resources_dir}/ServerPilot.icns"
 cp "${project_root}/configs/inventory.yaml" "${runtime_dir}/configs/inventory.yaml"
 if [[ -d "${script_dir}/Fixtures" ]]; then
@@ -60,6 +62,7 @@ mkdir -p "${backend_dist_dir}" "${backend_work_dir}" "${backend_spec_dir}"
   --collect-submodules uvicorn \
   --add-data "${project_root}/src/serverpilot/migrations:serverpilot/migrations" \
   --add-data "${project_root}/src/serverpilot/web:serverpilot/web" \
+  --add-data "${project_root}/src/serverpilot/bundled_plugins:serverpilot/bundled_plugins" \
   --distpath "${backend_dist_dir}" \
   --workpath "${backend_work_dir}" \
   --specpath "${backend_spec_dir}" \

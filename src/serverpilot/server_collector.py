@@ -18,12 +18,11 @@ import shutil
 import socket
 import subprocess
 import sys
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from serverpilot.collector_protocol import SERVER_SCRIPT_SCHEMA_VERSION
-
 
 GPU_QUERY = (
     "--query-gpu=index,uuid,name,memory.total,memory.used,memory.free,"
@@ -293,7 +292,7 @@ def _gpu_snapshot() -> tuple[str, list[dict[str, Any]], list[dict[str, Any]]]:
 def _with_process_details(processes: list[dict[str, Any]]) -> list[dict[str, Any]]:
     if not processes:
         return []
-    observed_at = datetime.now(timezone.utc)
+    observed_at = datetime.now(UTC)
     pids = sorted({process["pid"] for process in processes})
     details: dict[int, tuple[str | None, datetime, str]] = {}
     try:

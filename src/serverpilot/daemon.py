@@ -8,19 +8,22 @@ import os
 import plistlib
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlparse
 
 import httpx
 
 from .config import ConfigurationError, load_inventory
+
 try:
     import fcntl
 except ImportError:  # pragma: no cover - the first implementation is macOS-only
@@ -135,7 +138,7 @@ def daemon_instance_id_for_paths(
     *,
     label: str = DAEMON_LABEL,
 ) -> str:
-    identity = "|".join(
+    return "|".join(
         (
             DAEMON_PROTOCOL,
             label,
@@ -143,7 +146,6 @@ def daemon_instance_id_for_paths(
             str(inventory_path.expanduser().resolve()),
         )
     )
-    return identity
 
 
 def daemon_instance_id(config: DaemonConfig) -> str:
@@ -382,6 +384,34 @@ class MacOSDaemonManager:
             return None
         return parent_id if parent_id > 0 else None
 
+    @staticmethod
+    def _process_command(process_id: int) -> str | None:
+        try:
+            result = subprocess.run(
+                ["/bin/ps", "-o", "command=", "-p", str(process_id)],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=0.8,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if result.returncode != 0:
+            return None
+        return result.stdout.strip() or None
+
+    def _foreign_holder_message(self, process_id: object) -> str:
+        detail = f"{self.config.base_url} is not served by {self.service_target}"
+        if isinstance(process_id, int) and not isinstance(process_id, bool) and process_id > 0:
+            detail += f"; pid {process_id} holds it"
+            command = self._process_command(process_id)
+            if command is not None:
+                detail += f" ({command})"
+        return (
+            f"{detail}. Run `serverpilot daemon reclaim` to stop that process and hand "
+            f"the port back to the LaunchAgent."
+        )
+
     def _ready_process_is_owned_by_launchd(
         self, process_id: object, launchd_pid: int | None
     ) -> bool:
@@ -403,9 +433,7 @@ class MacOSDaemonManager:
             return None
         launchd_pid = self._launchd_pid()
         if not self._ready_process_is_owned_by_launchd(ready.get("process_id"), launchd_pid):
-            raise DaemonError(
-                f"{self.config.base_url} is not served by {self.service_target}"
-            )
+            raise DaemonError(self._foreign_holder_message(ready.get("process_id")))
         return ready
 
     def _write_plist(self) -> bool:
@@ -572,6 +600,46 @@ class MacOSDaemonManager:
 
     def stop(self) -> None:
         self._bootout_if_loaded()
+
+    def _terminate_holder(self, process_id: int, *, timeout_seconds: float = 5.0) -> None:
+        try:
+            os.kill(process_id, signal.SIGTERM)
+        except ProcessLookupError:
+            return
+        except OSError as exc:
+            raise DaemonError(f"could not stop pid {process_id}: {exc}") from exc
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            try:
+                os.kill(process_id, 0)
+            except OSError:
+                return
+            time.sleep(0.1)
+        raise DaemonError(
+            f"pid {process_id} is still holding {self.config.base_url} after SIGTERM; "
+            f"stop it manually and run this command again"
+        )
+
+    def reclaim(self, *, timeout_seconds: float = 15.0) -> dict[str, Any]:
+        """Hand the daemon port back to the owned LaunchAgent.
+
+        This only resolves a ServerPilot service that answers ``/health/ready``
+        without being owned by launchd. A port held by an unrelated program
+        never reaches the ownership check and is not stopped here.
+        """
+
+        ready = probe_ready(self.config)
+        holder = ready.get("process_id") if ready is not None else None
+        if ready is not None and self._ready_process_is_owned_by_launchd(
+            holder, self._launchd_pid()
+        ):
+            return {"reclaimed": False, "reason": "already_owned", **self.status()}
+        stopped: dict[str, Any] | None = None
+        if isinstance(holder, int) and not isinstance(holder, bool) and holder > 0:
+            stopped = {"pid": holder, "command": self._process_command(holder)}
+            self._terminate_holder(holder)
+        self.start(timeout_seconds=timeout_seconds)
+        return {"reclaimed": True, "stopped": stopped, **self.status()}
 
     def uninstall(self) -> dict[str, Any]:
         with self._install_lock():

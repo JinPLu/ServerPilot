@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import asyncio
+import inspect
 from datetime import UTC, datetime
+from typing import Any
 
+from serverpilot import mcp_server
 from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
 
 
@@ -67,3 +71,26 @@ def process_for_gpu(uuid: str, *, pid: int = 1234) -> ProcessInput:
         username="tester",
         process_started_at=datetime.now(UTC),
     )
+
+
+class _SyncTools:
+    """Call the async MCP tools from a synchronous test.
+
+    The tools are coroutine functions. Wrapping them here keeps that fact
+    out of the shipped module, where a name whose return type depended on
+    whether a loop happened to be running was impossible to reason about.
+    """
+
+    def __getattr__(self, name: str) -> Any:
+        attribute = getattr(mcp_server, name)
+        function = inspect.unwrap(attribute)
+        if inspect.iscoroutinefunction(function):
+
+            def call(*args: Any, **kwargs: Any) -> Any:
+                return asyncio.run(function(*args, **kwargs))
+
+            return call
+        return attribute
+
+
+tools = _SyncTools()

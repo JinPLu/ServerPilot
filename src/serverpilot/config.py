@@ -29,7 +29,7 @@ class CollectorConfig(BaseModel):
     ssh_connect_timeout_seconds: int = Field(default=8, ge=1, le=120)
 
     @model_validator(mode="after")
-    def stale_after_interval(self) -> "CollectorConfig":
+    def stale_after_interval(self) -> CollectorConfig:
         if self.stale_after_seconds < self.interval_seconds:
             raise ValueError("stale_after_seconds must be >= interval_seconds")
         return self
@@ -56,10 +56,10 @@ class EndpointConfig(BaseModel):
     # Nullable only while projecting a migrated legacy database row. Inventory
     # validation below requires every configured endpoint to name the path.
     workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
-    # A closed, code-owned profile chooses the fixed read-only probe and
-    # parser.  It is deliberately not a command, shell fragment, key path, or
+    # A closed profile chooses the probe. Built-in ids plus discovered plugin
+    # ids are accepted; this is not a command, shell fragment, key path, or
     # SSH option supplied by inventory.
-    observation_profile: Literal["linux-nvidia", "linux-host", "server-script-v1"] = "linux-nvidia"
+    observation_profile: str = Field(default="linux-nvidia", min_length=1, max_length=40)
     # Optional sealed lifecycle adapter. None means keepalive is completely off.
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     # Desired policy only; actual ownership remains a per-GPU lease and starts
@@ -91,8 +91,17 @@ class EndpointConfig(BaseModel):
             raise ValueError("workspace_path must be an absolute single-line path")
         return value
 
+    @field_validator("observation_profile")
+    @classmethod
+    def known_observation_profile(cls, value: str) -> str:
+        from serverpilot.plugins import is_known_observation_profile
+
+        if not is_known_observation_profile(value):
+            raise ValueError(f"unknown observation profile: {value}")
+        return value
+
     @model_validator(mode="after")
-    def idle_keepalive_requires_adapter(self) -> "EndpointConfig":
+    def idle_keepalive_requires_adapter(self) -> EndpointConfig:
         if self.keepalive_policy == "idle_keepalive" and self.keepalive_adapter_id is None:
             raise ValueError("idle_keepalive requires a sealed keepalive adapter")
         return self
@@ -118,7 +127,7 @@ class InventoryConfig(BaseModel):
     endpoints: list[EndpointConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
-    def reclaim_follows_alert(self) -> "InventoryConfig":
+    def reclaim_follows_alert(self) -> InventoryConfig:
         if self.idle_lease_reclaim_seconds < self.idle_lease_alert_seconds:
             raise ValueError(
                 "idle_lease_reclaim_seconds must be >= idle_lease_alert_seconds"
@@ -126,7 +135,7 @@ class InventoryConfig(BaseModel):
         return self
 
     @model_validator(mode="after")
-    def validate_identity_and_project_references(self) -> "InventoryConfig":
+    def validate_identity_and_project_references(self) -> InventoryConfig:
         project_ids = [project.id for project in self.projects]
         if RESERVED_SYSTEM_ID in project_ids:
             raise ValueError("the ServerPilot internal project id is reserved")
@@ -182,7 +191,7 @@ class Settings:
         *,
         database_url: str | None = None,
         inventory_path: Path | None = None,
-    ) -> "Settings":
+    ) -> Settings:
         default_root = Path.cwd()
         raw_database = database_url or os.environ.get(
             "SERVERPILOT_DATABASE_URL", f"sqlite:///{default_root / 'state' / 'serverpilot.sqlite3'}"

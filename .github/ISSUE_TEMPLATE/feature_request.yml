@@ -1,0 +1,38 @@
+name: Feature request
+description: Propose a capability ServerPilot does not have.
+labels: ["enhancement"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        ServerPilot coordinates who holds which GPU. It deliberately does not
+        start, stop, migrate, or preempt your workloads, and it listens on
+        loopback only. Proposals that change those boundaries need to argue for
+        the change itself, not just the feature.
+
+  - type: textarea
+    id: problem
+    attributes:
+      label: The situation you are in
+      description: What are you trying to do, and where does ServerPilot stop being enough?
+    validations:
+      required: true
+
+  - type: textarea
+    id: today
+    attributes:
+      label: What you do today instead
+      description: The workaround, and what it costs you.
+    validations:
+      required: true
+
+  - type: textarea
+    id: proposal
+    attributes:
+      label: What you would like
+      description: |
+        If it affects the agent surface, say which of `gpu_status`, `gpu_apply`,
+        or `gpu_release` changes and how. The routine surface is deliberately
+        three tools.
+    validations:
+      required: true

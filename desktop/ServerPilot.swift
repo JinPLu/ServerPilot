@@ -1054,6 +1054,10 @@ private struct SettingsDashboard: View {
                         }
                     }
                 }
+
+                if store.supportsMcpEntry {
+                    MCPEntryPanel(entry: store.mcpEntry, loading: store.mcpEntryLoading)
+                }
             }
             .padding(.horizontal, 24)
             .padding(.top, 16)
@@ -1133,6 +1137,89 @@ private struct SettingsFact: View {
                 .truncationMode(.middle)
         }
         .accessibilityElement(children: .combine)
+    }
+}
+
+private struct MCPEntryPanel: View {
+    let entry: MCPEntryRecord?
+    let loading: Bool
+    @State private var copiedToken: String?
+
+    var body: some View {
+        HomeCard {
+            VStack(alignment: .leading, spacing: 14) {
+                CardSectionLabel(text: "Agent MCP")
+                if let entry, entry.available, let command = entry.command, let configJSON = entry.configJSON {
+                    copyRow(label: "入口路径", value: command, token: "path")
+                    Divider().opacity(DesignTokens.Alpha.strong)
+                    copyBlock(label: "mcpServers 配置", value: configJSON, token: "config")
+                } else if loading && entry == nil {
+                    Text("正在读取 MCP 入口。")
+                        .font(Typography.identity)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                } else {
+                    Text("未找到 MCP 入口。")
+                        .font(Typography.identity)
+                        .foregroundStyle(DesignTokens.ink)
+                    if let hint = entry?.hint, !hint.isEmpty {
+                        Text(hint)
+                            .font(Typography.command)
+                            .foregroundStyle(DesignTokens.mutedInk)
+                            .textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+            }
+        }
+    }
+
+    private func copyRow(label: String, value: String, token: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                SettingsIcon(icon: "terminal")
+                Text(label)
+                    .font(Typography.identity)
+                    .foregroundStyle(DesignTokens.ink)
+                Spacer(minLength: 16)
+                copyButton(value: value, token: token, accessibilityLabel: "复制\(label)")
+            }
+            Text(value)
+                .font(Typography.command)
+                .foregroundStyle(DesignTokens.ink)
+                .textSelection(.enabled)
+                .lineLimit(2)
+                .truncationMode(.middle)
+        }
+    }
+
+    private func copyBlock(label: String, value: String, token: String) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 12) {
+                SettingsIcon(icon: "doc.on.clipboard")
+                Text(label)
+                    .font(Typography.identity)
+                    .foregroundStyle(DesignTokens.ink)
+                Spacer(minLength: 16)
+                copyButton(value: value, token: token, accessibilityLabel: "复制\(label)")
+            }
+            Text(value)
+                .font(Typography.command)
+                .foregroundStyle(DesignTokens.ink)
+                .textSelection(.enabled)
+                .fixedSize(horizontal: false, vertical: true)
+        }
+    }
+
+    private func copyButton(value: String, token: String, accessibilityLabel: String) -> some View {
+        Button(copiedToken == token ? "已复制" : "复制") {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(value, forType: .string)
+            copiedToken = token
+        }
+        .font(Typography.identity)
+        .foregroundStyle(DesignTokens.interaction)
+        .buttonStyle(.plain)
+        .accessibilityLabel(accessibilityLabel)
     }
 }
 
@@ -3933,6 +4020,7 @@ private struct AddServerSheet: View {
     @Environment(\.dismiss) private var dismiss
     @State private var sshCommand = ""
     @State private var workspacePath = ""
+    @State private var observationProfile = "server-script-v1"
     @State private var validationMessage: String?
     @State private var isSubmitting = false
 
@@ -3952,6 +4040,7 @@ private struct AddServerSheet: View {
                 placeholder: "/srv/serverpilot-workspace",
                 text: $workspacePath
             )
+            EndpointObservationProfileField(selection: $observationProfile, profiles: store.observationProfiles)
             if let validationMessage {
                 InlineValidation(message: validationMessage)
             }
@@ -3979,7 +4068,7 @@ private struct AddServerSheet: View {
                 port: parsed.port,
                 sshUser: parsed.user,
                 workspacePath: workspacePath,
-                observationProfile: .serverScript,
+                observationProfile: observationProfile,
                 suppliedID: ""
             )
             validationMessage = nil
@@ -4041,7 +4130,7 @@ private struct EditServerSheet: View {
     let onRemoved: () -> Void
     @State private var sshUser: String
     @State private var workspacePath: String
-    @State private var observationProfile: EndpointObservationProfile
+    @State private var observationProfile: String
     @State private var validationMessage: String?
     @State private var isSubmitting = false
 
@@ -4051,7 +4140,7 @@ private struct EditServerSheet: View {
         self.onRemoved = onRemoved
         _sshUser = State(initialValue: endpoint.sshUser)
         _workspacePath = State(initialValue: endpoint.workspacePath ?? "")
-        _observationProfile = State(initialValue: EndpointObservationProfile(rawValueOrDefault: endpoint.observationProfile))
+        _observationProfile = State(initialValue: endpoint.observationProfile)
     }
 
     var body: some View {
@@ -4071,7 +4160,7 @@ private struct EditServerSheet: View {
                     placeholder: "/srv/serverpilot-workspace",
                     text: $workspacePath
                 )
-                EndpointObservationProfileField(selection: $observationProfile)
+                EndpointObservationProfileField(selection: $observationProfile, profiles: store.observationProfiles)
                 if let validationMessage {
                     InlineValidation(message: validationMessage)
                 }
@@ -4155,28 +4244,29 @@ private struct EditServerSheet: View {
 }
 
 private struct EndpointObservationProfileField: View {
-    @Binding var selection: EndpointObservationProfile
+    @Binding var selection: String
+    let profiles: [ObservationProfileRecord]
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("采集方式")
                 .fieldLabel()
             Picker("采集方式", selection: $selection) {
-                ForEach(EndpointObservationProfile.allCases) { profile in
-                    Text(profile.label).tag(profile)
+                ForEach(profiles) { profile in
+                    Text(profile.displayName).tag(profile.id)
                 }
             }
             .labelsHidden()
             .pickerStyle(.menu)
             .frame(maxWidth: .infinity, alignment: .leading)
-            Text(selection.scriptInfo)
+            Text(profiles.first(where: { $0.id == selection })?.description ?? "")
                 .font(.subheadline.weight(.medium))
                 .foregroundStyle(DesignTokens.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("采集方式")
-        .accessibilityValue(selection.label)
+        .accessibilityValue(profiles.first(where: { $0.id == selection })?.displayName ?? selection)
     }
 }
 

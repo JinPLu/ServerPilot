@@ -5,19 +5,16 @@ from pathlib import Path
 
 import httpx
 import pytest
-import yaml
 from alembic import command
 from alembic.config import Config
 from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 
 from serverpilot import mcp_server
-from serverpilot.api import create_app
 from serverpilot.client import BrokerClient, BrokerClientError
-from serverpilot.config import Settings
 from serverpilot.database import Database
 from serverpilot.schemas import RequestCreate
-from tests.helpers import observation
+from tests.helpers import observation, tools
 
 
 def _request(task_ref: str) -> RequestCreate:
@@ -67,8 +64,8 @@ def test_routine_mutations_use_a_harness_neutral_actor(
         return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    mcp_server.gpu_apply(task="训练任务")
-    mcp_server.gpu_release("lease-a")
+    tools.gpu_apply(task="训练任务")
+    tools.gpu_release("lease-a")
 
     apply_headers = calls[0]["headers"]
     assert isinstance(apply_headers, dict)
@@ -91,7 +88,7 @@ def test_gpu_apply_maps_the_mcp_request_id_to_an_internal_replay_key(
         request_id = "json-rpc-call-17"
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    mcp_server.gpu_apply(task="训练任务", context=FakeContext())  # type: ignore[arg-type]
+    tools.gpu_apply(task="训练任务", context=FakeContext())  # type: ignore[arg-type]
 
     headers = calls[0]["headers"]
     assert isinstance(headers, dict)
@@ -129,7 +126,7 @@ def test_gpu_apply_retries_one_http_transport_failure_with_the_same_key(
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
 
-    assert mcp_server.gpu_apply(task="训练任务")["lease_id"] == "lease-a"
+    assert tools.gpu_apply(task="训练任务")["lease_id"] == "lease-a"
     assert len(calls) == 2
     assert calls[0]["headers"] == calls[1]["headers"]
 
@@ -165,19 +162,8 @@ def test_historical_contact_column_is_inert_and_not_projected(service, admin) ->
     assert "coordination_uri" not in _keys(service.coordination(admin))
 
 
-def test_routine_routes_keep_the_task_lease_until_explicit_release(
-    tmp_path: Path,
-    inventory,
-) -> None:  # type: ignore[no-untyped-def]
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'routine.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) -> None:  # type: ignore[no-untyped-def]
+    app = build_app("routine")
     app.state.service.ingest_observation(observation(count=2))
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "agent"}
@@ -270,19 +256,11 @@ def test_routine_routes_keep_the_task_lease_until_explicit_release(
 
 
 def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
-    tmp_path: Path,
+    build_app,
     inventory,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:  # type: ignore[no-untyped-def]
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'routine-retry.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("routine-retry")
     rest = TestClient(app)
     headers = {"X-ServerPilot-Actor": "agent"}
 
@@ -302,11 +280,11 @@ def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
     monkeypatch.setattr(mcp_server, "_routine_client", RoutineClient)
 
     with pytest.raises(BrokerClientError, match=r"no_capacity"):
-        mcp_server.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
+        tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
     assert app.state.service.list_requests(app.state.service.local_actor("agent"))["data"] == []
 
     app.state.service.ingest_observation(observation(count=2))
-    claimed = mcp_server.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
+    claimed = tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
 
     assert claimed["lease_id"]
     assert len(claimed["gpus"]) == 2
@@ -335,7 +313,7 @@ def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
         str(gpu["cuda_ordinal"]) for gpu in claimed["gpus"]
     }
 
-    assert mcp_server.gpu_release(claimed["lease_id"]) == {
+    assert tools.gpu_release(claimed["lease_id"]) == {
         "released": True,
         "lease_id": claimed["lease_id"],
         "state": "RELEASED",
@@ -348,10 +326,10 @@ def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
 @pytest.mark.parametrize(
     ("server_id", "gpu_count", "message"),
     [
-        (None, True, "gpu_count 必须是正整数"),
-        (None, 0, "gpu_count 必须是正整数"),
-        (None, -1, "gpu_count 必须是正整数"),
-        ("   ", 1, "提供 server_id 时不能为空"),
+        (None, True, "gpu_count must be a positive integer"),
+        (None, 0, "gpu_count must be a positive integer"),
+        (None, -1, "gpu_count must be a positive integer"),
+        ("   ", 1, "server_id must not be empty when it is given"),
     ],
 )
 def test_routine_apply_rejects_invalid_daily_inputs_before_contacting_broker(
@@ -366,14 +344,14 @@ def test_routine_apply_rejects_invalid_daily_inputs_before_contacting_broker(
     monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
 
     with pytest.raises(ValueError, match=message):
-        mcp_server.gpu_apply(server_id=server_id, gpu_count=gpu_count, task="训练")
+        tools.gpu_apply(server_id=server_id, gpu_count=gpu_count, task="训练")
 
 
 @pytest.mark.parametrize(
     ("server_id", "lease_id", "message"),
     [
-        ("   ", None, "提供 server_id 时不能为空"),
-        (None, "   ", "提供 lease_id 时不能为空"),
+        ("   ", None, "server_id must not be empty when it is given"),
+        (None, "   ", "lease_id must not be empty when it is given"),
     ],
 )
 def test_routine_status_rejects_blank_narrowing_before_contacting_broker(
@@ -388,7 +366,7 @@ def test_routine_status_rejects_blank_narrowing_before_contacting_broker(
     monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
 
     with pytest.raises(ValueError, match=message):
-        mcp_server.gpu_status(server_id=server_id, lease_id=lease_id)
+        tools.gpu_status(server_id=server_id, lease_id=lease_id)
 
 
 @pytest.mark.parametrize("lease_id", ["", "   "])
@@ -400,8 +378,8 @@ def test_routine_release_rejects_blank_lease_before_contacting_broker(
 
     monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
 
-    with pytest.raises(ValueError, match="lease_id 不能为空"):
-        mcp_server.gpu_release(lease_id)
+    with pytest.raises(ValueError, match="lease_id must not be empty"):
+        tools.gpu_release(lease_id)
 
 
 def test_busy_status_returns_task_without_a_contact_field() -> None:
@@ -443,7 +421,7 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
             "server_id": "server-a",
             "gpu_id": "GPU-a",
             "index": 0,
-            "status": "任务占用",
+            "status": "held_idle",
             "task": "训练任务",
         }
     ]
@@ -456,7 +434,7 @@ def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:
         lease_id=None,
     )
 
-    assert status == {"servers": [], "gpus": [], "message": "无 GPU"}
+    assert status == {"servers": [], "gpus": [], "message": "no GPUs are registered"}
 
 
 def test_routine_status_reports_recognized_cpu_only_servers() -> None:
@@ -498,7 +476,42 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
                 "memory_available_mib": 985_798,
             }
         ],
-        "message": "无 GPU",
+        "message": "no GPUs are registered",
+    }
+
+
+def test_routine_status_projects_scheduler_servers_without_no_capacity() -> None:
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 0},
+                "endpoints": [
+                    {
+                        "id": "slurm-login-p22",
+                        "resource_kind": "cpu_only",
+                        "scheduler_capacity": {
+                            "free_gpu_count": 30,
+                            "gpu_name": "NVIDIA A100-SXM4-80GB",
+                        },
+                    }
+                ],
+                "gpus": [],
+            }
+        },
+        lease_id=None,
+    )
+
+    assert status == {
+        "servers": [],
+        "gpus": [],
+        "scheduler_servers": [
+            {
+                "server_id": "slurm-login-p22",
+                "free_gpu_count": 30,
+                "gpu_name": "NVIDIA A100-SXM4-80GB",
+                "note": "request on demand; nothing is queued",
+            }
+        ],
     }
 
 
@@ -513,7 +526,7 @@ def test_routine_status_explains_when_all_gpus_are_unavailable() -> None:
         "gpus": [],
         "no_capacity": {
             "reason": "all_gpus_busy_or_unavailable",
-            "message": "当前没有可申请 GPU；busy_gpus 已列出占用它们的任务。",
+            "message": "no GPU is allocatable right now; busy_gpus lists the tasks holding them.",
             "total_gpus": 4,
         },
     }

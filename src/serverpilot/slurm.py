@@ -11,14 +11,18 @@ import base64
 import re
 import shlex
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping, Protocol
+from typing import Any, Literal, Protocol
 
-from serverpilot.adapters import AdapterCommandError, SlurmCommandSchedulerAdapter, scheduler_adapter
-
+from serverpilot.adapters import (
+    AdapterCommandError,
+    SlurmCommandSchedulerAdapter,
+    scheduler_adapter,
+)
 
 TERMINAL_SLURM_STATES = {
     "BOOT_FAIL",
@@ -499,7 +503,7 @@ class CommandSlurmProvider:
                         "gres": parts[7],
                     }
                 )
-        result = {
+        return {
             "status": "ready",
             "identity": identity,
             "paths": paths,
@@ -508,7 +512,6 @@ class CommandSlurmProvider:
             "partitions": partitions,
             "checked_at": datetime.now(UTC).isoformat(),
         }
-        return result
 
     def find_by_name(
         self, connection: dict[str, Any], job_name: str

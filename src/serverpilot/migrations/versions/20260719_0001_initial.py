@@ -9,7 +9,6 @@ from alembic import op
 
 from serverpilot.models import Base
 
-
 revision = "20260719_0001"
 down_revision = None
 branch_labels = None

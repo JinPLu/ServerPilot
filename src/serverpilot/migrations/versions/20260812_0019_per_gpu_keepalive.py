@@ -10,10 +10,9 @@ per-GPU leases: existing active rows are tagged ``legacy_endpoint`` and stay
 fail-closed until an operator has explicitly stopped and verified them.
 """
 
-from alembic import op
 import sqlalchemy as sa
+from alembic import op
 from sqlalchemy import inspect, text
-
 
 revision = "20260812_0019"
 down_revision = "20260812_0018"

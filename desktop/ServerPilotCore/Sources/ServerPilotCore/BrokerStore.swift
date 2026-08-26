@@ -146,8 +146,11 @@ public final class BrokerStore: ObservableObject {
     @Published public private(set) var isRefreshing = false
     @Published public private(set) var lastUpdated: Date?
     @Published public private(set) var serviceInfo: ServiceInfo?
+    @Published public private(set) var observationProfiles: [ObservationProfileRecord] = ObservationProfileRecord.serverCatalogFallback
     @Published public private(set) var collectorSettings: CollectorSettingsRecord?
     @Published public private(set) var collectorSettingsLoading = false
+    @Published public private(set) var mcpEntry: MCPEntryRecord?
+    @Published public private(set) var mcpEntryLoading = false
     @Published public private(set) var mutatingEndpointIDs: Set<String> = []
     @Published public private(set) var releasingLeaseIDs: Set<String> = []
     @Published public private(set) var reassigningLeaseIDs: Set<String> = []
@@ -228,6 +231,10 @@ public final class BrokerStore: ObservableObject {
         serviceInfo?.supportsCollectorSettings == true
     }
 
+    public var supportsMcpEntry: Bool {
+        serviceInfo?.supportsMcpEntry == true
+    }
+
     public var canUpdateCollectorSettings: Bool {
         supportsCollectorSettings && baseURL != nil && allowsMutations
     }
@@ -276,6 +283,8 @@ public final class BrokerStore: ObservableObject {
             startPeriodicRefresh: true
         )
         requestCollectorSettings()
+        requestMcpEntry()
+        requestObservationProfiles()
     }
 
     public func connectForTesting(
@@ -319,6 +328,8 @@ public final class BrokerStore: ObservableObject {
                 "allowed_intervals": [5, 10, 30],
             ])
             : nil
+        self.mcpEntry = nil
+        self.mcpEntryLoading = false
         self.errorMessage = nil
         self.notice = "正在使用桌面测试夹具。"
     }
@@ -412,6 +423,39 @@ public final class BrokerStore: ObservableObject {
                     return
                 }
                 self.collectorSettings = settings
+            }
+        }.resume()
+    }
+
+    public func requestMcpEntry() {
+        guard supportsMcpEntry else {
+            mcpEntry = nil
+            mcpEntryLoading = false
+            return
+        }
+        guard let url = baseURL?.appendingPathComponent("api/v1/mcp-entry") else {
+            mcpEntryLoading = false
+            return
+        }
+        mcpEntryLoading = true
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
+        mutationSession.dataTask(with: request) { [weak self] data, response, error in
+            Task { @MainActor in
+                guard let self else { return }
+                self.mcpEntryLoading = false
+                guard error == nil,
+                      let response = response as? HTTPURLResponse,
+                      (200..<300).contains(response.statusCode),
+                      let raw = self.apiPayload(from: data),
+                      let entry = MCPEntryRecord(raw: raw)
+                else {
+                    self.mcpEntry = nil
+                    self.errorMessage = "无法读取 MCP 入口。"
+                    return
+                }
+                self.mcpEntry = entry
             }
         }.resume()
     }
@@ -546,10 +590,10 @@ public final class BrokerStore: ObservableObject {
             "port": draft.port,
             "ssh_user": draft.sshUser,
             "workspace_path": draft.workspacePath,
-            "observation_profile": draft.observationProfile.rawValue,
+            "observation_profile": draft.observationProfile,
             "labels": ["desktop-app"],
         ]
-        if draft.observationProfile == .serverScript {
+        if draft.observationProfile == "server-script-v1" {
             // The helper is a sealed ServerPilot capability, not a user-supplied
             // command or profile.  New GUI servers should be ready for the
             // explicit Start occupancy action without a second setup screen.
@@ -643,7 +687,7 @@ public final class BrokerStore: ObservableObject {
             payload: [
                 "ssh_user": draft.sshUser,
                 "workspace_path": draft.workspacePath,
-                "observation_profile": draft.observationProfile.rawValue,
+                "observation_profile": draft.observationProfile,
             ],
             successMessage: "已更新服务器设置，正在确认状态。",
             completion: completion
@@ -839,6 +883,33 @@ public final class BrokerStore: ObservableObject {
             startPeriodicRefreshLoop()
         }
         requestRefresh()
+        requestObservationProfiles()
+    }
+
+    public func requestObservationProfiles() {
+        guard let url = baseURL?.appendingPathComponent("api/v1/observation-profiles") else {
+            return
+        }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = 6
+        request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
+        mutationSession.dataTask(with: request) { [weak self] data, _, _ in
+            Task { @MainActor in
+                guard let self else { return }
+                guard
+                    let data,
+                    let object = try? JSONSerialization.jsonObject(with: data),
+                    let envelope = object as? [String: Any],
+                    let rows = envelope["data"] as? [[String: Any]]
+                else {
+                    return
+                }
+                let profiles = rows.compactMap(ObservationProfileRecord.init(raw:))
+                if !profiles.isEmpty {
+                    self.observationProfiles = profiles
+                }
+            }
+        }.resume()
     }
 
     private func completeEndpointTelemetryHistory(

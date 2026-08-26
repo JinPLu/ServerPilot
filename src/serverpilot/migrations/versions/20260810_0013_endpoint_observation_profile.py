@@ -5,11 +5,11 @@ Revises: 20260809_0012
 Create Date: 2026-08-10
 """
 
-from alembic import op
-import sqlalchemy as sa
-from sqlalchemy import inspect
 import json
 
+import sqlalchemy as sa
+from alembic import op
+from sqlalchemy import inspect
 
 revision = "20260810_0013"
 down_revision = "20260809_0012"

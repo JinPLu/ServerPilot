@@ -83,7 +83,7 @@ class FakeResponse:
     def read(self) -> bytes:
         return json.dumps(self.payload).encode("utf-8")
 
-    def __enter__(self) -> "FakeResponse":
+    def __enter__(self) -> FakeResponse:
         return self
 
     def __exit__(self, *args: object) -> None:
@@ -141,7 +141,7 @@ def test_windows_desktop_bridge_maps_service_errors_without_exposing_transport_d
             422,
             "unprocessable entity",
             hdrs=None,
-            fp=BytesIO('{"error":{"code":"no_capacity","message":"当前没有可用 GPU。"}}'.encode("utf-8")),
+            fp=BytesIO('{"error":{"code":"no_capacity","message":"当前没有可用 GPU。"}}'.encode()),
         )
 
     paths = launcher.RuntimePaths(tmp_path, tmp_path / "inventory.yaml", "sqlite:///example.sqlite3", 8787, False)

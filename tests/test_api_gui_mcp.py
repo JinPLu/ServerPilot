@@ -14,14 +14,15 @@ import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
-from serverpilot import API_CAPABILITIES, cli as cli_module, mcp_server
-from serverpilot.api import RateLimiter, RequestBodyLimitMiddleware, create_app
+from serverpilot import API_CAPABILITIES, mcp_server
+from serverpilot import cli as cli_module
+from serverpilot.api import RateLimiter, RequestBodyLimitMiddleware
 from serverpilot.cli import app as cli_app
-from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig, Settings
+from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.mcp_server import ROUTINE_MCP_TOOL_NAMES, mcp, routine_mcp
 from serverpilot.schemas import EndpointUpsert, RequestCreate, ResourceClaim, ResourceQuantities
 from serverpilot.service import BrokerError
-from tests.helpers import observation, process_for_gpu
+from tests.helpers import observation, process_for_gpu, tools
 
 
 def _csrf(html: str) -> str:
@@ -47,21 +48,8 @@ def test_rate_limiter_serializes_concurrent_checks() -> None:
     assert results.count(True) == 1
 
 
-def test_actual_request_body_limit_rejects_stream_without_content_length(
-    tmp_path: Path, inventory
-) -> None:
-    inventory_path = tmp_path / "body-limit.yaml"
-    inventory_path.write_text(
-        yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8"
-    )
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'body-limit.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-            request_body_limit_bytes=64,
-        )
-    )
+def test_actual_request_body_limit_rejects_stream_without_content_length(build_app) -> None:
+    app = build_app("body-limit", request_body_limit_bytes=64)
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post(
@@ -109,18 +97,8 @@ def test_request_body_limit_forwards_disconnect_after_replaying_body() -> None:
     ]
 
 
-def test_event_csv_export_projects_only_declared_columns(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "event-export.yaml"
-    inventory_path.write_text(
-        yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8"
-    )
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'event-export.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_event_csv_export_projects_only_declared_columns(build_app) -> None:
+    app = build_app("event-export")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     actor = service.local_actor("export-agent")
@@ -170,16 +148,8 @@ def test_web_dashboard_uses_the_canonical_public_capacity_projection() -> None:
     assert "KEEPALIVE" not in claimed_definition
 
 
-def test_api_gui_and_idempotency(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'api.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_api_gui_and_idempotency(build_app) -> None:
+    app = build_app("api")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     client = TestClient(app)
@@ -268,17 +238,9 @@ def test_api_gui_and_idempotency(tmp_path: Path, inventory) -> None:
 
 
 def test_operator_release_can_correct_another_agents_lease_but_generic_release_cannot(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'operator-release.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("operator-release")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     owner = service.local_actor("lease-owner")
@@ -326,19 +288,9 @@ def test_operator_release_can_correct_another_agents_lease_but_generic_release_c
 
 
 def test_operator_reassignment_uses_a_separate_app_correction_route(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "operator-reassign.yaml"
-    inventory_path.write_text(
-        yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8"
-    )
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'operator-reassign.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("operator-reassign")
     service = app.state.service
     service.ingest_observation(observation(count=2))
     owner = service.local_actor("reassign-owner")
@@ -392,17 +344,9 @@ def test_operator_reassignment_uses_a_separate_app_correction_route(
 
 
 def test_generic_resource_claim_release_still_works_after_operator_route_change(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'resource-release.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("resource-release")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     actor = service.local_actor("resource-owner")
@@ -427,16 +371,8 @@ def test_generic_resource_claim_release_still_works_after_operator_route_change(
     assert released["claim"]["state"] == "released"
 
 
-def test_snapshot_api_uses_latest_complete_gpu_set(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'latest.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_snapshot_api_uses_latest_complete_gpu_set(build_app) -> None:
+    app = build_app("latest")
     service = app.state.service
     service.ingest_observation(observation(gpu_uuids=["GPU-old-0", "GPU-old-1", "GPU-stays"]))
     service.ingest_observation(observation(gpu_uuids=["GPU-new-0", "GPU-stays"]))
@@ -455,17 +391,9 @@ def test_snapshot_api_uses_latest_complete_gpu_set(tmp_path: Path, inventory) ->
 
 
 def test_control_plane_state_api_exposes_current_and_history_contract(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "state-contract.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'state-contract.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("state-contract")
     app.state.service.ingest_observation(observation(count=1))
     client = TestClient(app)
 
@@ -499,17 +427,9 @@ def test_control_plane_state_api_exposes_current_and_history_contract(
 
 
 def test_lease_api_suppresses_executable_resources_when_claimed_gpu_absent(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'lease-presence.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("lease-presence")
     service = app.state.service
     actor = service.local_actor("test-agent")
     service.ingest_observation(observation(gpu_uuids=["GPU-old", "GPU-new"]))
@@ -538,16 +458,8 @@ def test_lease_api_suppresses_executable_resources_when_claimed_gpu_absent(
     assert lease["resources"] == []
 
 
-def test_workload_profile_rest_and_gui_claim(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'profiles.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_workload_profile_rest_and_gui_claim(build_app) -> None:
+    app = build_app("profiles")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     client = TestClient(app)
@@ -598,16 +510,8 @@ def test_workload_profile_rest_and_gui_claim(tmp_path: Path, inventory) -> None:
     assert request["state"] == "LEASED"
 
 
-def test_api_claim_starts_held_without_a_duration_estimate(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'claim.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
+    app = build_app("claim")
     app.state.service.ingest_observation(observation(count=1))
     client = TestClient(app)
     claimed = client.post(
@@ -647,7 +551,7 @@ def test_api_claim_starts_held_without_a_duration_estimate(tmp_path: Path, inven
     assert cancel_route.json()["error"]["code"] == "request_not_found"
 
 
-def test_api_claim_bootstraps_an_empty_project_registry(tmp_path: Path) -> None:
+def test_api_claim_bootstraps_an_empty_project_registry(build_app) -> None:
     inventory = InventoryConfig(
         schema_version=1,
         endpoints=[
@@ -660,15 +564,7 @@ def test_api_claim_bootstraps_an_empty_project_registry(tmp_path: Path) -> None:
             )
         ],
     )
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'empty-projects.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("empty-projects", inventory_config=inventory)
     app.state.service.ingest_observation(observation(count=1))
     client = TestClient(app)
 
@@ -688,17 +584,9 @@ def test_api_claim_bootstraps_an_empty_project_registry(tmp_path: Path) -> None:
 
 
 def test_general_resource_rest_contracts_delegate_and_fail_closed(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'general-resources.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("general-resources")
     service = app.state.service
     calls = []
 
@@ -832,16 +720,8 @@ def test_general_resource_rest_contracts_delegate_and_fail_closed(
     ]
 
 
-def test_coordination_api_and_observed_binding(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'coordination.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_coordination_api_and_observed_binding(build_app) -> None:
+    app = build_app("coordination")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     client = TestClient(app)
@@ -891,16 +771,8 @@ def test_coordination_api_and_observed_binding(tmp_path: Path, inventory) -> Non
     assert board.json()["data"]["leases"][0]["activity"] == "running"
 
 
-def test_endpoint_project_grant_route_is_not_exposed(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'endpoint-project.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_endpoint_project_grant_route_is_not_exposed(build_app) -> None:
+    app = build_app("endpoint-project")
     client = TestClient(app)
     response = client.post(
         "/api/v1/endpoints/endpoint-a/projects",
@@ -911,17 +783,9 @@ def test_endpoint_project_grant_route_is_not_exposed(tmp_path: Path, inventory) 
 
 
 def test_collector_observation_ingestion_is_not_a_public_actor_route(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'collector-private.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("collector-private")
     client = TestClient(app)
     response = client.post(
         "/api/v1/internal/observations",
@@ -932,17 +796,9 @@ def test_collector_observation_ingestion_is_not_a_public_actor_route(
 
 
 def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_leases(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'endpoint-delete.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("endpoint-delete")
     client = TestClient(app)
     actor = {"X-ServerPilot-Actor": "endpoint-admin"}
     created = client.post(
@@ -994,17 +850,9 @@ def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_lea
 
 
 def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'endpoint-lifecycle.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("endpoint-lifecycle")
     client = TestClient(app)
     actor = {"X-ServerPilot-Actor": "endpoint-admin"}
     endpoint = {
@@ -1057,16 +905,8 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
     assert later_update.status_code == 200
 
 
-def test_removed_maintenance_and_delete_routes(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'endpoint-delete-error.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_removed_maintenance_and_delete_routes(build_app) -> None:
+    app = build_app("endpoint-delete-error")
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "human", "Idempotency-Key": "endpoint-maintenance"}
     created = client.post(
@@ -1082,16 +922,8 @@ def test_removed_maintenance_and_delete_routes(tmp_path: Path, inventory) -> Non
     assert created.status_code == 405
 
 
-def test_project_creation_route_and_gui_are_not_exposed(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'no-project-admin.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_project_creation_route_and_gui_are_not_exposed(build_app) -> None:
+    app = build_app("no-project-admin")
     client = TestClient(app)
 
     response = client.post(
@@ -1106,16 +938,8 @@ def test_project_creation_route_and_gui_are_not_exposed(tmp_path: Path, inventor
     assert "/ui/action/project" not in identities.text
 
 
-def test_click_first_gui_forms_and_all_human_pages(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'clicks.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_click_first_gui_forms_and_all_human_pages(build_app) -> None:
+    app = build_app("clicks")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     client = TestClient(app)
@@ -1212,16 +1036,8 @@ def test_click_first_gui_forms_and_all_human_pages(tmp_path: Path, inventory) ->
     assert client.get(f"/ui/gpus/{gpu_id}").status_code == 200
 
 
-def test_web_delete_endpoint_action_does_not_remove_server(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'web-delete.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_web_delete_endpoint_action_does_not_remove_server(build_app) -> None:
+    app = build_app("web-delete")
     client = TestClient(app)
     home = client.get("/")
     created = client.post(
@@ -1286,6 +1102,7 @@ def test_mcp_exposes_required_tools() -> None:
         "gpu_history",
         "gpu_release",
         "gpu_add_server",
+        "gpu_list_observation_profiles",
         "gpu_update_server",
         "gpu_set_keepalive",
         "resource_providers",
@@ -1323,8 +1140,9 @@ def test_mcp_exposes_required_tools() -> None:
     assert status_schema["properties"]["lease_id"]["default"] is None
     assert "required" not in status_schema
     assert by_name["gpu_status"].description == (
-        "列出可申请 GPU、占用中的 busy_gpus 和纯 CPU 服务器；"
-        "给出 lease_id 时附带该租约的逐卡遥测。"
+        "List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, "
+        "and scheduler clusters you can request on demand; pass lease_id for "
+        "per-card telemetry on cards you hold."
     )
     for name in (
         "gpu_add_server",
@@ -1347,8 +1165,9 @@ def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
     assert not any(name.startswith("gpu_scheduler_") for name in names)
     assert names == {"gpu_status", "gpu_apply", "gpu_release"}
     assert by_name["gpu_status"].description == (
-        "列出可申请 GPU、占用中的 busy_gpus 和纯 CPU 服务器；"
-        "给出 lease_id 时附带该租约的逐卡遥测。"
+        "List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, "
+        "and scheduler clusters you can request on demand; pass lease_id for "
+        "per-card telemetry on cards you hold."
     )
 
 
@@ -1370,7 +1189,7 @@ def test_mcp_endpoint_administration_requires_contract_and_uses_rest(monkeypatch
 
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
 
-    created = mcp_server.gpu_add_server(
+    created = tools.gpu_add_server(
         "agent",
         "project-a",
         "10.0.0.8",
@@ -1399,7 +1218,7 @@ def test_mcp_endpoint_administration_requires_contract_and_uses_rest(monkeypatch
         },
         "create-stable",
     )
-    mcp_server.gpu_update_server(
+    tools.gpu_update_server(
         "agent",
         "server-a",
         "approved-task",
@@ -1451,7 +1270,7 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
 
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
 
-    assert mcp_server.gpu_coordination() == {
+    assert tools.gpu_coordination() == {
         "schema_version": "v1",
         "snapshot_revision": 1,
         "server_time": "2026-08-06T00:00:00Z",
@@ -1465,7 +1284,7 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
         "_routine_client",
         lambda: FakeClient(),
     )
-    result = mcp_server.gpu_apply(server_id="server-a", gpu_count=2, task="训练")
+    result = tools.gpu_apply(server_id="server-a", gpu_count=2, task="训练")
     workspace = {
         "path": "/srv/server-a",
         "kind": "working_directory",
@@ -1509,6 +1328,7 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
     assert body["constraints"] == {
         "gpu_count": 2,
         "placement": "pack",
+        "same_host": True,
         "endpoint_ids": ["server-a"],
     }
     assert body["project_id"] == "agent"
@@ -1659,6 +1479,7 @@ def test_routine_projects_registered_ssh_connection_without_a_shell_command() ->
                         "gpu_index": 0,
                         "name": "A800",
                         "total_vram_mib": 80_000,
+                        "state": "AVAILABLE",
                         "publicly_available": True,
                         "public_status": "可用 · 未开启占卡",
                     }
@@ -1711,7 +1532,7 @@ def test_routine_projects_registered_ssh_connection_without_a_shell_command() ->
 
 
 def test_mcp_default_task_is_harness_neutral() -> None:
-    assert mcp_server._routine_task(None) == "未命名任务"
+    assert mcp_server._routine_task(None) == "unnamed task"
 
 
 def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
@@ -1831,7 +1652,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
         },
     }
 
-    status = mcp_server.gpu_status()
+    status = tools.gpu_status()
     # An allocatable card answers one question — can it be claimed — so it is
     # published as capacity.  The load observed on it is ServerPilot's own
     # keepalive hold, and publishing that would turn a free card into a card
@@ -1845,7 +1666,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
                 "index": 0,
                 "name": "A",
                 "vram_mib": 80_000,
-                "status": "可用",
+                "status": "available",
             }
         ],
         "busy_gpus": [
@@ -1853,7 +1674,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
                 "server_id": "server-a",
                 "gpu_id": "GPU-b",
                 "index": 1,
-                "status": "任务占用",
+                "status": "running",
                 "task": "训练",
             }
         ],
@@ -1862,7 +1683,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
 
     # The caller's own lease is the one place occupancy provably belongs to the
     # reader, so it is the one place telemetry is published.
-    mine = mcp_server.gpu_status(lease_id="lease-mine")
+    mine = tools.gpu_status(lease_id="lease-mine")
     assert "busy_gpus" not in mine
     assert mine["lease"] == {
         "lease_id": "lease-mine",
@@ -1911,7 +1732,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
     # A free card stays capacity-only even when the caller names a lease.
     assert mine["gpus"] == status["gpus"]
 
-    unknown = mcp_server.gpu_status(lease_id="lease-gone")
+    unknown = tools.gpu_status(lease_id="lease-gone")
     assert "leased_gpus" not in unknown
     assert unknown["no_leased_gpus"]["reason"] == "lease_holds_no_visible_gpu"
     # Somebody else's lease is still only named, never measured.
@@ -1930,6 +1751,7 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
                         "gpu_index": 0,
                         "name": "A800",
                         "total_vram_mib": 80_000,
+                        "state": "RUNNING_MANAGED",
                         "publicly_available": False,
                         "public_status": "任务占用",
                         "lease": {"id": "lease-mine", "task_ref": "训练"},
@@ -1987,6 +1809,7 @@ def test_routine_status_names_the_gpu_holding_a_multi_gpu_lease_back() -> None:
             "gpu_index": index,
             "name": "A800",
             "total_vram_mib": 80_000,
+            "state": "RUNNING_MANAGED",
             "publicly_available": False,
             "public_status": "任务占用",
             "lease": {"id": "lease-mine", "task_ref": "训练"},
@@ -2041,6 +1864,7 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
             "gpu_index": index,
             "name": "A800",
             "total_vram_mib": 80_000,
+            "state": "RUNNING_MANAGED",
             "publicly_available": False,
             "public_status": "任务占用",
             "lease": {"id": "lease-mine", "task_ref": "训练"},
@@ -2072,21 +1896,13 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
 
 
 def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
-    tmp_path: Path, inventory, monkeypatch
+    build_app, inventory, monkeypatch
 ) -> None:  # type: ignore[no-untyped-def]
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = False
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].expected_gpu_count = 2
-    inventory_path = tmp_path / "mcp-keepalive-inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(configured.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'mcp-keepalive.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("mcp-keepalive", inventory_config=configured)
     service = app.state.service
     service.ingest_observation(observation(count=2))
     actor = service.local_actor("agent-a")
@@ -2134,7 +1950,7 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
         lambda: RestBackedClient(),
     )
 
-    status = mcp_server.gpu_status()
+    status = tools.gpu_status()
     assert len(status["gpus"]) == 2
     assert {item["gpu_id"] for item in status["gpus"]} == {
         "GPU-endpoint-a-0",
@@ -2145,7 +1961,7 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
     # that is ServerPilot's own bookkeeping.  A routine caller can act only on
     # whether the card can be claimed, and both can, so the mechanism stays
     # inside: no keepalive field, no telemetry carrying its hold.
-    assert {item["status"] for item in status["gpus"]} == {"可用"}
+    assert {item["status"] for item in status["gpus"]} == {"available"}
     for item in status["gpus"]:
         assert set(item) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
     # The GUI still sees the distinction on its own path.
@@ -2211,11 +2027,11 @@ def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeyp
             }
         ],
     }
-    assert mcp_server.resource_providers(provider_type="host-capacity")["data"] == []
-    assert mcp_server.resource_monitor(project_id="project-a")["data"] == {}
-    assert mcp_server.resource_claims(state="ACTIVE")["data"] == []
+    assert tools.resource_providers(provider_type="host-capacity")["data"] == []
+    assert tools.resource_monitor(project_id="project-a")["data"] == {}
+    assert tools.resource_claims(state="ACTIVE")["data"] == []
     assert (
-        mcp_server.resource_evaluate_plan("agent", evaluation, idempotency_key="eval-key")[
+        tools.resource_evaluate_plan("agent", evaluation, idempotency_key="eval-key")[
             "evaluation"
         ]
         == {}
@@ -2223,7 +2039,7 @@ def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeyp
 
     invalid_threshold = {**evaluation, "marginal_min_saved_seconds": 60}
     with pytest.raises(ValueError, match="marginal_min_saved_seconds must be 120"):
-        mcp_server.resource_evaluate_plan("agent", invalid_threshold)
+        tools.resource_evaluate_plan("agent", invalid_threshold)
 
     claim = {
         "project_id": "project-a",
@@ -2235,9 +2051,9 @@ def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeyp
             "predicted_runtime_seconds": 600,
         },
     }
-    assert mcp_server.resource_claim("agent", claim, idempotency_key="claim-key")["claim"] == {}
+    assert tools.resource_claim("agent", claim, idempotency_key="claim-key")["claim"] == {}
     assert (
-        mcp_server.resource_release(
+        tools.resource_release(
             "agent", "claim-1", reason="done", idempotency_key="release-key"
         )["claim"]
         == {}
@@ -2249,7 +2065,7 @@ def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeyp
         "outcome": "succeeded",
     }
     assert (
-        mcp_server.resource_record_actual(
+        tools.resource_record_actual(
             "agent",
             actual,
             claim_id="claim-1",
@@ -2270,17 +2086,9 @@ def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeyp
 
 
 def test_ssh_preview_is_non_mutating_and_commit_uses_the_submitted_command(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'ssh-preview.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("ssh-preview")
     client = TestClient(app)
     csrf = _csrf(client.get("/").text)
     service = app.state.service
@@ -2331,16 +2139,8 @@ def test_ssh_preview_is_non_mutating_and_commit_uses_the_submitted_command(
     assert committed.json()["data"]["endpoint"]["id"] == "server-new-host-p22"
 
 
-def test_ssh_preview_reports_existing_address_and_id_collision(tmp_path: Path, inventory) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'ssh-collisions.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def test_ssh_preview_reports_existing_address_and_id_collision(build_app) -> None:
+    app = build_app("ssh-collisions")
     client = TestClient(app)
     csrf = _csrf(client.get("/").text)
     service = app.state.service
@@ -2412,17 +2212,9 @@ def test_ssh_preview_reports_existing_address_and_id_collision(tmp_path: Path, i
 
 
 def test_ssh_batch_registers_valid_lines_and_skips_invalid_or_duplicate_lines(
-    tmp_path: Path, inventory
+    build_app
 ) -> None:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'ssh-batch.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("ssh-batch")
     client = TestClient(app)
     csrf = _csrf(client.get("/").text)
     commands = [
@@ -2472,21 +2264,13 @@ def test_ssh_batch_registers_valid_lines_and_skips_invalid_or_duplicate_lines(
     ]
 
 
-def test_app_starts_with_projects_and_no_endpoints(tmp_path: Path) -> None:
+def test_app_starts_with_projects_and_no_endpoints(build_app) -> None:
     inventory = InventoryConfig(
         schema_version=1,
         projects=[ProjectConfig(id="project-a", display_name="Project A")],
         endpoints=[],
     )
-    inventory_path = tmp_path / "empty-inventory.yaml"
-    inventory_path.write_text(yaml.safe_dump(inventory.model_dump(mode="json")), encoding="utf-8")
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'empty.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+    app = build_app("empty", inventory_config=inventory)
     client = TestClient(app)
     home = client.get("/")
     assert home.status_code == 200
@@ -2589,20 +2373,21 @@ def _routine_status_fixture(gpu_count: int) -> dict[str, object]:
             "summary": {"total_gpus": gpu_count},
             "endpoints": [
                 {
-                    "id": "server-10-40-1-222-p4482",
-                    "workspace_path": "/media/datasets/OminiEWM_Data/tmp/ljp",
-                    "host": "10.40.1.222",
+                    "id": "server-10-20-0-10-p4482",
+                    "workspace_path": "/srv/example-workspace/user",
+                    "host": "10.20.0.10",
                     "port": 4482,
                     "ssh_user": "root",
                 }
             ],
             "gpus": [
                 {
-                    "endpoint_id": "server-10-40-1-222-p4482",
+                    "endpoint_id": "server-10-20-0-10-p4482",
                     "gpu_uuid": f"GPU-a6c03f47-e30a-61f9-e1b9-ff1e3156e1{index:02d}",
                     "gpu_index": index,
                     "name": "NVIDIA H100 80GB HBM3",
                     "total_vram_mib": 97_887,
+                    "state": "KEEPALIVE",
                     "publicly_available": True,
                     "public_status": "可用 · 空闲占卡",
                     "keepalive": {"desired": "ON", "actual": "ON"},
@@ -2652,7 +2437,7 @@ def test_routine_projections_do_not_repeat_server_facts_per_gpu() -> None:
         for server_fact in ("ssh", "workspace", "workspace_path"):
             assert server_fact not in row
         assert set(row) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
-        assert row["status"] == "可用"
+        assert row["status"] == "available"
     assert "telemetry_window" not in status["servers"][0]
     # The fixture's cards each read as 78,411 MiB used at 68% — every byte of
     # it ServerPilot's own keepalive hold, released before allocation.  None of
@@ -2670,9 +2455,9 @@ def test_routine_projections_do_not_repeat_server_facts_per_gpu() -> None:
                 "resources": [
                     {
                         "endpoint": {
-                            "id": "server-10-40-1-222-p4482",
-                            "workspace_path": "/media/datasets/OminiEWM_Data/tmp/ljp",
-                            "host": "10.40.1.222",
+                            "id": "server-10-20-0-10-p4482",
+                            "workspace_path": "/srv/example-workspace/user",
+                            "host": "10.20.0.10",
                             "port": 4482,
                             "ssh_user": "root",
                         },

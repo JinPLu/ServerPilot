@@ -8,16 +8,16 @@ import pytest
 
 from serverpilot.adapters import (
     ADAPTER_REGISTRY,
-    AdapterRegistryError,
     MAX_RAW_SSH_STDERR_BYTES,
     MAX_RAW_SSH_STDOUT_BYTES,
     RAW_SSH_COMBINED_QUERY,
     RAW_SSH_HOST_ONLY_QUERY,
+    AdapterRegistryError,
     RawSSHObservationAdapter,
     SlurmCommandSchedulerAdapter,
 )
-from serverpilot.config import EndpointConfig
 from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
+from serverpilot.config import EndpointConfig
 from serverpilot.slurm import CommandSlurmProvider, SlurmProviderError
 
 

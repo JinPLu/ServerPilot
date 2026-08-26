@@ -11,7 +11,6 @@ import yaml
 
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 
-
 SSH_PATTERN = re.compile(r"^\s*#?\s*ssh\s+-p\s+(?P<port>\d+)\s+(?P<user>[A-Za-z_][\w-]*)@(?P<host>[A-Za-z0-9_.-]+)\s*$")
 SSH_COMMAND_PATTERN = re.compile(
     r"^ *ssh(?: +-p +(?P<port>[0-9]+))? +"

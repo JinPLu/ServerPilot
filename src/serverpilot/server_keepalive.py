@@ -25,10 +25,11 @@ import sys
 import tempfile
 import threading
 import time
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Iterator, Protocol
+from typing import Any, Protocol
 
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_SCHEMA_VERSION,
@@ -43,7 +44,6 @@ from serverpilot.keepalive_protocol import (
     keepalive_protocol_info,
     validate_gpu_uuid,
 )
-
 
 # These values are fixed server policy, never request inputs.  The worker has
 # no steady-state filesystem or network activity: state is read/written only
@@ -565,10 +565,8 @@ class LocalKeepaliveController:
         finally:
             if descriptor_open:
                 os.close(descriptor)
-            try:
+            with contextlib.suppress(FileNotFoundError):
                 temporary_path.unlink()
-            except FileNotFoundError:
-                pass
 
     def _fsync_state_directory(self) -> None:
         directory_descriptor = os.open(
@@ -713,8 +711,7 @@ def _run_nvidia_smi_query(query_argument: str) -> str:
         result = subprocess.run(
             ["nvidia-smi", query_argument, "--format=csv,noheader,nounits"],
             stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            capture_output=True,
             text=True,
             check=False,
             timeout=NVIDIA_SMI_TIMEOUT_SECONDS,

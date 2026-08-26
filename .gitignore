@@ -14,12 +14,16 @@ coverage.xml
 build/
 .build/
 dist/
+# Where the CI package job builds the wheel it verifies.
+.ci-dist/
 /ServerPilot.app
 /ServerPilot *.app
 *.egg-info/
 *.pem
 *.key
 .env
+plugins/
+marketing/
 
 # Local visual QA captures.
 /.artifacts/
@@ -29,17 +33,7 @@ dist/
 .superdesign/
 
 # TEAMWORK_LOCAL_START
-# Teamwork local runtime state
+# Teamwork local runtime state and project documents
 .codegraph/
 docs/teamwork/**
-.teamwork/runtime/**
-.teamwork/cold-archive/**
-.teamwork-init-transaction.json
-.*.teamwork-init-*
-docs/teamwork/.teamwork-init-transaction.json
-# Legacy v3 location retained as a fail-closed migration interlock.
-docs/teamwork/.discussion-transaction.json
-docs/teamwork/discussion/.discussion-transaction.json
-docs/teamwork/collaborate/.collaborate-transaction.json
-docs/teamwork/.*.teamwork-init-*
 # TEAMWORK_LOCAL_END

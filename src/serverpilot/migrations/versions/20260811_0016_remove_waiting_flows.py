@@ -12,7 +12,6 @@ cleared.
 from alembic import op
 from sqlalchemy import inspect
 
-
 revision = "20260811_0016"
 down_revision = "20260811_0015"
 branch_labels = None

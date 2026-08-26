@@ -113,10 +113,11 @@
       <div class="dialog-header"><div><h2>添加服务器</h2><p>只登记固定、只读的监控配置；不会执行 SSH 命令或读取私钥。</p></div><button class="icon-button close" type="button" value="cancel" aria-label="关闭">×</button></div>
       <div class="form-grid">
         <label>服务器标识<input name="id" required pattern="[a-z][a-z0-9-]{0,127}" placeholder="例如：training-a"></label>
-        <label>主机或 IP<input name="host" required placeholder="例如：10.40.1.203"></label>
+        <label>主机或 IP<input name="host" required placeholder="例如：10.20.0.10"></label>
         <label>SSH 端口<input name="port" type="number" min="1" max="65535" value="22" required></label>
         <label>SSH 用户<input name="sshUser" required value="root"></label>
         <label class="span-2">远端工作区路径<input name="workspace" required value="/srv/serverpilot-workspace"></label>
+        <label class="span-2">采集方式<select id="observation-profile" name="observationProfile"></select></label>
         <label class="span-2">归属项目（可选）<input name="ownerProject" maxlength="64" placeholder="例如：research"></label>
       </div>
       <p class="dialog-help">首次完整的只读采集会识别 GPU、纯 CPU 或尚未确认的服务器；未确认的服务器不能参与 GPU 分配。</p>
@@ -128,6 +129,20 @@
     <form id="settings-form" method="dialog">
       <div class="dialog-header"><div><h2>设置</h2><p>本机服务与资源采集</p></div><button class="icon-button close" type="button" value="cancel" aria-label="关闭">×</button></div>
       <dl class="settings-list"><div><dt>本机服务地址</dt><dd id="service-url">—</dd></div><div><dt>数据目录</dt><dd id="data-directory">—</dd></div><div><dt>版本</dt><dd id="app-version">—</dd></div></dl>
+      <section class="mcp-entry" aria-label="Agent MCP">
+        <h3>Agent MCP</h3>
+        <p id="mcp-entry-status" class="mcp-entry-status">正在读取 MCP 入口。</p>
+        <div id="mcp-entry-found" hidden>
+          <div class="mcp-entry-row">
+            <div class="mcp-entry-heading"><span>入口路径</span><button class="button secondary mcp-copy" type="button" data-copy="path">复制</button></div>
+            <code id="mcp-entry-path"></code>
+          </div>
+          <div class="mcp-entry-row">
+            <div class="mcp-entry-heading"><span>mcpServers 配置</span><button class="button secondary mcp-copy" type="button" data-copy="config">复制</button></div>
+            <pre id="mcp-entry-config"></pre>
+          </div>
+        </div>
+      </section>
       <label>数据采集间隔<select id="collector-interval"><option value="5">5 秒</option><option value="10">10 秒</option><option value="30">30 秒</option></select></label>
       <div class="dialog-actions"><button class="button secondary" type="button" value="cancel">关闭</button><button class="button primary" id="save-settings" value="default">保存设置</button></div>
     </form>

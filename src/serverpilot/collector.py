@@ -11,9 +11,10 @@ import csv
 import json
 import math
 import re
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from typing import Any, Awaitable, Callable, NamedTuple
+from typing import Any, NamedTuple
 
 from serverpilot.adapters import (
     GPU_CPU_ONLY,
@@ -21,22 +22,21 @@ from serverpilot.adapters import (
     GPU_UNAVAILABLE,
     HOST_RESOURCES_SECTION,
     IDENTITY_SECTION,
+    MAX_RAW_SSH_STDOUT_BYTES,
     PROCESS_DETAILS_SECTION,
     PROCESS_SECTION,
     RAW_SSH_COMBINED_QUERY,
     RAW_SSH_OBSERVATION_ADAPTER,
-    MAX_RAW_SSH_STDOUT_BYTES,
     RawSSHProbe,
 )
-from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.collector_protocol import (
     SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
 )
+from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
 from serverpilot.service import BrokerService
 from serverpilot.timeutil import utcnow
-
 
 # Compatibility alias for deterministic test runners. Production collection
 # passes a typed probe kind to the sealed adapter instead of a command string.
@@ -199,7 +199,7 @@ def parse_server_script_snapshot(
         decoded,
         label="snapshot",
         keys={"schema_version", "identity", "host", "gpu_probe_available", "gpus", "processes"},
-        optional_keys={"gpu_probe_status"},
+        optional_keys={"gpu_probe_status", "scheduler"},
     )
     if (
         type(snapshot["schema_version"]) is not int
@@ -464,7 +464,29 @@ def parse_server_script_snapshot(
         processes=processes,
         observation_complete=gpu_probe_status != "unknown",
         gpu_probe_status=gpu_probe_status,
+        scheduler=_scheduler_capacity(snapshot.get("scheduler")),
     )
+
+
+def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    scheduler = _mapping(
+        value,
+        label="scheduler",
+        keys={"free_gpu_count", "gpu_name"},
+        optional_keys={"note"},
+    )
+    free_gpu_count = _integer(
+        scheduler["free_gpu_count"], label="scheduler.free_gpu_count", minimum=0, maximum=100_000
+    )
+    gpu_name = _text(scheduler["gpu_name"], label="scheduler.gpu_name", maximum=255)
+    note = _text(scheduler.get("note"), label="scheduler.note", maximum=200, nullable=True)
+    assert free_gpu_count is not None and gpu_name is not None
+    payload: dict[str, Any] = {"free_gpu_count": free_gpu_count, "gpu_name": gpu_name}
+    if note is not None:
+        payload["note"] = note
+    return payload
 
 
 def _value(row: list[str], index: int) -> str | None:
@@ -825,6 +847,14 @@ class SSHCollector:
 
     async def observe_endpoint(self, endpoint: EndpointConfig) -> EndpointObservation:
         observed_at = utcnow()
+        from serverpilot.plugins import is_plugin_profile, observe_plugin
+
+        if is_plugin_profile(endpoint.observation_profile):
+            return parse_server_script_snapshot(
+                observe_plugin(endpoint.observation_profile),
+                endpoint_id=endpoint.id,
+                observed_at=observed_at,
+            )
         if endpoint.observation_profile == "server-script-v1":
             return parse_server_script_snapshot(
                 await self._run(
@@ -921,4 +951,4 @@ class SSHCollector:
         results = await asyncio.gather(
             *(collect(index, endpoint) for index, endpoint in enumerate(selected))
         )
-        return {endpoint_id: result for endpoint_id, result in results}
+        return dict(results)

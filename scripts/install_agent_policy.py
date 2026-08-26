@@ -12,9 +12,8 @@ import argparse
 import os
 import stat
 import tempfile
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Sequence
-
 
 ROOT = Path(__file__).resolve().parents[1]
 POLICY = ROOT / "docs" / "AGENT_MCP_policy.en.md"

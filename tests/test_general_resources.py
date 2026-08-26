@@ -5,9 +5,8 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import event, select
 
-from serverpilot.models import ResourceAllocation, ResourceRunActual as ResourceRunActualModel
-from serverpilot.service import ActorContext, BrokerError
-from serverpilot.timeutil import json_dump
+from serverpilot.models import ResourceAllocation
+from serverpilot.models import ResourceRunActual as ResourceRunActualModel
 from serverpilot.schemas import (
     EndpointUpsert,
     RequestCreate,
@@ -15,6 +14,8 @@ from serverpilot.schemas import (
     ResourcePlanEvaluationInput,
     ResourceRunActualInput,
 )
+from serverpilot.service import ActorContext, BrokerError
+from serverpilot.timeutil import json_dump
 from tests.helpers import observation
 
 

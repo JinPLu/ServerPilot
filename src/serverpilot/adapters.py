@@ -13,12 +13,13 @@ import os
 import re
 import shlex
 import subprocess
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
-from typing import Any, Callable, Literal, Mapping
+from typing import Any, Literal
 
-from serverpilot.config import EndpointConfig
 from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
+from serverpilot.config import EndpointConfig
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_INSPECT_COMMAND,
     KEEPALIVE_PROTOCOL_INFO_CAPABILITIES,
@@ -33,7 +34,6 @@ from serverpilot.keepalive_protocol import (
     validate_gpu_uuid,
 )
 
-
 AdapterId = Literal["raw-ssh", "slurm-command", "server-script-v1"]
 Capability = Literal[
     "observation",
@@ -45,7 +45,7 @@ Capability = Literal[
 OperationId = Literal["scheduler.submit", "scheduler.cancel", "scheduler.upload"]
 ParameterType = Literal["string", "path"]
 RawSSHProbe = Literal["endpoint-telemetry"]
-ObservationProfile = Literal["linux-nvidia", "linux-host", "server-script-v1"]
+ObservationProfile = str
 
 
 GPU_QUERY = (

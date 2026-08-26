@@ -7,9 +7,9 @@ those remain the service's capacity, ownership, and approval checks.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Literal, Sequence
-
+from typing import Literal
 
 ProviderKind = Literal["direct-gpu", "host-capacity", "scheduler"]
 
@@ -90,7 +90,12 @@ def select_smallest_useful_plan(
             raise ValueError("candidate ids must be unique")
         seen_ids.add(candidate.id)
         if previous_size is not None:
-            if any(next_value < previous_value for next_value, previous_value in zip(candidate.resource_size, previous_size)):
+            if any(
+                next_value < previous_value
+                for next_value, previous_value in zip(
+                    candidate.resource_size, previous_size, strict=True
+                )
+            ):
                 raise ValueError("candidates must be monotonically expanding")
             if candidate.resource_size == previous_size:
                 raise ValueError("adjacent candidates must expand resources")

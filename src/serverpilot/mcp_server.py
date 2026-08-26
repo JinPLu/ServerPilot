@@ -3,18 +3,46 @@
 from __future__ import annotations
 
 import hashlib
+import inspect
 import math
 import os
 import re
 import secrets
 import time
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from typing import Any
 
+import anyio
+import httpx
 from mcp.server.fastmcp import Context, FastMCP
+from mcp.types import ToolAnnotations
+from pydantic import BaseModel, ConfigDict, Field
 
+from serverpilot import __version__
 from serverpilot.client import BrokerClient, BrokerClientError
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
+# The agent surface reports the GPU state code, not the control plane's
+# localized label. A caller decides on "can I claim this" and, when it cannot,
+# on who is holding it; the desktop app owns how that reads in a human language.
+ROUTINE_GPU_STATUS = {
+    "CONFLICT": "ownership_conflict",
+    "BUSY_UNMANAGED": "busy_unmanaged",
+    "ORPHANED_BUSY": "busy_unmanaged",
+    "RUNNING_MANAGED": "running",
+    "HELD": "held_idle",
+    "LEASED_IDLE": "held_idle",
+    "MAINTENANCE": "maintenance",
+    "DRAINING": "draining",
+    "DISABLED": "disabled",
+    "UNHEALTHY": "unhealthy",
+    "UNKNOWN_STALE": "unreachable",
+    "UNKNOWN_RECOVERING": "observing",
+}
+ROUTINE_GPU_STATUS_AVAILABLE = "available"
+ROUTINE_GPU_STATUS_UNKNOWN = "unavailable"
+ROUTINE_UNNAMED_TASK = "unnamed task"
 
 PLACED_LEASE_STATES = {"HELD", "ACTIVE"}
 TERMINAL_REQUEST_STATES = {"CANCELLED", "EXPIRED", "REJECTED", "RELEASED"}
@@ -23,40 +51,429 @@ RESOURCE_MARGINAL_MIN_SAVED_RATIO = 0.10
 RESOURCE_MARGINAL_MIN_SAVED_SECONDS = 120
 _ROUTINE_MCP_INSTANCE_ID = secrets.token_hex(16)
 
-MCP_INSTRUCTIONS = """常规 GPU 任务三个工具：gpu_status；gpu_apply 自动选卡(task=任务名)，不读取客户端 UI 标题；gpu_release。
-连接与工作目录在 servers[]，不逐卡重复：ssh=连接；workspace.path（workspace_path）=cwd，以它为工作目录；code_location=not_provided，不得把 workspace_path 当代码仓库路径；gpus[] 以 server_id 指回。
-cuda_device_order=PCI_BUS_ID；cuda_visible_devices=租约 ordinal，gpu_cuda_visible_devices=单卡 ordinal；勿用 UUID 选卡。
-gpu_status 只给可申请卡的容量(name/vram_mib/status)与 busy_gpus(task)，无遥测；server_id 收窄一台。
-遥测只在自己租到的卡上可解读：gpu_status(lease_id=…) 给 leased_gpus 的 recent_average 与 lease 汇总(min_memory_free_mib、slowest_gpu)，用于调 batch/并行。空闲卡上的负载是 ServerPilot 占卡，分配前会停，不是被占用的证据。
-无容量直接失败，不排队。失败即 gpu_release 并确认 released。只申请会用的卡：空闲的卡会被单独收回。
-只协调 GPU；勿用 SSH、SQLite、inventory、nvidia-smi 绕过协调。非 GPU 远端操作（Git 同步）无需 GPU 租约。"""
+MCP_INSTRUCTIONS = """Three tools cover routine GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=the task name, never the client UI title); gpu_release.
+Connection and working directory are projected once per server in servers[], not per card: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository; gpus[] point back with server_id.
+cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
+gpu_status gives allocatable capacity (name/vram_mib/status) and busy_gpus(task) with no telemetry; server_id narrows to one server. Unaccounted scheduler headroom appears in scheduler_servers, which you can gpu_apply against by server_id.
+Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Load on a free card is ServerPilot's own hold, stopped before allocation, and is not evidence the card is taken.
+no_capacity is an answer, not a failure, and nothing is queued; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. Claim only cards you will use: an idle card is reclaimed on its own.
+ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
 
 
-mcp = FastMCP(
-    "serverpilot",
-    json_response=True,
-    instructions=MCP_INSTRUCTIONS,
-)
+class _McpToolModel(BaseModel):
+    model_config = ConfigDict(extra="allow")
 
 
-def _client(actor_name: str | None = None) -> BrokerClient:
-    ensure_broker_ready_for_mcp()
-    return BrokerClient.from_env(actor=actor_name)
+class SchedulerSubmitOnceRequest(_McpToolModel):
+    target_id: str
+    project_id: str
+    task_ref: str
+    purpose: str
+    approval_ref: str
+    duration_seconds: float
+    constraints: dict[str, Any]
+    scheduler: dict[str, Any]
+    script_body: str
 
 
-def _routine_client() -> BrokerClient:
-    ensure_broker_ready_for_mcp()
-    return BrokerClient.from_env(actor="agent")
+class ResourcePlanCandidate(_McpToolModel):
+    candidate_key: str
+    quantities: dict[str, Any]
+    predicted_runtime_seconds: float
+    predicted_saved_seconds: float
+    predicted_saved_ratio: float
+    satisfies_marginal_threshold: bool
+
+
+class ResourcePlanEvaluation(_McpToolModel):
+    project_id: str
+    task_ref: str
+    baseline_runtime_seconds: float
+    candidates: list[ResourcePlanCandidate]
+    selected_candidate_key: str | None = None
+    marginal_min_saved_ratio: float = Field(default=RESOURCE_MARGINAL_MIN_SAVED_RATIO)
+    marginal_min_saved_seconds: float = Field(default=RESOURCE_MARGINAL_MIN_SAVED_SECONDS)
+
+
+class ResourceClaimForecast(_McpToolModel):
+    quantities: dict[str, Any]
+    predicted_runtime_seconds: float
+
+
+class ResourceClaimBody(_McpToolModel):
+    project_id: str
+    task_ref: str
+    purpose: str
+    quantities: dict[str, Any]
+    forecast: ResourceClaimForecast
+
+
+class ResourceRunActual(_McpToolModel):
+    project_id: str
+    task_ref: str
+    quantities: dict[str, Any]
+    outcome: str
+
+
+_http_client: httpx.AsyncClient | None = None
+
+
+def _broker_url() -> str:
+    url = os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787")
+    if not url.startswith(("http://", "https://")):
+        raise BrokerClientError("SERVERPILOT_URL must start with http:// or https://")
+    return url.rstrip("/")
+
+
+class _AsyncBroker:
+    """One AsyncClient for the MCP process; headers still vary by actor."""
+
+    def __init__(self, http: httpx.AsyncClient, *, url: str, actor: str) -> None:
+        self._http = http
+        self.url = url.rstrip("/")
+        self.actor = actor or "agent"
+        self._last_state_revision: int | None = None
+
+    async def request(
+        self,
+        method: str,
+        path: str,
+        *,
+        json_body: dict[str, Any] | None = None,
+        idempotency_key: str | None = None,
+        params: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        headers = {"X-ServerPilot-Actor": self.actor}
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key
+        try:
+            response = await self._http.request(
+                method,
+                f"{self.url}{path}",
+                headers=headers,
+                json=json_body,
+                params=params,
+            )
+        except httpx.HTTPError as exc:
+            raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            content_type = response.headers.get("content-type", "unknown")
+            raise BrokerClientError(
+                f"broker returned non-JSON HTTP {response.status_code} ({content_type})"
+            ) from exc
+        if response.is_error:
+            error = payload.get("error", {}) if isinstance(payload, dict) else {}
+            code = error.get("code")
+            message = error.get("message", "request failed")
+            raise BrokerClientError(
+                f"broker HTTP {response.status_code}: {code or 'unknown'}: {message}",
+                code=code if isinstance(code, str) else None,
+                status_code=response.status_code,
+            )
+        if not isinstance(payload, dict):
+            raise BrokerClientError("broker returned an invalid JSON envelope")
+        return payload
+
+    async def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        return await self.request("GET", path, params=params)
+
+    async def post(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        return await self.request("POST", path, json_body=body, idempotency_key=idempotency_key)
+
+    async def patch(
+        self,
+        path: str,
+        body: dict[str, Any] | None = None,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.request("PATCH", path, json_body=body, idempotency_key=idempotency_key)
+
+    async def control_plane_state(
+        self,
+        *,
+        minimum_snapshot_revision: int | None = None,
+        timeout_seconds: float = 0,
+        poll_interval_seconds: float = 0.25,
+    ) -> dict[str, Any]:
+        if minimum_snapshot_revision is not None and (
+            isinstance(minimum_snapshot_revision, bool)
+            or not isinstance(minimum_snapshot_revision, int)
+            or minimum_snapshot_revision < 0
+        ):
+            raise BrokerClientError("minimum_snapshot_revision must be a non-negative integer")
+        if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, int | float):
+            raise BrokerClientError("timeout_seconds must be a number")
+        if isinstance(poll_interval_seconds, bool) or not isinstance(
+            poll_interval_seconds, int | float
+        ):
+            raise BrokerClientError("poll_interval_seconds must be a number")
+        timeout_seconds = float(timeout_seconds)
+        poll_interval_seconds = float(poll_interval_seconds)
+        if not 0 <= timeout_seconds <= 300:
+            raise BrokerClientError("timeout_seconds must be between 0 and 300")
+        if not 0.05 <= poll_interval_seconds <= 10:
+            raise BrokerClientError("poll_interval_seconds must be between 0.05 and 10")
+
+        deadline = time.monotonic() + timeout_seconds
+        previous_revision = self._last_state_revision
+        while True:
+            payload = await self.get("/api/v1/state")
+            revision = payload.get("snapshot_revision")
+            if isinstance(revision, bool) or not isinstance(revision, int):
+                raise BrokerClientError("broker state returned an invalid snapshot_revision")
+            data = payload.get("data")
+            if not isinstance(data, dict) or not isinstance(data.get("current"), dict):
+                raise BrokerClientError("broker state returned an invalid current state")
+            if previous_revision is not None and revision < previous_revision:
+                raise BrokerClientError(
+                    f"broker state revision rolled back from {previous_revision} to {revision}"
+                )
+            previous_revision = revision
+            self._last_state_revision = revision
+            if minimum_snapshot_revision is None or revision >= minimum_snapshot_revision:
+                return payload
+            remaining_seconds = deadline - time.monotonic()
+            if remaining_seconds <= 0:
+                raise BrokerClientError(
+                    f"broker state revision {revision} is below required {minimum_snapshot_revision}"
+                )
+            await anyio.sleep(min(poll_interval_seconds, remaining_seconds))
+
+    async def snapshot(
+        self,
+        *,
+        compact: bool = False,
+        endpoint_id: str | None = None,
+        state: str | None = None,
+        only_available: bool = False,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "compact": compact,
+            "only_available": only_available,
+        }
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        if state:
+            params["state"] = state
+        return await self.get("/api/v1/snapshot", params=params)
+
+    async def gpus(
+        self,
+        *,
+        state: str | None = None,
+        endpoint_id: str | None = None,
+        only_available: bool = False,
+        compact: bool = False,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {
+            "compact": compact,
+            "only_available": only_available,
+        }
+        if state:
+            params["state"] = state
+        if endpoint_id:
+            params["endpoint_id"] = endpoint_id
+        return await self.get("/api/v1/gpus", params=params)
+
+    async def leases(self, *, project_id: str | None = None) -> dict[str, Any]:
+        payload = await self.get("/api/v1/leases")
+        leases = payload.get("data")
+        if not isinstance(leases, list):
+            raise BrokerClientError("broker leases response is invalid")
+        if project_id:
+            leases = [lease for lease in leases if lease.get("project_id") == project_id]
+        return {**payload, "data": leases}
+
+    async def workload_profiles(self, *, project_id: str | None = None) -> dict[str, Any]:
+        params = {"project_id": project_id} if project_id else None
+        return await self.get("/api/v1/workload-profiles", params=params)
+
+    async def scheduler_targets(self) -> dict[str, Any]:
+        return await self.get("/api/v1/scheduler-targets")
+
+    async def scheduler_jobs(self, *, project_id: str | None = None) -> dict[str, Any]:
+        params = {"project_id": project_id} if project_id else None
+        return await self.get("/api/v1/scheduler-jobs", params=params)
+
+    async def coordination(self) -> dict[str, Any]:
+        return await self.get("/api/v1/coordination")
+
+    async def resource_providers(
+        self,
+        *,
+        provider_type: str | None = None,
+        enabled: bool | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if provider_type is not None:
+            params["provider_type"] = provider_type
+        if enabled is not None:
+            params["enabled"] = enabled
+        return await self.get("/api/v1/resource-providers", params=params or None)
+
+    async def resource_monitor(self, *, project_id: str | None = None) -> dict[str, Any]:
+        params = {"project_id": project_id} if project_id else None
+        return await self.get("/api/v1/resource-monitor", params=params)
+
+    async def resource_claims(
+        self,
+        *,
+        project_id: str | None = None,
+        state: str | None = None,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if project_id is not None:
+            params["project_id"] = project_id
+        if state is not None:
+            params["state"] = state
+        return await self.get("/api/v1/resource-claims", params=params or None)
+
+    async def evaluate_resource_plan(
+        self,
+        evaluation: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.post(
+            "/api/v1/resource-plan-evaluations",
+            evaluation,
+            idempotency_key=idempotency_key,
+        )
+
+    async def claim_resource(
+        self,
+        claim: dict[str, Any],
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.post(
+            "/api/v1/resource-claims",
+            claim,
+            idempotency_key=idempotency_key,
+        )
+
+    async def release_resource_claim(
+        self,
+        claim_id: str,
+        *,
+        reason: str,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        return await self.post(
+            f"/api/v1/resource-claims/{claim_id}/release",
+            {"reason": reason},
+            idempotency_key=idempotency_key,
+        )
+
+    async def record_resource_run_actual(
+        self,
+        actual: dict[str, Any],
+        *,
+        claim_id: str | None = None,
+        evaluation_id: str | None = None,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        params: dict[str, Any] = {}
+        if claim_id:
+            params["claim_id"] = claim_id
+        if evaluation_id:
+            params["evaluation_id"] = evaluation_id
+        return await self.request(
+            "POST",
+            "/api/v1/resource-run-actuals",
+            json_body=actual,
+            params=params or None,
+            idempotency_key=idempotency_key,
+        )
+
+
+def _broker(actor: str | None) -> BrokerClient | _AsyncBroker:
+    if _http_client is not None:
+        return _AsyncBroker(_http_client, url=_broker_url(), actor=actor or "agent")
+    return BrokerClient.from_env(actor=actor)
+
+
+async def _client_call(target: Any, method: str, *args: Any, **kwargs: Any) -> Any:
+    result = getattr(target, method)(*args, **kwargs)
+    if inspect.isawaitable(result):
+        return await result
+    return result
+
+
+def _mapping(value: Any) -> dict[str, Any]:
+    if isinstance(value, BaseModel):
+        return value.model_dump()
+    if isinstance(value, dict):
+        return value
+    raise ValueError("expected an object")
+
+
+@asynccontextmanager
+async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
+    global _http_client
+    await anyio.to_thread.run_sync(ensure_broker_ready_for_mcp)
+    async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
+        _http_client = client
+        try:
+            yield {}
+        finally:
+            _http_client = None
+
+
+def _build_server(instructions: str) -> FastMCP:
+    server = FastMCP("serverpilot", instructions=instructions, lifespan=_mcp_lifespan)
+    # FastMCP has no version argument, so the low-level server would report the
+    # MCP SDK's version in initialize and a client could not tell which
+    # ServerPilot it is talking to.
+    server._mcp_server.version = __version__
+    return server
+
+
+mcp = _build_server(MCP_INSTRUCTIONS)
+
+
+def _client(actor_name: str | None = None) -> BrokerClient | _AsyncBroker:
+    if _http_client is None:
+        ensure_broker_ready_for_mcp()
+    return _broker(actor_name)
+
+
+def _routine_client() -> BrokerClient | _AsyncBroker:
+    return _broker("agent")
+
+
+def _routine_no_capacity(
+    exc: BrokerClientError, *, gpu_count: int, server_id: str | None
+) -> dict[str, Any]:
+    """Report a documented outcome as data rather than as a tool failure."""
+
+    return {
+        "no_capacity": {
+            "reason": "no_single_server_satisfies_the_request",
+            "message": str(exc).split(": ", 2)[-1],
+            "gpu_count": gpu_count,
+            "server_id": server_id,
+        }
+    }
 
 
 def _routine_task(task: str | None) -> str:
     if task is None:
-        return "未命名任务"
+        return ROUTINE_UNNAMED_TASK
     value = task.strip()
     if not value:
-        raise ValueError("提供 task 时不能为空")
+        raise ValueError("task must not be empty when it is given")
     if len(value) > 120:
-        raise ValueError("task 最长 120 个字符")
+        raise ValueError("task must be at most 120 characters")
     return value
 
 
@@ -65,7 +482,7 @@ def _routine_request_key(context: Context | None) -> str | None:
 
     if context is None:
         return None
-    request_id = f"{_ROUTINE_MCP_INSTANCE_ID}:{context.request_id}".encode("utf-8")
+    request_id = f"{_ROUTINE_MCP_INSTANCE_ID}:{context.request_id}".encode()
     return f"mcp-request:{hashlib.sha256(request_id).hexdigest()}"
 
 
@@ -372,9 +789,9 @@ def _require_resource_plan_fields(evaluation: dict[str, Any]) -> None:
 
 def _require_endpoint_admin_contract(approval_ref: str, idempotency_key: str) -> None:
     if not isinstance(approval_ref, str) or not approval_ref.strip():
-        raise ValueError("服务器管理需要当前任务明确授权，并提供非空 approval_ref")
+        raise ValueError("server administration needs explicit authorisation for this task and a non-empty approval_ref")
     if not isinstance(idempotency_key, str) or not idempotency_key.strip():
-        raise ValueError("服务器管理需要提供稳定且非空的 idempotency_key")
+        raise ValueError("server administration needs a stable, non-empty idempotency_key")
 
 
 def _bounded_seconds(value: float, *, name: str, minimum: float, maximum: float) -> float:
@@ -542,8 +959,9 @@ def _compact_gpu_status(payload: dict[str, Any]) -> dict[str, Any]:
         "data_age_seconds": data.get("data_age_seconds"),
         "freshness_seconds": data.get("freshness_seconds"),
         "availability_semantics": (
-            "可用 GPU 包含空闲卡和已确认的逐卡空闲占卡。真正分配前，ServerPilot 会先停止选中卡的占卡程序，"
-            "刷新确认后再走普通申请；任务占用和冲突 GPU 不可用。"
+            "Allocatable GPUs include free cards and cards on confirmed per-card idle hold. "
+            "Before handing one over, ServerPilot stops that card's hold, re-confirms it, then "
+            "allocates normally. Cards running a task or in conflict are not allocatable."
         ),
         "servers": servers,
         "gpus": compact_gpus,
@@ -591,13 +1009,18 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         if not isinstance(gpu, dict):
             continue
         available = gpu.get("publicly_available")
-        status = gpu.get("public_status")
-        if not isinstance(available, bool) or not isinstance(status, str) or not status:
-            raise ValueError("ServerPilot 返回的 GPU 公开状态无效")
+        state = gpu.get("state")
+        if not isinstance(available, bool) or not isinstance(state, str) or not state:
+            raise ValueError("ServerPilot returned an invalid GPU state")
+        status = (
+            ROUTINE_GPU_STATUS_AVAILABLE
+            if available
+            else ROUTINE_GPU_STATUS.get(state, ROUTINE_GPU_STATUS_UNKNOWN)
+        )
         lease = gpu.get("lease")
         lease = lease if isinstance(lease, dict) else None
         server_id = gpu.get("endpoint_id")
-        task = (lease.get("task_ref") or "未命名任务") if lease is not None else None
+        task = (lease.get("task_ref") or ROUTINE_UNNAMED_TASK) if lease is not None else None
         identity = {
             "server_id": server_id,
             "gpu_id": gpu.get("gpu_uuid"),
@@ -632,15 +1055,12 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
             busy_gpus.append({**identity, "status": status, "task": task})
             continue
         reference(server_id)
-        # Collapse the keepalive variants of "可用".  How ServerPilot holds an
-        # idle card is its own business; the caller can only act on whether the
-        # card can be claimed.
         gpus.append(
             {
                 **identity,
                 "name": gpu.get("name"),
                 "vram_mib": gpu.get("total_vram_mib"),
-                "status": status.split(" · ", 1)[0],
+                "status": status,
             }
         )
 
@@ -663,9 +1083,28 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
     if busy_gpus:
         result["busy_gpus"] = busy_gpus
+    scheduler_servers: list[dict[str, Any]] = []
     cpu_only_servers: list[dict[str, Any]] = []
     for endpoint in endpoints:
-        if not isinstance(endpoint, dict) or endpoint.get("resource_kind") != "cpu_only":
+        if not isinstance(endpoint, dict):
+            continue
+        capacity = endpoint.get("scheduler_capacity")
+        if (
+            isinstance(capacity, dict)
+            and isinstance(capacity.get("free_gpu_count"), int)
+            and isinstance(capacity.get("gpu_name"), str)
+            and capacity["gpu_name"]
+        ):
+            scheduler_servers.append(
+                {
+                    "server_id": endpoint.get("id"),
+                    "free_gpu_count": capacity["free_gpu_count"],
+                    "gpu_name": capacity["gpu_name"],
+                    "note": "request on demand; nothing is queued",
+                }
+            )
+            continue
+        if endpoint.get("resource_kind") != "cpu_only":
             continue
         monitor = endpoint.get("monitor")
         monitor = monitor if isinstance(monitor, dict) else {}
@@ -682,18 +1121,25 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
                 ),
             }
         )
+    if scheduler_servers:
+        result["scheduler_servers"] = scheduler_servers
     if cpu_only_servers:
         result["cpu_only_servers"] = cpu_only_servers
     summary = data.get("summary") if isinstance(data, dict) else None
-    if isinstance(summary, dict) and summary.get("total_gpus") == 0:
-        result["message"] = "无 GPU"
-    elif not gpus:
-        total_gpus = summary.get("total_gpus") if isinstance(summary, dict) else None
-        result["no_capacity"] = {
-            "reason": "all_gpus_busy_or_unavailable",
-            "message": "当前没有可申请 GPU；busy_gpus 已列出占用它们的任务。",
-            "total_gpus": total_gpus if isinstance(total_gpus, int) else None,
-        }
+    has_scheduler_free = any(
+        isinstance(item.get("free_gpu_count"), int) and item["free_gpu_count"] > 0
+        for item in scheduler_servers
+    )
+    if not gpus and not has_scheduler_free:
+        if isinstance(summary, dict) and summary.get("total_gpus") == 0 and not scheduler_servers:
+            result["message"] = "no GPUs are registered"
+        else:
+            total_gpus = summary.get("total_gpus") if isinstance(summary, dict) else None
+            result["no_capacity"] = {
+                "reason": "all_gpus_busy_or_unavailable",
+                "message": "no GPU is allocatable right now; busy_gpus lists the tasks holding them.",
+                "total_gpus": total_gpus if isinstance(total_gpus, int) else None,
+            }
     return result
 
 
@@ -711,8 +1157,8 @@ def _routine_lease_view(
                 "lease_id": lease_id,
                 "reason": "lease_holds_no_visible_gpu",
                 "message": (
-                    "该 lease 当前没有可见 GPU：可能已释放、已被空闲回收，"
-                    "或不在本次 server_id 收窄的范围内。"
+                    "This lease has no visible GPU: it may have been released, reclaimed as "
+                    "idle, or fall outside the server_id this call narrowed to."
                 ),
             }
         }
@@ -743,7 +1189,7 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
 
     lease = payload.get("lease")
     if not isinstance(lease, dict):
-        raise ValueError("ServerPilot 没有返回 GPU 租约")
+        raise ValueError("ServerPilot returned no GPU lease")
     rows: list[dict[str, Any]] = []
     resources: list[dict[str, Any]] = []
     for resource in lease.get("resources", []):
@@ -756,7 +1202,7 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
         cuda_visible_devices = resource.get("cuda_visible_devices")
         cuda_device_order = resource.get("cuda_device_order")
         if cuda_device_order != "PCI_BUS_ID" or not isinstance(cuda_visible_devices, str):
-            raise ValueError("ServerPilot 返回了无效的 CUDA 执行 selector")
+            raise ValueError("ServerPilot returned an invalid CUDA selector")
         resource_projection = {
             "server_id": server_id,
             "workspace_path": workspace_path,
@@ -776,7 +1222,7 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
                     or not isinstance(cuda_ordinal, int)
                     or cuda_ordinal < 0
                 ):
-                    raise ValueError("ServerPilot 返回了无效的 GPU CUDA ordinal")
+                    raise ValueError("ServerPilot returned an invalid GPU CUDA ordinal")
                 rows.append(
                     {
                         "server_id": server_id,
@@ -936,7 +1382,7 @@ def _compact_coordination(payload: dict[str, Any]) -> dict[str, Any]:
 
 
 @mcp.tool()
-def control_plane_state(
+async def control_plane_state(
     agent_name: str | None = None,
     minimum_snapshot_revision: int | None = None,
     timeout_seconds: float = 0,
@@ -944,28 +1390,32 @@ def control_plane_state(
 ) -> dict[str, Any]:
     """Return the canonical broker state envelope from one control-plane revision."""
 
-    return _client(agent_name).control_plane_state(
+    return await _client_call(
+        _client(agent_name),
+        "control_plane_state",
         minimum_snapshot_revision=minimum_snapshot_revision,
         timeout_seconds=timeout_seconds,
         poll_interval_seconds=poll_interval_seconds,
     )
 
 
-@mcp.tool()
-def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-    """列出可申请 GPU、占用中的 busy_gpus 和纯 CPU 服务器；给出 lease_id 时附带该租约的逐卡遥测。"""
+@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+async def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
+    """List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
 
     if server_id is not None:
         server_id = server_id.strip()
         if not server_id:
-            raise ValueError("提供 server_id 时不能为空")
+            raise ValueError("server_id must not be empty when it is given")
     if lease_id is not None:
         lease_id = lease_id.strip()
         if not lease_id:
-            raise ValueError("提供 lease_id 时不能为空")
+            raise ValueError("lease_id must not be empty when it is given")
     # Busy cards are filtered in the projection, not by the broker, so one call
     # can name their tasks and still carry the caller's own lease telemetry.
-    payload = _routine_client().snapshot(
+    payload = await _client_call(
+        _routine_client(),
+        "snapshot",
         compact=False,
         endpoint_id=server_id,
         only_available=False,
@@ -974,15 +1424,15 @@ def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dic
 
 
 @mcp.tool()
-def gpu_coordination(compact: bool = True) -> dict[str, Any]:
-    """返回只读协作面板，显示可见 Agent、工作任务租约和服务器容量。"""
+async def gpu_coordination(compact: bool = True) -> dict[str, Any]:
+    """Return a read-only coordination board of visible agents, workload leases and server capacity."""
 
-    payload = _client().coordination()
+    payload = await _client_call(_client(), "coordination")
     return _compact_coordination(payload) if compact else payload
 
 
 @mcp.tool()
-def gpu_list(
+async def gpu_list(
     state: str | None = None,
     server_id: str | None = None,
     only_available: bool = False,
@@ -990,7 +1440,9 @@ def gpu_list(
 ) -> dict[str, Any]:
     """Advanced read: list project-visible GPUs from the narrow REST projection."""
 
-    return _client().gpus(
+    return await _client_call(
+        _client(),
+        "gpus",
         state=state,
         endpoint_id=server_id,
         only_available=only_available,
@@ -999,38 +1451,40 @@ def gpu_list(
 
 
 @mcp.tool()
-def gpu_who(project_id: str | None = None) -> dict[str, Any]:
+async def gpu_who(project_id: str | None = None) -> dict[str, Any]:
     """List project-visible leases and workload bindings; returns no SSH or task secrets."""
 
-    return _client().leases(project_id=project_id)
+    return await _client_call(_client(), "leases", project_id=project_id)
 
 
 @mcp.tool()
-def gpu_scheduler_targets() -> dict[str, Any]:
+async def gpu_scheduler_targets() -> dict[str, Any]:
     """List globally registered external scheduler targets.
 
     Scheduler targets are not raw GPU servers. Their login helpers and access
     hints are metadata; Slurm remains the resource allocator.
     """
 
-    return _client().scheduler_targets()
+    return await _client_call(_client(), "scheduler_targets")
 
 
 @mcp.tool()
-def gpu_scheduler_access_status(target_id: str) -> dict[str, Any]:
+async def gpu_scheduler_access_status(target_id: str) -> dict[str, Any]:
     """Check whether an external scheduler is reachable through its approved access path.
 
     This read-only check does not connect or change VPN state and does not submit a job.
     """
 
-    return _client().get(f"/api/v1/scheduler-targets/{target_id}/access")
+    return await _client_call(
+        _client(), "get", f"/api/v1/scheduler-targets/{target_id}/access"
+    )
 
 
 @mcp.tool()
-def gpu_scheduler_profiles(project_id: str) -> dict[str, Any]:
+async def gpu_scheduler_profiles(project_id: str) -> dict[str, Any]:
     """List enabled Slurm profiles explicitly granted to a project."""
 
-    result = _client().workload_profiles(project_id=project_id)
+    result = await _client_call(_client(), "workload_profiles", project_id=project_id)
     result["data"] = [
         profile for profile in result.get("data", []) if profile.get("runtime_kind") == "slurm"
     ]
@@ -1038,7 +1492,7 @@ def gpu_scheduler_profiles(project_id: str) -> dict[str, Any]:
 
 
 @mcp.tool()
-def gpu_scheduler_submit_profile(
+async def gpu_scheduler_submit_profile(
     agent_name: str,
     profile_id: str,
     project_id: str,
@@ -1049,7 +1503,9 @@ def gpu_scheduler_submit_profile(
 
     if not profile_id.strip() or not project_id.strip() or not task.strip():
         raise ValueError("profile_id, project_id and task must not be empty")
-    return _client(agent_name).post(
+    return await _client_call(
+        _client(agent_name),
+        "post",
         f"/api/v1/workload-profiles/{profile_id}/scheduler-submit",
         {"project_id": project_id, "task_ref": task},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1057,9 +1513,9 @@ def gpu_scheduler_submit_profile(
 
 
 @mcp.tool()
-def gpu_scheduler_submit_once(
+async def gpu_scheduler_submit_once(
     agent_name: str,
-    request: dict[str, Any],
+    request: SchedulerSubmitOnceRequest,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Submit one project-owned Slurm script and bounded resource request.
@@ -1069,6 +1525,7 @@ def gpu_scheduler_submit_once(
     ServerPilot omits the submitted body unless retain_submission_body is explicitly true.
     """
 
+    request_body = _mapping(request)
     required = {
         "target_id",
         "project_id",
@@ -1080,18 +1537,20 @@ def gpu_scheduler_submit_once(
         "scheduler",
         "script_body",
     }
-    missing = sorted(field for field in required if not request.get(field))
+    missing = sorted(field for field in required if not request_body.get(field))
     if missing:
         raise ValueError("gpu_scheduler_submit_once requires " + ", ".join(missing))
-    return _client(agent_name).post(
+    return await _client_call(
+        _client(agent_name),
+        "post",
         "/api/v1/scheduler-jobs",
-        request,
+        request_body,
         idempotency_key=idempotency_key or secrets.token_hex(16),
     )
 
 
 @mcp.tool()
-def gpu_scheduler_job_status(
+async def gpu_scheduler_job_status(
     agent_name: str,
     job_id: str | None = None,
     project_id: str | None = None,
@@ -1100,12 +1559,12 @@ def gpu_scheduler_job_status(
 
     client = _client(agent_name)
     if job_id:
-        return client.get(f"/api/v1/scheduler-jobs/{job_id}")
-    return client.scheduler_jobs(project_id=project_id)
+        return await _client_call(client, "get", f"/api/v1/scheduler-jobs/{job_id}")
+    return await _client_call(client, "scheduler_jobs", project_id=project_id)
 
 
 @mcp.tool()
-def gpu_scheduler_cancel(
+async def gpu_scheduler_cancel(
     agent_name: str,
     job_id: str,
     reason: str,
@@ -1115,7 +1574,9 @@ def gpu_scheduler_cancel(
 
     if not job_id.strip() or not reason.strip():
         raise ValueError("job_id and reason must not be empty")
-    return _client(agent_name).post(
+    return await _client_call(
+        _client(agent_name),
+        "post",
         f"/api/v1/scheduler-jobs/{job_id}/cancel",
         {"reason": reason},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1301,10 +1762,12 @@ def gpu_cancel_request(request_id: str, idempotency_key: str | None = None) -> d
 
 
 @mcp.tool()
-def gpu_activate_lease(lease_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
+async def gpu_activate_lease(lease_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
     """Record that a held lease is active; it does not launch any command."""
 
-    return _client().post(
+    return await _client_call(
+        _client(),
+        "post",
         f"/api/v1/leases/{lease_id}/activate",
         {},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1312,10 +1775,12 @@ def gpu_activate_lease(lease_id: str, idempotency_key: str | None = None) -> dic
 
 
 @mcp.tool()
-def gpu_renew_lease(lease_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
-    """续期调用者持有的工作任务租约。"""
+async def gpu_renew_lease(lease_id: str, idempotency_key: str | None = None) -> dict[str, Any]:
+    """Renew a workload lease this caller holds."""
 
-    return _client().post(
+    return await _client_call(
+        _client(),
+        "post",
         f"/api/v1/leases/{lease_id}/renew",
         {},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1323,12 +1788,14 @@ def gpu_renew_lease(lease_id: str, idempotency_key: str | None = None) -> dict[s
 
 
 @mcp.tool()
-def gpu_release_lease(
+async def gpu_release_lease(
     lease_id: str, reason: str, idempotency_key: str | None = None
 ) -> dict[str, Any]:
     """Release a lease cooperatively. Real observed compute processes remain fail-closed."""
 
-    return _client().post(
+    return await _client_call(
+        _client(),
+        "post",
         f"/api/v1/leases/{lease_id}/release",
         {"reason": reason},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1336,7 +1803,7 @@ def gpu_release_lease(
 
 
 @mcp.tool()
-def gpu_bind_workload(
+async def gpu_bind_workload(
     lease_id: str,
     run_id: str,
     process_keys: list[str] | None = None,
@@ -1344,7 +1811,9 @@ def gpu_bind_workload(
 ) -> dict[str, Any]:
     """Bind a lease to a sanitized run/process identity for later reconciliation."""
 
-    return _client().post(
+    return await _client_call(
+        _client(),
+        "post",
         f"/api/v1/leases/{lease_id}/bind-workload",
         {"run_id": run_id, "process_keys": process_keys or []},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1352,15 +1821,17 @@ def gpu_bind_workload(
 
 
 @mcp.tool()
-def gpu_bind_observed_workload(
+async def gpu_bind_observed_workload(
     lease_id: str,
     run_id: str | None = None,
     idempotency_key: str | None = None,
     agent_name: str | None = None,
 ) -> dict[str, Any]:
-    """把已启动任务的最新采集进程绑定到调用者租约；不会启动或修改远端任务。"""
+    """Bind the latest observed processes of an already-started task to this caller's lease; never starts or changes a remote workload."""
 
-    return _client(agent_name).post(
+    return await _client_call(
+        _client(agent_name),
+        "post",
         f"/api/v1/leases/{lease_id}/bind-observed-workload",
         {"run_id": run_id} if run_id else {},
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1374,50 +1845,56 @@ def gpu_list_reservations() -> dict[str, Any]:
 
 
 @mcp.tool()
-def gpu_history(after_id: int = 0, limit: int = 20) -> dict[str, Any]:
+async def gpu_history(after_id: int = 0, limit: int = 20) -> dict[str, Any]:
     """Read the append-only, redacted audit history for visible resources."""
 
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 200:
         raise ValueError("limit must be an integer between 1 and 200")
-    return _client().get("/api/v1/events", params={"after_id": after_id, "limit": limit})
+    return await _client_call(
+        _client(), "get", "/api/v1/events", params={"after_id": after_id, "limit": limit}
+    )
 
 
 @mcp.tool()
-def resource_providers(
+async def resource_providers(
     agent_name: str | None = None,
     provider_type: str | None = None,
     enabled: bool | None = None,
 ) -> dict[str, Any]:
     """List generic resource providers: direct GPU, host CPU/memory capacity, and external schedulers."""
 
-    return _client(agent_name).resource_providers(provider_type=provider_type, enabled=enabled)
+    return await _client_call(
+        _client(agent_name), "resource_providers", provider_type=provider_type, enabled=enabled
+    )
 
 
 @mcp.tool()
-def resource_monitor(
+async def resource_monitor(
     agent_name: str | None = None,
     project_id: str | None = None,
 ) -> dict[str, Any]:
     """Return real-time human/agent monitor data for generic resources and active claims."""
 
-    return _client(agent_name).resource_monitor(project_id=project_id)
+    return await _client_call(_client(agent_name), "resource_monitor", project_id=project_id)
 
 
 @mcp.tool()
-def resource_claims(
+async def resource_claims(
     agent_name: str | None = None,
     project_id: str | None = None,
     state: str | None = None,
 ) -> dict[str, Any]:
     """List generic resource claims across visible projects and agents."""
 
-    return _client(agent_name).resource_claims(project_id=project_id, state=state)
+    return await _client_call(
+        _client(agent_name), "resource_claims", project_id=project_id, state=state
+    )
 
 
 @mcp.tool()
-def resource_evaluate_plan(
+async def resource_evaluate_plan(
     agent_name: str,
-    evaluation: dict[str, Any],
+    evaluation: ResourcePlanEvaluation,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Persist an explicit marginal-utility resource decision.
@@ -1426,17 +1903,20 @@ def resource_evaluate_plan(
     threshold is 10% remaining-time savings and 120 seconds absolute savings.
     """
 
-    _require_resource_plan_fields(evaluation)
-    return _client(agent_name).evaluate_resource_plan(
-        evaluation,
+    evaluation_body = _mapping(evaluation)
+    _require_resource_plan_fields(evaluation_body)
+    return await _client_call(
+        _client(agent_name),
+        "evaluate_resource_plan",
+        evaluation_body,
         idempotency_key=idempotency_key or secrets.token_hex(16),
     )
 
 
 @mcp.tool()
-def resource_claim(
+async def resource_claim(
     agent_name: str,
-    claim: dict[str, Any],
+    claim: ResourceClaimBody,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Claim the selected generic resource plan.
@@ -1445,15 +1925,18 @@ def resource_claim(
     the placement; a queued or null allocation is not permission to run.
     """
 
-    _require_resource_claim_fields(claim)
-    return _client(agent_name).claim_resource(
-        claim,
+    claim_body = _mapping(claim)
+    _require_resource_claim_fields(claim_body)
+    return await _client_call(
+        _client(agent_name),
+        "claim_resource",
+        claim_body,
         idempotency_key=idempotency_key or secrets.token_hex(16),
     )
 
 
 @mcp.tool()
-def resource_release(
+async def resource_release(
     agent_name: str,
     claim_id: str,
     reason: str = "workload_completed",
@@ -1463,7 +1946,9 @@ def resource_release(
 
     if not claim_id.strip():
         raise ValueError("claim_id must not be empty")
-    return _client(agent_name).release_resource_claim(
+    return await _client_call(
+        _client(agent_name),
+        "release_resource_claim",
         claim_id,
         reason=reason,
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1471,30 +1956,33 @@ def resource_release(
 
 
 @mcp.tool()
-def resource_record_actual(
+async def resource_record_actual(
     agent_name: str,
-    actual: dict[str, Any],
+    actual: ResourceRunActual,
     claim_id: str | None = None,
     evaluation_id: str | None = None,
     idempotency_key: str | None = None,
 ) -> dict[str, Any]:
     """Record observed runtime and outcome for later scheduling calibration and human monitoring."""
 
+    actual_body = _mapping(actual)
     if (
-        not actual.get("project_id")
-        or not actual.get("task_ref")
-        or not actual.get("quantities")
-        or not actual.get("outcome")
+        not actual_body.get("project_id")
+        or not actual_body.get("task_ref")
+        or not actual_body.get("quantities")
+        or not actual_body.get("outcome")
     ):
         raise ValueError(
             "resource_record_actual requires project_id, task_ref, quantities, and outcome"
         )
-    if not isinstance(actual["quantities"], dict) or not _has_resource_quantity(
-        actual["quantities"]
+    if not isinstance(actual_body["quantities"], dict) or not _has_resource_quantity(
+        actual_body["quantities"]
     ):
         raise ValueError("resource_record_actual quantities must include a resource")
-    return _client(agent_name).record_resource_run_actual(
-        actual,
+    return await _client_call(
+        _client(agent_name),
+        "record_resource_run_actual",
+        actual_body,
         claim_id=claim_id,
         evaluation_id=evaluation_id,
         idempotency_key=idempotency_key or secrets.token_hex(16),
@@ -1572,22 +2060,36 @@ def gpu_claim_profile(
     )
 
 
-@mcp.tool()
-def gpu_apply(
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=False,
+        openWorldHint=True,
+    )
+)
+async def gpu_apply(
     server_id: str | None = None,
     gpu_count: int = 1,
     task: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """立即申请 GPU；返回 SSH、结构化远端工作目录和 CUDA selector；no_capacity 不排队。"""
+    """Claim GPUs on a single server now; returns SSH, the remote working directory and a CUDA selector. no_capacity is an answer and nothing is queued."""
 
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
-        raise ValueError("gpu_count 必须是正整数")
+        raise ValueError("gpu_count must be a positive integer")
     if server_id is not None:
         server_id = server_id.strip()
         if not server_id:
-            raise ValueError("提供 server_id 时不能为空")
-    constraints: dict[str, Any] = {"gpu_count": gpu_count, "placement": "pack"}
+            raise ValueError("server_id must not be empty when it is given")
+    # One lease is one machine. Cards split across hosts cannot run a
+    # single-node job, and holding them would deny the whole gang to someone
+    # who can use it, so an unsatisfiable request fails instead.
+    constraints: dict[str, Any] = {
+        "gpu_count": gpu_count,
+        "placement": "pack",
+        "same_host": True,
+    }
     if server_id is not None:
         constraints["endpoint_ids"] = [server_id]
     task_ref = _routine_task(task)
@@ -1600,35 +2102,63 @@ def gpu_apply(
     replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
     client = _routine_client()
     try:
-        payload = client.post(
+        payload = await _client_call(
+            client,
+            "post",
             "/api/v1/routine/claims",
             body,
             idempotency_key=replay_key,
         )
     except BrokerClientError as exc:
+        if exc.code == "no_capacity":
+            return _routine_no_capacity(exc, gpu_count=gpu_count, server_id=server_id)
         if not str(exc).startswith("broker request failed:"):
             raise
         # The broker may have committed before the local HTTP response was
         # interrupted. Retry once with the same key so it cannot allocate a
         # second lease for this tool invocation.
-        payload = client.post(
-            "/api/v1/routine/claims",
-            body,
-            idempotency_key=replay_key,
-        )
+        try:
+            payload = await _client_call(
+                client,
+                "post",
+                "/api/v1/routine/claims",
+                body,
+                idempotency_key=replay_key,
+            )
+        except BrokerClientError as retried:
+            if retried.code != "no_capacity":
+                raise
+            return _routine_no_capacity(retried, gpu_count=gpu_count, server_id=server_id)
     return _routine_gpu_allocation(payload)
 
 
-@mcp.tool()
-def gpu_release(
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=True,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
+async def gpu_release(
     lease_id: str,
 ) -> dict[str, Any]:
-    """释放此前申请的 GPU；返回被释放的 lease_id 与其终态，供逐个确认。"""
+    """Give back GPUs claimed earlier; returns the settled lease_id and its final state so each one can be confirmed."""
 
     if not isinstance(lease_id, str) or not lease_id.strip():
-        raise ValueError("lease_id 不能为空")
+        raise ValueError("lease_id must not be empty")
     lease_id = lease_id.strip()
-    payload = _routine_client().post(f"/api/v1/routine/leases/{lease_id}/release")
+    try:
+        payload = await _client_call(
+            _routine_client(), "post", f"/api/v1/routine/leases/{lease_id}/release"
+        )
+    except BrokerClientError as exc:
+        if exc.code != "lease_already_released":
+            raise
+        # Settling a lease that is already settled reaches the state the caller
+        # asked for, so it answers instead of failing. A caller told to release
+        # and confirm would otherwise have to treat its own retry as an error.
+        return {"released": True, "lease_id": lease_id, "state": "RELEASED"}
     # Echo the lease the broker actually settled so a caller holding several
     # leases can confirm them one by one instead of assuming one release
     # finished the whole task.
@@ -1666,7 +2196,7 @@ def gpu_schedule(
 
 
 @mcp.tool()
-def gpu_add_server(
+async def gpu_add_server(
     agent_name: str,
     project_id: str,
     host: str,
@@ -1691,7 +2221,9 @@ def gpu_add_server(
     client = _client(agent_name)
     generated_id = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96]
     generated_id = f"{generated_id}-p{port}"
-    return client.post(
+    return await _client_call(
+        client,
+        "post",
         "/api/v1/endpoints",
         {
             "id": server_id or generated_id,
@@ -1712,7 +2244,7 @@ def gpu_add_server(
 
 
 @mcp.tool()
-def gpu_update_server(
+async def gpu_update_server(
     agent_name: str,
     server_id: str,
     approval_ref: str,
@@ -1747,7 +2279,9 @@ def gpu_update_server(
     }
     if not body:
         raise ValueError("gpu_update_server requires at least one safe metadata field")
-    return _client(agent_name).patch(
+    return await _client_call(
+        _client(agent_name),
+        "patch",
         f"/api/v1/endpoints/{server_id}",
         body,
         idempotency_key=idempotency_key,
@@ -1755,27 +2289,39 @@ def gpu_update_server(
 
 
 @mcp.tool()
-def gpu_set_keepalive(
+async def gpu_set_keepalive(
     agent_name: str,
     server_id: str,
     enabled: bool,
     approval_ref: str,
     idempotency_key: str,
 ) -> dict[str, Any]:
-    """经明确授权后开启或关闭服务器的逐卡空闲占卡策略。
+    """Turn a server's per-card idle hold policy on or off, with explicit authorisation.
 
-    每张空闲 GPU 独立协调；调用者不能传 GPU 目标、PID、shell 片段或 helper 参数。
-    Agent 申请和 APP 改派都会复用同一条逐卡让位路径。
+    Each idle GPU is coordinated on its own. The caller cannot supply a GPU
+    target, a PID, a shell fragment, or helper arguments. An agent request and a
+    manual reassignment in the app both reuse the same per-card yield path.
     """
 
     _require_endpoint_admin_contract(approval_ref, idempotency_key)
     if type(enabled) is not bool:
-        raise ValueError("enabled 必须是布尔值")
-    return _client(agent_name).post(
+        raise ValueError("enabled must be a boolean")
+    return await _client_call(
+        _client(agent_name),
+        "post",
         f"/api/v1/endpoints/{server_id}/keepalive",
         {"enabled": enabled},
         idempotency_key=idempotency_key,
     )
+
+
+@mcp.tool()
+async def gpu_list_observation_profiles() -> dict[str, Any]:
+    """List built-in observation profiles and discovered local server plugins to choose an observation_profile."""
+
+    from serverpilot.plugins import list_observation_profiles
+
+    return {"profiles": list_observation_profiles()}
 
 
 ROUTINE_MCP_TOOL_NAMES = (
@@ -1788,22 +2334,29 @@ ROUTINE_MCP_TOOL_NAMES = (
 def _build_routine_mcp() -> FastMCP:
     """Build the small default surface while retaining compatibility tools."""
 
-    routine = FastMCP(
-        "serverpilot",
-        json_response=True,
-        instructions=MCP_INSTRUCTIONS,
+    routine = _build_server(MCP_INSTRUCTIONS)
+    routine.add_tool(
+        gpu_status,
+        annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True),
     )
-    for name in ROUTINE_MCP_TOOL_NAMES:
-        tool = mcp._tool_manager._tools[name]
-        routine.add_tool(
-            tool.fn,
-            name=tool.name,
-            title=tool.title,
-            description=tool.description,
-            annotations=tool.annotations,
-            icons=tool.icons,
-            meta=tool.meta,
-        )
+    routine.add_tool(
+        gpu_apply,
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=False,
+            idempotentHint=False,
+            openWorldHint=True,
+        ),
+    )
+    routine.add_tool(
+        gpu_release,
+        annotations=ToolAnnotations(
+            readOnlyHint=False,
+            destructiveHint=True,
+            idempotentHint=True,
+            openWorldHint=True,
+        ),
+    )
     return routine
 
 

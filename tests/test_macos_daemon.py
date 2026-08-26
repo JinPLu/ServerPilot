@@ -70,7 +70,7 @@ def test_resolve_daemon_config_uses_application_support_and_explicit_executable(
     "url",
     [
         "https://127.0.0.1:8787",
-        "http://10.40.1.222:8787",
+        "http://10.20.0.10:8787",
         "http://127.0.0.1:8787/api",
         "http://user:secret@127.0.0.1:8787",
     ],
@@ -806,7 +806,9 @@ def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry
 
 def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    readme = (project_root / "README.md").read_text(encoding="utf-8")
+    # The Chinese README carries the copy the Chinese UI is written against;
+    # README.md is the English entry point for the repository.
+    readme = (project_root / "README.zh-CN.md").read_text(encoding="utf-8")
     window_source = (project_root / "desktop" / "ServerPilot.swift").read_text(
         encoding="utf-8"
     )

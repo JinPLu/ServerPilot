@@ -4,7 +4,7 @@ import asyncio
 import json
 import socket
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -13,23 +13,23 @@ from serverpilot import server_collector
 from serverpilot.adapters import HOST_RESOURCES_QUERY, RAW_SSH_OBSERVATION_ADAPTER, RawSSHResult
 from serverpilot.collector import (
     COMBINED_QUERY,
-    CollectionError,
     GPU_CPU_ONLY,
     GPU_UNAVAILABLE,
     MAX_SERVER_SCRIPT_SNAPSHOT_BYTES,
+    CollectionError,
+    HostResourceSnapshot,
     SSHCollector,
     parse_gpu_csv,
     parse_host_resource_snapshot,
-    HostResourceSnapshot,
     parse_host_resources,
     parse_process_csv,
     parse_server_script_snapshot,
 )
-from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.collector_protocol import (
     SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
 )
+from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.importer import import_servers_files, parse_ssh_command
 
 
@@ -542,7 +542,7 @@ def test_server_script_parser_accepts_optional_cgroup_fields() -> None:
     snapshot["host"]["cpu_usage_usec"] = 1_600_000
     snapshot["host"]["cpu_quota_usec"] = 3_000_000
     snapshot["host"]["cpu_period_usec"] = 100_000
-    observed_at = datetime(2026, 8, 10, tzinfo=timezone.utc)
+    observed_at = datetime(2026, 8, 10, tzinfo=UTC)
     observation = parse_server_script_snapshot(
         json.dumps(snapshot),
         endpoint_id="endpoint-a",
@@ -565,6 +565,44 @@ def test_server_script_parser_accepts_optional_cgroup_fields() -> None:
     assert observation.host.memory_current_mib == 51_200
 
 
+def test_server_script_parser_accepts_optional_scheduler_capacity() -> None:
+    snapshot = _server_script_snapshot(gpu_probe_available=False)
+    snapshot["gpu_probe_status"] = "cpu_only"
+    snapshot["scheduler"] = {
+        "free_gpu_count": 30,
+        "gpu_name": "NVIDIA A100-SXM4-80GB",
+        "note": "request on demand; nothing is queued",
+    }
+    observation = parse_server_script_snapshot(
+        json.dumps(snapshot),
+        endpoint_id="slurm-login-p22",
+        observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    assert observation.gpus == []
+    assert observation.gpu_probe_status == "cpu_only"
+    assert observation.scheduler == {
+        "free_gpu_count": 30,
+        "gpu_name": "NVIDIA A100-SXM4-80GB",
+        "note": "request on demand; nothing is queued",
+    }
+
+
+def test_server_script_parser_rejects_unknown_scheduler_fields() -> None:
+    snapshot = _server_script_snapshot(gpu_probe_available=False)
+    snapshot["gpu_probe_status"] = "cpu_only"
+    snapshot["scheduler"] = {
+        "free_gpu_count": 1,
+        "gpu_name": "A100",
+        "queue": True,
+    }
+    with pytest.raises(CollectionError):
+        parse_server_script_snapshot(
+            json.dumps(snapshot),
+            endpoint_id="slurm-login-p22",
+            observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -579,7 +617,7 @@ def test_server_script_parser_rejects_malformed_or_unsafe_snapshot(raw: str) -> 
         parse_server_script_snapshot(
             raw,
             endpoint_id="endpoint-a",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
         )
 
 
@@ -589,7 +627,7 @@ def test_server_script_parser_rejects_oversized_or_duplicate_gpu_identities() ->
         parse_server_script_snapshot(
             oversized,
             endpoint_id="endpoint-a",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
         )
 
     duplicate = _server_script_snapshot()
@@ -600,7 +638,7 @@ def test_server_script_parser_rejects_oversized_or_duplicate_gpu_identities() ->
         parse_server_script_snapshot(
             json.dumps(duplicate),
             endpoint_id="endpoint-a",
-            observed_at=datetime.now(timezone.utc),
+            observed_at=datetime.now(UTC),
         )
 
 

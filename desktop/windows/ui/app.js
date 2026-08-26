@@ -4,6 +4,7 @@
   const view = {
     snapshot: null,
     current: null,
+    observationProfiles: [],
     selectedEndpointID: null,
     filter: "all",
     sort: { key: "free", direction: "desc" },
@@ -274,7 +275,29 @@
     byID("connection-dot").className = "live-dot online";
     byID("connection-label").textContent = "本机服务已连接";
     render();
+    await loadObservationProfiles();
     if (!quiet) showNotice("资源状态已刷新。");
+  }
+
+  async function loadObservationProfiles() {
+    const result = await call("observation_profiles");
+    const rows = result && result.ok && result.data && Array.isArray(result.data.data)
+      ? result.data.data
+      : [];
+    view.observationProfiles = rows.length ? rows : [
+      { id: "linux-nvidia", display_name: "标准 NVIDIA 采集" },
+      { id: "linux-host", display_name: "主机容量采集" },
+      { id: "server-script-v1", display_name: "服务器采集脚本" },
+    ];
+    const select = byID("observation-profile");
+    if (!select) return;
+    const current = select.value || "server-script-v1";
+    select.innerHTML = view.observationProfiles.map((profile) => (
+      `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.display_name || profile.id)}</option>`
+    )).join("");
+    select.value = view.observationProfiles.some((profile) => profile.id === current)
+      ? current
+      : (view.observationProfiles[0] && view.observationProfiles[0].id) || "server-script-v1";
   }
 
   function memoryColor(value) { return value === null ? "#9aa1aa" : value >= 80 ? "#ef4d57" : value >= 60 ? "#e8ad00" : "#39b967"; }
@@ -365,13 +388,18 @@
   }
 
   async function loadSettings() {
-    const [info, settings] = await Promise.all([call("app_info"), call("collector_settings")]);
+    const [info, settings, mcp] = await Promise.all([
+      call("app_info"),
+      call("collector_settings"),
+      call("mcp_entry"),
+    ]);
     if (info.ok) {
       byID("service-url").textContent = info.data.base_url;
       byID("data-directory").textContent = info.data.data_dir;
       byID("app-version").textContent = info.data.version;
     }
     if (settings.ok) byID("collector-interval").value = String(settings.data.data?.settings?.interval_seconds || settings.data.data?.interval_seconds || 10);
+    renderMcpEntry(mcp);
   }
 
   async function openSettings() {
@@ -417,7 +445,10 @@
 
     byID("add-form").addEventListener("submit", async (event) => {
       event.preventDefault(); const form = new FormData(event.currentTarget);
-      const result = await call("create_endpoint", { id: form.get("id"), host: form.get("host"), port: Number(form.get("port")), ssh_user: form.get("sshUser"), workspace_path: form.get("workspace"), observation_profile: "server-script-v1", keepalive_adapter_id: "server-script-v1", labels: ["desktop-windows"], owner_project_id: form.get("ownerProject") || null });
+      const profile = form.get("observationProfile") || "server-script-v1";
+      const payload = { id: form.get("id"), host: form.get("host"), port: Number(form.get("port")), ssh_user: form.get("sshUser"), workspace_path: form.get("workspace"), observation_profile: profile, labels: ["desktop-windows"], owner_project_id: form.get("ownerProject") || null };
+      if (profile === "server-script-v1") payload.keepalive_adapter_id = "server-script-v1";
+      const result = await call("create_endpoint", payload);
       if (!result.ok) { failure(result); return; }
       byID("add-dialog").close(); showNotice("已添加服务器，正在等待首次只读采集确认状态。"); await refresh({ quiet: true });
     });
@@ -427,6 +458,57 @@
       if (!result.ok) { failure(result); return; }
       byID("settings-dialog").close(); showNotice("数据采集间隔已更新。"); await refresh({ quiet: true });
     });
+    $$(".mcp-copy").forEach((button) => {
+      button.addEventListener("click", () => {
+        const kind = button.dataset.copy;
+        const text = kind === "path" ? byID("mcp-entry-path").textContent : byID("mcp-entry-config").textContent;
+        if (!text) return;
+        copyText(text);
+        button.textContent = "已复制";
+        window.setTimeout(() => { button.textContent = "复制"; }, 1600);
+      });
+    });
+  }
+
+  function mcpPayload(result) {
+    if (!result || !result.ok || !result.data) return null;
+    return result.data.data || result.data;
+  }
+
+  function renderMcpEntry(result) {
+    const status = byID("mcp-entry-status");
+    const found = byID("mcp-entry-found");
+    const payload = mcpPayload(result);
+    if (!payload) {
+      status.hidden = false;
+      status.textContent = "无法读取 MCP 入口。";
+      found.hidden = true;
+      return;
+    }
+    if (payload.available === true && typeof payload.command === "string" && payload.command && payload.mcpServers && typeof payload.mcpServers === "object") {
+      const configText = JSON.stringify({ mcpServers: payload.mcpServers }, null, 2);
+      byID("mcp-entry-path").textContent = payload.command;
+      byID("mcp-entry-config").textContent = configText;
+      status.hidden = true;
+      found.hidden = false;
+      return;
+    }
+    status.hidden = false;
+    found.hidden = true;
+    const hint = typeof payload.hint === "string" && payload.hint ? payload.hint : "";
+    status.textContent = hint ? `未找到 MCP 入口。${hint}` : "未找到 MCP 入口。";
+  }
+
+  function copyText(value) {
+    const field = document.createElement("textarea");
+    field.value = value;
+    field.setAttribute("readonly", "");
+    field.style.position = "fixed";
+    field.style.left = "-9999px";
+    document.body.appendChild(field);
+    field.select();
+    document.execCommand("copy");
+    field.remove();
   }
 
   async function boot() {

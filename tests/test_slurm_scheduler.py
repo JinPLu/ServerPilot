@@ -2,24 +2,21 @@ from __future__ import annotations
 
 import base64
 import os
-from pathlib import Path
 import shlex
 import subprocess
 import time
+from pathlib import Path
 from typing import Any
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from serverpilot.api import create_app
-from serverpilot.config import Settings
 from serverpilot.models import SchedulerJob
 from serverpilot.schemas import ResourceConstraints, SchedulerOneOffSubmit, SchedulerTargetUpsert
 from serverpilot.slurm import (
-    CommandSlurmProvider,
     SCHEDULER_INSPECTION_SCRIPTS,
+    CommandSlurmProvider,
     SlurmProviderError,
     SlurmSubmission,
     _scheduler_submit_script,
@@ -40,7 +37,7 @@ class FakeSlurmProvider:
             "status": "ready",
             "partitions": [
                 {
-                    "partition": "GPU-8A100",
+                    "partition": "GPU-8ACCEL",
                     "default": False,
                     "availability": "up",
                     "time_limit": "10-00:00:00",
@@ -126,19 +123,8 @@ class FakeSlurmProvider:
         )
 
 
-def _client(tmp_path: Path, inventory) -> tuple[TestClient, FakeSlurmProvider]:
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(
-        yaml.safe_dump(inventory.model_dump(mode="json")),
-        encoding="utf-8",
-    )
-    app = create_app(
-        Settings(
-            database_url=f"sqlite:///{tmp_path / 'scheduler.sqlite3'}",
-            inventory_path=inventory_path,
-            session_secret="s" * 32,
-        )
-    )
+def _client(build_app) -> tuple[TestClient, FakeSlurmProvider]:
+    app = build_app("scheduler")
     provider = FakeSlurmProvider()
     app.state.service.slurm_provider = provider
     return TestClient(app), provider
@@ -227,8 +213,8 @@ def _profile() -> dict[str, Any]:
         "runtime_kind": "slurm",
         "scheduler_target_id": "scheduler-a",
         "scheduler": {
-            "partition": "GPU-8A100",
-            "qos": "gpu_8a100",
+            "partition": "GPU-8ACCEL",
+            "qos": "gpu_8accel",
             "gpu_type": "a100",
             "cpu_cores": 8,
             "memory_mib": 65536,
@@ -287,7 +273,7 @@ def test_command_slurm_access_status_parses_fixed_inspection_output() -> None:
                     "GB|path|home|/home/agent|directory|true",
                     "GB|filesystem|gpfs|524288000|1024000|523264000|1%|/home",
                     "GB|quota|Disk quotas available",
-                    "GB|partition|GPU-8A100|up|10-00:00:00|18|0/1152/0/1152|gpu:a100:8",
+                    "GB|partition|GPU-8ACCEL|up|10-00:00:00|18|0/1152/0/1152|gpu:a100:8",
                     "GB|partition|test*|up|20:00|2|0/128/0/128|(null)",
                 ]
             ),
@@ -313,7 +299,7 @@ def test_command_slurm_access_status_parses_fixed_inspection_output() -> None:
     assert result["filesystem"]["available_kib"] == 523264000
     assert result["quota_summary"] == ["Disk quotas available"]
     assert [partition["partition"] for partition in result["partitions"]] == [
-        "GPU-8A100",
+        "GPU-8ACCEL",
         "test",
     ]
     assert result["partitions"][1]["default"] is True
@@ -532,8 +518,8 @@ def test_command_slurm_gpu_submission_includes_gres() -> None:
             "duration_seconds": 3600,
             "constraints": {"gpu_count": 1},
             "scheduler": {
-                "partition": "GPU-8A100",
-                "qos": "gpu_8a100",
+                "partition": "GPU-8ACCEL",
+                "qos": "gpu_8accel",
                 "gpu_type": "a100",
                 "cpu_cores": 8,
                 "memory_mib": 65536,
@@ -550,7 +536,7 @@ def test_command_slurm_gpu_submission_includes_gres() -> None:
     assert submission.scheduler_job_id == "123456"
     submit_script = _decoded_submit_script(calls[0][-1])
     assert "--gres=gpu:a100:1" in submit_script
-    assert "--qos=gpu_8a100" in submit_script
+    assert "--qos=gpu_8accel" in submit_script
     assert "--wrap=" not in submit_script
 
 
@@ -1160,11 +1146,8 @@ def test_scheduler_one_off_accepts_cpu_constraints_but_direct_constraints_reject
     assert submission.approval_ref == "thread:approved-cpu-one-off"
 
 
-def test_scheduler_target_is_discoverable_and_access_is_read_only(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_scheduler_target_is_discoverable_and_access_is_read_only(build_app) -> None:
+    client, provider = _client(build_app)
     headers = {
         "X-ServerPilot-Actor": "scheduler-admin",
         "Idempotency-Key": "target-scheduler-a",
@@ -1197,11 +1180,8 @@ def test_scheduler_target_is_discoverable_and_access_is_read_only(
     assert cached_target["last_access"]["checked_at"] is not None
 
 
-def test_granted_project_can_submit_profile_idempotently_and_refresh(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_granted_project_can_submit_profile_idempotently_and_refresh(build_app) -> None:
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_target(),
@@ -1276,11 +1256,8 @@ def test_granted_project_can_submit_profile_idempotently_and_refresh(
     assert provider.cancellations == ["123456"]
 
 
-def test_scheduler_refresh_drops_timezone_naive_external_time_without_500(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_scheduler_refresh_drops_timezone_naive_external_time_without_500(build_app) -> None:
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_target(),
@@ -1336,11 +1313,8 @@ def test_scheduler_refresh_drops_timezone_naive_external_time_without_500(
     assert job["completed_at"] is None
 
 
-def test_cpu_only_one_off_is_valid_and_reaches_provider_without_gpu_request(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_cpu_only_one_off_is_valid_and_reaches_provider_without_gpu_request(build_app) -> None:
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_target(),
@@ -1380,11 +1354,8 @@ def test_cpu_only_one_off_is_valid_and_reaches_provider_without_gpu_request(
     assert provider.submissions[0]["request"]["scheduler"]["gpu_type"] is None
 
 
-def test_cpu_only_scheduler_rejects_gpu_type(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, _provider = _client(tmp_path, inventory)
+def test_cpu_only_scheduler_rejects_gpu_type(build_app) -> None:
+    client, _provider = _client(build_app)
     request = {
         "target_id": "scheduler-a",
         "project_id": "project-a",
@@ -1417,11 +1388,8 @@ def test_cpu_only_scheduler_rejects_gpu_type(
     assert "CPU-only Slurm submissions cannot define gpu_type" in response.text
 
 
-def test_one_off_requires_access_and_does_not_retain_script_by_default(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_one_off_requires_access_and_does_not_retain_script_by_default(build_app) -> None:
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_target(),
@@ -1439,8 +1407,8 @@ def test_one_off_requires_access_and_does_not_retain_script_by_default(
         "duration_seconds": 1200,
         "constraints": {"gpu_count": 1},
         "scheduler": {
-            "partition": "GPU-8A100",
-            "qos": "gpu_8a100",
+            "partition": "GPU-8ACCEL",
+            "qos": "gpu_8accel",
             "gpu_type": "a100",
             "cpu_cores": 4,
             "memory_mib": 8192,
@@ -1498,11 +1466,8 @@ def test_one_off_requires_access_and_does_not_retain_script_by_default(
         assert stored.script_body is None
 
 
-def test_access_failure_from_submit_is_reported_without_claiming_gpu(
-    tmp_path: Path,
-    inventory,
-) -> None:
-    client, provider = _client(tmp_path, inventory)
+def test_access_failure_from_submit_is_reported_without_claiming_gpu(build_app) -> None:
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_target(),
@@ -1525,8 +1490,8 @@ def test_access_failure_from_submit_is_reported_without_claiming_gpu(
         "duration_seconds": 600,
         "constraints": {"gpu_count": 1},
         "scheduler": {
-            "partition": "GPU-8A100",
-            "qos": "gpu_8a100",
+            "partition": "GPU-8ACCEL",
+            "qos": "gpu_8accel",
             "gpu_type": "a100",
             "cpu_cores": 1,
             "memory_mib": 1024,
@@ -1556,9 +1521,9 @@ def test_access_failure_from_submit_is_reported_without_claiming_gpu(
 
 def test_scheduler_upload_uses_unique_stage_and_persisted_status(
     tmp_path: Path,
-    inventory,
+    build_app,
 ) -> None:
-    client, provider = _client(tmp_path, inventory)
+    client, provider = _client(build_app)
     client.post(
         "/api/v1/scheduler-targets",
         json=_upload_target(),

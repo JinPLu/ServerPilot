@@ -5,10 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from scripts.install_agent_policy import MARKERS, POLICY, install, main, merge, render
 from serverpilot.mcp_server import mcp
-from scripts.install_agent_policy import MARKERS, install, main, merge, render
-from scripts.install_agent_policy import POLICY
-
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT_RULES = (
@@ -174,7 +172,7 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
 
     mcp_instructions = _plain_policy_text(mcp.instructions).lower()
     for runtime_contract in (
-        "三个工具",
+        "three tools",
         "gpu_status",
         "gpu_apply",
         "cuda_visible_devices",
@@ -182,14 +180,15 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "workspace_path",
         "gpu_release",
         "lease_id=",
-        "leased_gpus",
+        "recent_average per card plus a lease summary",
         "task",
-        "不读取客户端 ui 标题",
-        "无容量直接失败，不排队",
-        "只协调 gpu",
-        "非 gpu 远端操作",
-        "git 同步",
-        "无需 gpu 租约",
+        "leased_gpus",
+        "code_location=not_provided",
+        "never the client ui title",
+        "no_capacity is an answer, not a failure",
+        "nothing is queued",
+        "serverpilot only coordinates gpus",
+        "needs no lease",
     ):
         assert runtime_contract in mcp_instructions
     # The routine instructions load once per session, so they stay bounded.  The
@@ -199,8 +198,16 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # telemetry and how to read its own, or it re-derives the answer from an
     # observation that is ServerPilot's own hold.  Every gpu_status response
     # gets smaller in exchange.  Prohibition wording is never shortened to fit
-    # this bound.
-    assert len(mcp.instructions) < 730
+    # this bound.  It moved from 730 to 830 when a scheduler cluster became
+    # reachable through a plugin: the caller has to be told that an unclaimed
+    # cluster reports headroom in scheduler_servers rather than gpus[], and
+    # that one lease never spans servers, or it reads both as "no capacity".
+    # It moved from 830 to 1600 when the instructions became English. The bound
+    # stands in for what the text costs an agent every turn, and a character is
+    # not the same size in the two languages: a Chinese character is close to
+    # one token, an English one closer to a quarter. The English text is longer
+    # and cheaper.
+    assert len(mcp.instructions) < 1600
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -257,8 +264,23 @@ def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:
     assert "advanced compatibility tools are outside the routine path" in global_policy
 
     mcp_instructions = _plain_policy_text(mcp.instructions).lower()
-    assert "scheduler" not in mcp_instructions
     assert "advanced" not in mcp_instructions
+    # scheduler_servers became a routine gpu_status field when a cluster could
+    # be reached through a plugin: an agent that is not told about it reads the
+    # empty gpus[] of an unclaimed cluster as "no capacity". The advanced
+    # scheduler tools themselves stay out of the routine surface.
+    for advanced_tool in (
+        "gpu_scheduler_targets",
+        "gpu_scheduler_access_status",
+        "gpu_scheduler_profiles",
+        "gpu_scheduler_submit_profile",
+        "gpu_scheduler_submit_once",
+        "gpu_scheduler_job_status",
+        "gpu_scheduler_cancel",
+        "gpu_scheduler_upload",
+        "gpu_scheduler_transfer_status",
+    ):
+        assert advanced_tool not in mcp_instructions
 
 
 def test_install_refuses_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

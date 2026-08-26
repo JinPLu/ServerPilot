@@ -6,8 +6,6 @@ import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
-from serverpilot.api import create_app
-from serverpilot.config import Settings
 from serverpilot.models import RuntimeSetting
 from serverpilot.schemas import CollectorSettingsUpdate
 from serverpilot.service import BrokerService
@@ -74,19 +72,11 @@ def test_collector_setting_commit_failure_does_not_mutate_runtime(
         assert session.get(RuntimeSetting, "collector_interval_seconds") is None
 
 
-def test_collector_settings_api_requires_supported_value_and_idempotency(
-    tmp_path: Path, inventory
-) -> None:
-    project_root = Path(__file__).resolve().parents[1]
-    inventory_path = tmp_path / "inventory.yaml"
-    inventory_path.write_text(inventory.model_dump_json(), encoding="utf-8")
-    settings = Settings(
-        database_url=f"sqlite:///{tmp_path / 'api.sqlite3'}",
-        inventory_path=inventory_path,
-        project_root=project_root,
-        session_secret="test-secret",
+def test_collector_settings_api_requires_supported_value_and_idempotency(build_app) -> None:
+    app = build_app(
+        "api",
+        project_root=Path(__file__).resolve().parents[1],
     )
-    app = create_app(settings)
     headers = {"X-ServerPilot-Actor": "bootstrap-admin"}
     with TestClient(app) as client:
         response = client.get("/api/v1/settings/collector", headers=headers)
