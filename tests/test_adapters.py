@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import os
 import subprocess
 from typing import Any
 
@@ -20,12 +22,19 @@ from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
 from serverpilot.config import EndpointConfig
 from serverpilot.slurm import CommandSlurmProvider, SlurmProviderError
 
+# The adapter requires a transport helper to be absolute on the host it runs on.
+# Python 3.13 stopped treating a single leading slash as absolute on Windows, so
+# a POSIX literal is not a valid helper path there.
+HELPER_ROOT = "C:\\ServerPilot\\bin" if os.name == "nt" else "/usr/local/bin"
+HELPER_A = os.path.join(HELPER_ROOT, "serverpilot-test-helper-a")
+HELPER_B = os.path.join(HELPER_ROOT, "serverpilot-test-helper-b")
+
 
 @pytest.fixture(autouse=True)
 def approved_scheduler_helper(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(
         "SERVERPILOT_SCHEDULER_TRANSPORTS",
-        '{"test-a":"/usr/local/bin/serverpilot-test-helper-a","test-b":"/usr/local/bin/serverpilot-test-helper-b"}',
+        json.dumps({"test-a": HELPER_A, "test-b": HELPER_B}),
     )
 
 
@@ -322,7 +331,7 @@ def test_slurm_command_adapter_preserves_runner_contract() -> None:
     assert output == "ok"
     assert calls == [
         (
-            ["/usr/local/bin/serverpilot-test-helper-a", "sinfo -h"],
+            [HELPER_A, "sinfo -h"],
             {"check": False, "capture_output": True, "text": True, "timeout": 3},
         )
     ]
@@ -345,8 +354,8 @@ def test_scheduler_transport_profiles_route_distinct_targets_to_distinct_wrapper
         )
 
     assert [call[0] for call in calls] == [
-        "/usr/local/bin/serverpilot-test-helper-a",
-        "/usr/local/bin/serverpilot-test-helper-b",
+        HELPER_A,
+        HELPER_B,
     ]
     assert all(call[-1] == "sinfo -h" for call in calls)
 
