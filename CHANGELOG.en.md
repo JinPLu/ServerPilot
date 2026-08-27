@@ -9,6 +9,8 @@ This changelog records user-visible changes; implementation details belong in Gi
 **ServerPilot 1.9.1 makes the new MCP entry panel work on an ordinary installation.**
 
 - The Settings page reported no MCP entry at all after `uv tool install`, which is the ordinary macOS layout. The lookup followed the interpreter symlink before looking beside it, which walks out of the directory that holds `serverpilot-mcp` and into the base interpreter's own. The daemon runs from launchd with no PATH of its own, so nothing else could find it either.
+- The `mcpServers` block you copy out of the App shows the executable path as it is, instead of escaping every slash into `\/`.
+- A GPU row that marks itself unavailable while its own status text still claims the card is free is rejected again. Keying that check on the state code alone let the contradiction through whenever the state was something other than allocatable.
 
 ## 1.9.0 - 2026-08-27
 

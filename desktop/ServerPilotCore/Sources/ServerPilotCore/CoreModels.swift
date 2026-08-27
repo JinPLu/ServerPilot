@@ -103,9 +103,12 @@ public struct MCPEntryRecord: Equatable, Sendable {
                 let command, !command.isEmpty,
                 let servers = raw["mcpServers"] as? [String: Any],
                 JSONSerialization.isValidJSONObject(["mcpServers": servers]),
+                // Without .withoutEscapingSlashes the absolute path is rendered
+                // as \/opt\/..., which is valid JSON but is what the user
+                // copies into their agent's config and reads back.
                 let data = try? JSONSerialization.data(
                     withJSONObject: ["mcpServers": servers],
-                    options: [.prettyPrinted, .sortedKeys]
+                    options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
                 ),
                 let configJSON = String(data: data, encoding: .utf8)
             else {
@@ -745,6 +748,8 @@ public struct GPURecentTelemetryAverage: Equatable, Sendable {
 public struct GPURecord: Identifiable, Equatable, Sendable {
     /// The states the broker projects as allocatable capacity.
     static let allocatableStates: Set<String> = ["AVAILABLE", "KEEPALIVE"]
+    /// The prefix a projected status carries when it claims the card is free.
+    static let availableStatusPrefix = "可用"
 
     public let id: String
     public let endpointID: String
@@ -806,11 +811,13 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
         self.projectedPubliclyAvailable = raw["publicly_available"] == nil
             ? nil
             : raw.bool("publicly_available", default: false)
-        // Reject a row that says "not allocatable" while carrying an allocatable
-        // state. Keying this on the state code rather than the localized label
-        // keeps the check alive if that label is ever reworded or translated.
+        // Reject a row that contradicts itself. Both halves validate the same
+        // untrusted payload: the state code catches an allocatable state marked
+        // unavailable, and the status text catches a payload still claiming the
+        // card is free. Keying on the state alone let the second case through.
         if self.projectedPubliclyAvailable == false,
-           GPURecord.allocatableStates.contains(self.state) {
+           GPURecord.allocatableStates.contains(self.state)
+               || self.publicStatus?.hasPrefix(GPURecord.availableStatusPrefix) == true {
             return nil
         }
         guard let keepalive = GPUKeepaliveStatus(

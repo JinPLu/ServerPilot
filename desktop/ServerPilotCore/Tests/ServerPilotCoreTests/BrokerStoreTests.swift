@@ -161,8 +161,8 @@ final class BrokerStoreTests: XCTestCase {
         XCTAssertTrue(store.allowsMutations)
         XCTAssertEqual(store.snapshot.dataAgeSeconds, 94)
         XCTAssertEqual(store.snapshot.freshnessSeconds, 30)
-        XCTAssertEqual(store.snapshot.endpoints.first?.monitorLabel, "更新中断")
-        XCTAssertEqual(store.snapshot.endpoints.first?.monitorDetail, "服务器状态未按计划更新")
+        XCTAssertEqual(store.snapshot.endpoints.first?.monitorLabel, "采集延迟")
+        XCTAssertEqual(store.snapshot.endpoints.first?.monitorDetail, "最近一次服务器数据已过期")
     }
 
     func testEndpointFailureExplainsARecordedObservationTimeout() throws {
@@ -669,7 +669,7 @@ final class BrokerStoreTests: XCTestCase {
         try await waitUntil { updateRecorder.success != nil }
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1")
-        let updateBody = try XCTUnwrap(StateRouteURLProtocol.lastRequest?.httpBody)
+        let updateBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
         let updatePayload = try XCTUnwrap(try JSONSerialization.jsonObject(with: updateBody) as? [String: Any])
         XCTAssertEqual(updatePayload["ssh_user"] as? String, "collector")
         XCTAssertEqual(updatePayload["workspace_path"] as? String, "/srv/storyboard")
@@ -683,7 +683,7 @@ final class BrokerStoreTests: XCTestCase {
         try await waitUntil { keepaliveRecorder.success != nil }
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1/keepalive")
-        let keepaliveBody = try XCTUnwrap(StateRouteURLProtocol.lastRequest?.httpBody)
+        let keepaliveBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
         let keepalivePayload = try XCTUnwrap(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
         XCTAssertEqual(keepalivePayload["enabled"] as? Bool, true)
         XCTAssertEqual(Set(keepalivePayload.keys), Set(["enabled"]))
@@ -761,7 +761,7 @@ final class BrokerStoreTests: XCTestCase {
             StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client"),
             "desktop-app"
         )
-        let body = try XCTUnwrap(StateRouteURLProtocol.lastRequest?.httpBody)
+        let body = try XCTUnwrap(StateRouteURLProtocol.lastBody)
         let payload = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: body) as? [String: Any]
         )
@@ -1222,7 +1222,10 @@ final class BrokerStoreTests: XCTestCase {
 
         XCTAssertEqual(snapshot.stableEndpointSelection(currentID: "missing"), "fixture-queued")
         XCTAssertEqual(snapshot.stableEndpointSelection(currentID: "fixture-queued"), "fixture-queued")
-        XCTAssertEqual(snapshot.stableRequestSelection(currentID: "missing"), "request-queued")
+        XCTAssertEqual(
+            snapshot.stableRequestSelection(currentID: "missing"),
+            "request-fixture-queued"
+        )
         XCTAssertEqual(BrokerSnapshot.empty.stableEndpointSelection(currentID: "missing"), "")
     }
 
@@ -1359,7 +1362,7 @@ final class BrokerStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.monitoringProviders.first?.available.compactLabel, "24 CPU · 96 GB RAM")
         let scheduler = try XCTUnwrap(snapshot.monitoringProviders.last)
         XCTAssertEqual(scheduler.providerType, "scheduler")
-        XCTAssertEqual(scheduler.trustBoundary, "等待外部调度器确认；不计入裸机可用容量")
+        XCTAssertEqual(scheduler.trustBoundary, "外部系统尚未确认，因此暂不计入可用资源。")
         XCTAssertEqual(snapshot.allocatableUnits.first?.unitType, "scheduler-target")
         XCTAssertEqual(snapshot.schedulerTargets.first?.id, "scheduler-a")
         XCTAssertEqual(snapshot.schedulerTargets.first?.accessStatus, "ACCESS_REQUIRED")
@@ -1636,7 +1639,24 @@ private actor CooperativeDelayedEndpointHistoryClient: BrokerEndpointTelemetryHi
 private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var responseData: Data?
     nonisolated(unsafe) static var lastRequest: URLRequest?
+    nonisolated(unsafe) static var lastBody: Data?
     nonisolated(unsafe) static var statusCode = 200
+
+    /// URLSession turns `httpBody` into a stream before a protocol sees the
+    /// request, so the body has to be drained here or the test observes nothing.
+    private static func drain(_ stream: InputStream?) -> Data? {
+        guard let stream else { return nil }
+        stream.open()
+        defer { stream.close() }
+        var data = Data()
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while stream.hasBytesAvailable {
+            let read = stream.read(&buffer, maxLength: buffer.count)
+            if read <= 0 { break }
+            data.append(buffer, count: read)
+        }
+        return data.isEmpty ? nil : data
+    }
 
     override class func canInit(with request: URLRequest) -> Bool {
         true
@@ -1648,6 +1668,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         Self.lastRequest = request
+        Self.lastBody = request.httpBody ?? Self.drain(request.httpBodyStream)
         let data = Self.responseData ?? Data("{}".utf8)
         let response = HTTPURLResponse(
             url: request.url!,
@@ -1665,6 +1686,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
     static func reset() {
         responseData = nil
         lastRequest = nil
+        lastBody = nil
         statusCode = 200
     }
 }
