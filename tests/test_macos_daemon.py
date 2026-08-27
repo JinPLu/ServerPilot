@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import plistlib
+import re
 import sqlite3
 import stat
 from pathlib import Path
@@ -500,6 +501,18 @@ def test_probe_owned_ready_rejects_unrelated_child_process(
         manager._probe_owned_ready()
 
 
+def _message(output: str) -> str:
+    """Reduce a Click error box to its words.
+
+    The box colours the message and wraps it to the terminal width, so the exact
+    sentence is split by border characters at a width that differs between a
+    developer's terminal and CI.
+    """
+
+    plain = re.sub(r"\x1b\[[0-9;]*m", " ", output)
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", plain).split())
+
+
 def test_serve_rejects_daemon_identity_for_alternate_paths(tmp_path: Path) -> None:
     config = _config(tmp_path)
     alternate_inventory = tmp_path / "alternate.yaml"
@@ -521,7 +534,7 @@ def test_serve_rejects_daemon_identity_for_alternate_paths(tmp_path: Path) -> No
     )
 
     assert result.exit_code == 2
-    assert "does not match --db and --inventory" in result.output
+    assert "does not match --db and --inventory" in _message(result.output)
 
 
 def test_ensure_rejects_foreign_service_without_owned_launch_agent(
@@ -848,7 +861,7 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
 def test_resource_ownership_fixture_covers_all_resource_usage_dimensions() -> None:
     project_root = Path(__file__).resolve().parents[1]
     fixture = json.loads(
-        (project_root / "desktop" / "fixtures" / "resource-ownership.json").read_text(
+        (project_root / "desktop" / "Fixtures" / "resource-ownership.json").read_text(
             encoding="utf-8"
         )
     )["data"]["current"]

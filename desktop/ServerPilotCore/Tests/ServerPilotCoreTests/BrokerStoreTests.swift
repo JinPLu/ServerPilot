@@ -486,7 +486,8 @@ final class BrokerStoreTests: XCTestCase {
         }
         store.requestEndpointTelemetryHistory(endpointID: endpointID, range: .oneHour)
 
-        XCTAssertEqual(await historyClient.callCount(), 1)
+        let historyCallCount = await historyClient.callCount()
+        XCTAssertEqual(historyCallCount, 1)
         XCTAssertNil(store.endpointTelemetryHistoryErrors[endpointID])
     }
 

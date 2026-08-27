@@ -6,6 +6,7 @@ import math
 import os
 import signal
 import stat
+import tempfile
 import threading
 from pathlib import Path
 from typing import Any
@@ -1108,10 +1109,21 @@ def test_server_policy_holds_eighty_percent_of_cuda_visible_memory() -> None:
 def test_default_state_directory_is_persistent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """Worker state must outlive a reboot, so the fallback cannot be a temp dir.
+
+    The temp-directory check has to run against the real fallback. Asserting it
+    against an ``XDG_STATE_HOME`` pointed at ``tmp_path`` only described the
+    test's own scratch directory, which sits under ``/tmp`` on Linux.
+    """
+
     xdg_state = tmp_path / "xdg-state"
     monkeypatch.setenv("XDG_STATE_HOME", str(xdg_state))
     assert default_state_directory() == xdg_state / "serverpilot" / "keepalive"
-    assert not str(default_state_directory()).startswith("/tmp/")
+
+    monkeypatch.delenv("XDG_STATE_HOME", raising=False)
+    fallback = default_state_directory()
+    assert fallback == Path.home() / ".local" / "state" / "serverpilot" / "keepalive"
+    assert not fallback.is_relative_to(Path(tempfile.gettempdir()))
 
     monkeypatch.setenv("XDG_STATE_HOME", "relative-state")
     assert default_state_directory() == Path("relative-state/serverpilot/keepalive")
