@@ -1,7 +1,8 @@
-"""Windows desktop launcher for the bundled ServerPilot web console.
+"""Windows desktop launcher for the packaged ServerPilot desktop UI.
 
-The launcher owns only local process lifecycle. Scheduling, leases, audit and
-inventory validation stay in the shared FastAPI/BrokerService path.
+The launcher owns only local process lifecycle. The packaged UI talks to the
+loopback REST API. Leases, audit and inventory validation stay in the shared
+FastAPI/BrokerService path.
 """
 
 from __future__ import annotations
@@ -124,7 +125,7 @@ def broker_health(port: int) -> bool:
     return (
         payload.get("status") == "live"
         and isinstance(capabilities, list)
-        and "coordination_board" in capabilities
+        and "control_plane_state" in capabilities
     )
 
 

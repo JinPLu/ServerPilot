@@ -21,7 +21,13 @@ from serverpilot import __version__
 from serverpilot.config import InventoryConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTINE_TOOLS = ("gpu_status", "gpu_apply", "gpu_release")
+ROUTINE_TOOLS = (
+    "gpu_status",
+    "gpu_apply",
+    "gpu_release",
+    "gpu_add_server",
+    "gpu_update_server",
+)
 
 
 def _unused_loopback_port() -> int:
@@ -96,7 +102,6 @@ async def _probe_stdio(broker_url: str, isolated_home: Path) -> ProtocolProbe:
             "PYTHONPATH": os.pathsep.join(path for path in sys.path if path),
             "SERVERPILOT_URL": broker_url,
             "SERVERPILOT_AUTOSTART": "0",
-            "SERVERPILOT_MCP_PROFILE": "routine",
             "PYTHONUNBUFFERED": "1",
         },
         cwd=str(isolated_home),

@@ -47,6 +47,5 @@ def test_the_release_verifies_the_packaged_tree() -> None:
     for required in (
         "serverpilot\\migrations",
         "serverpilot-mcp.exe",
-        "serverpilot\\web\\templates",
     ):
         assert required in RELEASE, required

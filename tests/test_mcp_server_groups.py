@@ -8,7 +8,7 @@ import pytest
 
 from serverpilot import mcp_server
 from serverpilot.client import BrokerClientError
-from serverpilot.mcp_server import ROUTINE_GPU_COUNT_DESCRIPTION, routine_mcp
+from serverpilot.mcp_server import ROUTINE_GPU_COUNT_DESCRIPTION, mcp
 from tests.helpers import tools
 
 
@@ -48,7 +48,7 @@ def _endpoint(server_id: str, *, group_id: str | None = None) -> dict[str, objec
 
 
 def test_gpu_apply_schema_locks_count_source_range_and_group_id() -> None:
-    tools_list = asyncio.run(routine_mcp.list_tools())
+    tools_list = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools_list}
     apply_schema = by_name["gpu_apply"].inputSchema
     gpu_count = apply_schema["properties"]["gpu_count"]

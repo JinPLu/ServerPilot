@@ -361,19 +361,90 @@ def test_windows_desktop_bridge_maps_service_errors_without_exposing_transport_d
     }
 
 
-def test_windows_desktop_ui_is_bundled_as_a_dedicated_full_window_surface() -> None:
+def test_windows_broker_health_requires_control_plane_state(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    launcher = load_launcher()
+
+    class HealthResponse:
+        def __init__(self, payload: dict[str, object], status: int = 200) -> None:
+            self.payload = payload
+            self.status = status
+
+        def read(self) -> bytes:
+            return json.dumps(self.payload).encode("utf-8")
+
+        def __enter__(self) -> HealthResponse:
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            return None
+
+    def live_control_plane(url: str, timeout: float) -> HealthResponse:
+        assert url.endswith("/health/live")
+        assert timeout == 0.8
+        return HealthResponse({"status": "live", "capabilities": ["instant_claims", "control_plane_state"]})
+
+    monkeypatch.setattr(launcher, "urlopen", live_control_plane)
+    assert launcher.broker_health(8787) is True
+
+    def deleted_board_only(url: str, timeout: float) -> HealthResponse:
+        del url, timeout
+        return HealthResponse({"status": "live", "capabilities": ["instant_claims"]})
+
+    monkeypatch.setattr(launcher, "urlopen", deleted_board_only)
+    assert launcher.broker_health(8787) is False
+
+
+def test_windows_bridge_rest_paths_exist_in_api() -> None:
+    root = Path(__file__).resolve().parents[1]
+    launcher_source = (root / "desktop" / "windows_launcher.py").read_text(encoding="utf-8")
+    api_source = (root / "src" / "serverpilot" / "api.py").read_text(encoding="utf-8")
+    required = (
+        "/health/live",
+        "/api/v1/state",
+        "/api/v1/observation-profiles",
+        "/api/v1/endpoints",
+        "/api/v1/endpoints/{endpoint_id}/history",
+        "/api/v1/server-groups",
+        "/api/v1/server-groups/{group_id}",
+        "/api/v1/claims",
+        "/api/v1/endpoints/{endpoint_id}/keepalive",
+        "/api/v1/settings/collector",
+        "/api/v1/mcp-entry",
+    )
+    for path in required:
+        assert path in api_source, path
+        if "{" in path:
+            assert path.split("{", 1)[0] in launcher_source, path
+        else:
+            assert path in launcher_source, path
+    assert "coordination_board" not in launcher_source
+    assert "/api/v1/coordination" not in launcher_source
+    assert "/ui/" not in launcher_source
+    assert "workload-profile" not in launcher_source
+    assert "scheduler_targets" not in launcher_source
+
+
+def test_windows_desktop_ui_is_a_packaged_surface_against_loopback_rest() -> None:
     root = Path(__file__).resolve().parents[1]
     index = root / "desktop" / "windows" / "ui" / "index.html"
     script = root / "desktop" / "windows" / "ui" / "app.js"
     spec = root / "desktop" / "windows" / "ServerPilotWindows.spec"
+    launcher_source = (root / "desktop" / "windows_launcher.py").read_text(encoding="utf-8")
+    js_source = script.read_text(encoding="utf-8")
 
     index_source = index.read_text(encoding="utf-8")
     assert "服务器" in index_source
     assert 'id="usage-page"' in index_source
-    assert "GPU 显存状态" in script.read_text(encoding="utf-8")
-    assert "endpoint_history" in script.read_text(encoding="utf-8")
-    assert "usageRecords" in script.read_text(encoding="utf-8")
-    assert "DesktopBridge" in (root / "desktop" / "windows_launcher.py").read_text(encoding="utf-8")
+    assert "外部调度器" not in index_source
+    assert "GPU 显存状态" in js_source
+    assert "endpoint_history" in js_source
+    assert "usageRecords" in js_source
+    assert "resource_claims" not in js_source
+    assert "scheduler_targets" not in js_source
+    assert "DesktopBridge" in launcher_source
+    assert "web console" not in launcher_source.lower()
+    assert "packaged" in launcher_source
+    assert "loopback REST API" in launcher_source
     spec_source = spec.read_text(encoding="utf-8")
     assert '"desktop" / "windows" / "ui"' in spec_source
     assert 'icon=str(project_root / "desktop" / "assets" / "ServerPilot Icon.png")' in spec_source

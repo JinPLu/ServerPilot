@@ -548,17 +548,6 @@ final class BrokerStoreTests: XCTestCase {
                     "admission_boundary": "test"
                 ],
                 "history": [
-                    "resource_plan_evaluations": [],
-                    "resource_run_actuals": [
-                        [
-                            "id": "actual-history",
-                            "actor_id": "agent-a",
-                            "project_id": "project-a",
-                            "task_ref": "train",
-                            "quantities": ["gpu_count": 1],
-                            "actual_duration_seconds": 1760
-                        ]
-                    ],
                     "summary_samples": [
                         history
                     ]
@@ -568,9 +557,8 @@ final class BrokerStoreTests: XCTestCase {
 
         XCTAssertEqual(snapshot.snapshotRevision, 150)
         XCTAssertEqual(snapshot.summary.totalGPUs, 8)
-        XCTAssertEqual(snapshot.history.resourceRunActuals.count, 1)
-        XCTAssertEqual(snapshot.resourceRunActuals.first?.id, "actual-history")
-        XCTAssertEqual(snapshot.resourceRunActuals.first?.actualDurationSeconds, 1760)
+        XCTAssertEqual(snapshot.history, .empty)
+        XCTAssertEqual(snapshot.dataAgeSeconds, 2)
     }
 
     func testMutationRevisionFloorRejectsRollbackSnapshotAndLaterCommitsRequiredRevision() async throws {
@@ -1235,157 +1223,6 @@ final class BrokerStoreTests: XCTestCase {
             "request-fixture-queued"
         )
         XCTAssertEqual(BrokerSnapshot.empty.stableEndpointSelection(currentID: "missing"), "")
-    }
-
-    func testGeneralResourceMonitoringProjectionParsesAndKeepsSchedulerPendingSeparate() throws {
-        let snapshot = BrokerSnapshot(envelope: [
-            "schema_version": "v1",
-            "snapshot_revision": 42,
-            "server_time": "2026-08-04T00:00:00Z",
-            "data": [
-                "summary": [:],
-                "resource_providers": [
-                    [
-                        "id": "host:fixture",
-                        "provider_type": "host-capacity",
-                        "display_name": "fixture host",
-                        "state": "ONLINE",
-                        "total": ["cpu_cores": 32, "memory_mib": 131072],
-                        "committed": ["cpu_cores": 8, "memory_mib": 32768],
-                        "available": ["cpu_cores": 24, "memory_mib": 98304]
-                    ],
-                    [
-                        "id": "scheduler:scheduler-a",
-                        "provider_type": "scheduler",
-                        "display_name": "Example scheduler",
-                        "state": "PENDING",
-                        "available": ["node_count": 2, "scheduler_units": 2]
-                    ]
-                ],
-                "allocatable_units": [
-                    [
-                        "id": "scheduler-target:scheduler-a",
-                        "provider_id": "scheduler:scheduler-a",
-                        "unit_type": "scheduler-target",
-                        "state": "PENDING",
-                        "quantities": ["node_count": 2, "scheduler_units": 2]
-                    ]
-                ],
-                "scheduler_targets": [
-                    [
-                        "id": "scheduler-a",
-                        "display_name": "Example scheduler",
-                        "kind": "external-scheduler",
-                        "adapter": "slurm",
-                        "enabled": true,
-                        "last_access": ["status": "access_required", "message": "VPN required"]
-                    ]
-                ],
-                "scheduler_jobs": [
-                    [
-                        "id": "job-1",
-                        "target_id": "scheduler-a",
-                        "actor_id": "agent-a",
-                        "project_id": "project-a",
-                        "task_ref": "train",
-                        "state": "pending",
-                        "raw_state": "PENDING",
-                        "scheduler_job_id": "12345"
-                    ]
-                ],
-                "scheduler_transfers": [
-                    [
-                        "id": "transfer-1",
-                        "target_id": "scheduler-a",
-                        "actor_id": "agent-a",
-                        "project_id": "project-a",
-                        "state": "completed",
-                        "remote_directory": "/scratch/project-a"
-                    ]
-                ],
-                "resource_claims": [
-                    [
-                        "id": "claim-1",
-                        "actor_id": "agent-a",
-                        "project_id": "project-a",
-                        "task_ref": "train",
-                        "state": "active",
-                        "runtime_state": "RUNNING",
-                        "native_lease_ids": ["lease-1"],
-                        "native_request_ids": ["request-1"],
-                        "provider_type": "host-capacity",
-                        "quantities": ["cpu_cores": 4, "memory_mib": 8192]
-                    ]
-                ],
-                "resource_plan_evaluations": [
-                    [
-                        "id": "eval-1",
-                        "actor_id": "agent-a",
-                        "project_id": "project-a",
-                        "task_ref": "train",
-                        "selected_candidate_key": "small",
-                        "minimum_saved_seconds": 120,
-                        "minimum_saved_ratio": 0.10,
-                        "candidates": [
-                            [
-                                "candidate_key": "small",
-                                "provider_type": "host-capacity",
-                                "quantities": ["cpu_cores": 4, "memory_mib": 8192],
-                                "predicted_runtime_seconds": 1800,
-                                "predicted_saved_seconds": 0,
-                                "predicted_saved_ratio": 0,
-                                "selected": true
-                            ],
-                            [
-                                "candidate_key": "large",
-                                "provider_type": "host-capacity",
-                                "quantities": ["cpu_cores": 8, "memory_mib": 16384],
-                                "predicted_runtime_seconds": 1720,
-                                "predicted_saved_seconds": 80,
-                                "predicted_saved_ratio": 0.04,
-                                "rejection_reason": "below marginal benefit"
-                            ]
-                        ]
-                    ]
-                ],
-                "resource_run_actuals": [
-                    [
-                        "id": "actual-1",
-                        "evaluation_id": "eval-1",
-                        "actor_id": "agent-a",
-                        "project_id": "project-a",
-                        "task_ref": "train",
-                        "quantities": ["cpu_cores": 4, "memory_mib": 8192],
-                        "predicted_duration_seconds": 1800,
-                        "actual_duration_seconds": 1760
-                    ]
-                ],
-                "data_age_seconds": 2,
-                "freshness_seconds": 30,
-                "admission_boundary": "test"
-            ]
-        ])
-
-        XCTAssertEqual(snapshot.monitoringProviders.count, 2)
-        XCTAssertEqual(snapshot.monitoringProviders.first?.available.compactLabel, "24 CPU · 96 GB RAM")
-        let scheduler = try XCTUnwrap(snapshot.monitoringProviders.last)
-        XCTAssertEqual(scheduler.providerType, "scheduler")
-        XCTAssertEqual(scheduler.trustBoundary, "外部系统尚未确认，因此暂不计入可用资源。")
-        XCTAssertEqual(snapshot.allocatableUnits.first?.unitType, "scheduler-target")
-        XCTAssertEqual(snapshot.schedulerTargets.first?.id, "scheduler-a")
-        XCTAssertEqual(snapshot.schedulerTargets.first?.accessStatus, "ACCESS_REQUIRED")
-        XCTAssertEqual(snapshot.schedulerJobs.first?.targetID, "scheduler-a")
-        XCTAssertEqual(snapshot.schedulerJobs.first?.state, "PENDING")
-        XCTAssertEqual(snapshot.schedulerTransfers.first?.targetID, "scheduler-a")
-        XCTAssertEqual(snapshot.schedulerTransfers.first?.state, "COMPLETED")
-        XCTAssertEqual(snapshot.resourceClaims.first?.quantities.compactLabel, "4 CPU · 8 GB RAM")
-        XCTAssertEqual(snapshot.resourceClaims.first?.state, "ACTIVE")
-        XCTAssertEqual(snapshot.resourceClaims.first?.runtimeState, "RUNNING")
-        XCTAssertEqual(snapshot.resourceClaims.first?.stateLabel, "运行中")
-        XCTAssertEqual(snapshot.resourceClaims.first?.nativeLeaseIDs, ["lease-1"])
-        XCTAssertEqual(snapshot.resourceClaims.first?.nativeRequestIDs, ["request-1"])
-        XCTAssertEqual(snapshot.resourcePlanEvaluations.first?.selectedCandidate?.candidateKey, "small")
-        XCTAssertEqual(snapshot.resourceRunActuals.first?.actualDurationSeconds, 1760)
     }
 
     func testFixturesResolveInsideDesktopFixturesAndRejectProjectState() throws {

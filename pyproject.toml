@@ -30,8 +30,6 @@ dependencies = [
   "alembic>=1.14,<2",
   "fastapi>=0.115,<1",
   "httpx>=0.28,<1",
-  "itsdangerous>=2.2,<3",
-  "jinja2>=3.1,<4",
   "mcp>=1.27,<2",
   "prometheus-client>=0.21,<1",
   "pydantic>=2.10,<3",
@@ -78,12 +76,6 @@ serverpilot = [
   "migrations/*.py",
   "migrations/*.mako",
   "migrations/versions/*.py",
-  "web/templates/*.html",
-  "web/static/*.css",
-  "web/static/*.js",
-  "web/static/assets/*",
-  "web/static/vendor/*",
-  "web/static/vendor/phosphor/*",
   "bundled_plugins/*",
 ]
 

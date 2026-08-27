@@ -50,17 +50,7 @@ public final class URLSessionBrokerSnapshotClient: BrokerSnapshotClient {
     }
 
     public func snapshot(actorID: String) async throws -> BrokerSnapshot {
-        // The App renders none of the generic-resource or external-scheduler
-        // projections, so it does not pay to transfer and decode them every
-        // refresh.  Older services ignore the unknown query item and keep
-        // returning the full payload, which decodes exactly as before.
-        var components = URLComponents(
-            url: baseURL.appendingPathComponent("api/v1/state"),
-            resolvingAgainstBaseURL: false
-        )
-        components?.queryItems = [URLQueryItem(name: "include_advanced", value: "false")]
-        let stateURL = components?.url ?? baseURL.appendingPathComponent("api/v1/state")
-        var request = URLRequest(url: stateURL)
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/state"))
         request.timeoutInterval = 6
         request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
         let (data, response) = try await session.data(for: request)

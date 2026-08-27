@@ -321,14 +321,6 @@
   }
 
   function usageRecords() {
-    const claims = view.current?.resource_claims || [];
-    const activeClaims = claims.filter((claim) => String(claim.state || "").toLowerCase() === "active");
-    if (activeClaims.length) return activeClaims.map((claim) => ({
-      project: claim.project_id || "—",
-      task: claim.task_ref || "—",
-      state: claim.runtime_state || claim.state || "—",
-      quantities: claim.quantities || {},
-    }));
     return (view.current?.leases || []).filter((lease) => lease.state !== "RELEASED").map((lease) => ({
       project: lease.project_id || "—",
       task: lease.task_ref || "—",
@@ -563,9 +555,6 @@
     const endpointWrap = byID("claim-endpoint-wrap");
     const groupSelect = byID("claim-group");
     const endpointSelect = byID("claim-endpoint");
-    const schedulerNote = (view.current?.scheduler_targets || []).length
-      ? "外部调度器仍按目标单机提交，不走分组 best-fit。"
-      : "";
     fillGroupSelect(groupSelect, { includeUngrouped: true, includeEmpty: true });
     const ungrouped = ungroupedEndpoints();
     endpointSelect.innerHTML = `<option value="">选择未分组服务器</option>${ungrouped.map((item) => `<option value="${escapeHTML(item.id)}">${escapeHTML(endpointSsh(item))}</option>`).join("")}`;
@@ -582,8 +571,8 @@
       endpointSelect.value = endpointID;
     }
     byID("claim-help").textContent = grouped
-      ? `分组申请由后端在组内 best-fit，不指定单机。未分组服务器仍按单机申请。${schedulerNote}容量不足时返回 no_capacity，不会进入排队。`
-      : `可选择一台服务器，或由后端自动选择。${schedulerNote}容量不足时返回 no_capacity，不会进入排队。`;
+      ? "分组申请由后端在组内 best-fit，不指定单机。未分组服务器仍按单机申请。容量不足时返回 no_capacity，不会进入排队。"
+      : "可选择一台服务器，或由后端自动选择。容量不足时返回 no_capacity，不会进入排队。";
     if (!byID("claim-dialog").open) byID("claim-dialog").showModal();
   }
 

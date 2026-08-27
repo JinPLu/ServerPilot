@@ -156,7 +156,7 @@ def test_live_probe_rejects_daemon_missing_current_runtime_capability(
         lambda *_args, **_kwargs: {
             "status": "live",
             "schema_version": "v1",
-            "capabilities": ["coordination_board"],
+            "capabilities": ["instant_claims"],
         },
     )
 
@@ -391,7 +391,7 @@ def test_ensure_is_noop_when_compatible_service_is_ready(
         lambda _config: {
             "status": "live",
             "schema_version": "v1",
-            "capabilities": ["coordination_board", "endpoint_conflict_cleanup"],
+            "capabilities": ["instant_claims", "endpoint_conflict_cleanup"],
         },
     )
     monkeypatch.setattr(
@@ -435,7 +435,7 @@ def test_ensure_rejects_matching_identity_from_non_launchd_process(
         lambda _config: {
             "status": "live",
             "schema_version": "v1",
-            "capabilities": ["coordination_board", "endpoint_conflict_cleanup"],
+            "capabilities": ["instant_claims", "endpoint_conflict_cleanup"],
         },
     )
     monkeypatch.setattr(
@@ -558,7 +558,7 @@ def test_ensure_rejects_foreign_service_without_owned_launch_agent(
         lambda _config: {
             "status": "live",
             "schema_version": "v1",
-            "capabilities": ["coordination_board"],
+            "capabilities": ["instant_claims"],
         },
     )
     monkeypatch.setattr(
@@ -807,11 +807,12 @@ def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry
         ("运行", "已检测到任务"),
     ):
         assert f'case "{state}": return "{help_text}"' in usage_source
-    assert 'snapshot.resourceClaims.filter {' in usage_source
-    assert '$0.runtimeState == "RUNNING" || $0.state == "RUNNING"' in usage_source
+    assert "snapshot.leases" in usage_source
+    assert '$0.runtimeState == "RUNNING"' in usage_source
     assert '["BLOCKED", "QUEUED", "PENDING_APPROVAL", "REQUESTED"]' in usage_source
-    assert "Set(snapshot.resourceClaims.flatMap(\\.nativeLeaseIDs))" in usage_source
-    assert "Set(snapshot.resourceClaims.flatMap(\\.nativeRequestIDs))" in usage_source
+    assert "snapshot.resourceClaims" not in usage_source
+    assert "nativeLeaseIDs" not in usage_source
+    assert "nativeRequestIDs" not in usage_source
     assert 'key = "\\(projectID)\\u{1F}\\(taskReference)"' in usage_source
     assert "if snapshot.resourceClaims.isEmpty" not in usage_source
     assert "claims.isEmpty ? requests : []" not in usage_source
@@ -836,17 +837,6 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
     usage_source = (
         project_root / "desktop" / "ResourceUsageDashboard.swift"
     ).read_text(encoding="utf-8")
-    base_template = (
-        project_root / "src" / "serverpilot" / "web" / "templates" / "base.html"
-    ).read_text(encoding="utf-8")
-    dashboard_template = (
-        project_root
-        / "src"
-        / "serverpilot"
-        / "web"
-        / "templates"
-        / "dashboard.html"
-    ).read_text(encoding="utf-8")
 
     assert "一个本机用户，管理多台服务器与协作 Agent" in readme
     assert "| 核心价值 | ServerPilot 提供什么 |\n| --- | --- |" in readme
@@ -860,10 +850,9 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
     assert "| --- | --- | --- |" not in readme
     assert 'SidebarSelection(title: "使用情况"' in window_source
     assert 'accessibilityLabel("按项目或任务查看使用情况")' in usage_source
-    assert "一个本机用户 · 同一份状态" in base_template
-    assert "一个本机用户 · 多项目与 Agent" in dashboard_template
+    desktop_copy = window_source + usage_source
     for retired_copy in ("共享 GPU 工作区", "协作安排", "当前操作者"):
-        assert retired_copy not in base_template + dashboard_template
+        assert retired_copy not in desktop_copy
 
 
 def test_resource_ownership_fixture_covers_all_resource_usage_dimensions() -> None:
@@ -873,26 +862,26 @@ def test_resource_ownership_fixture_covers_all_resource_usage_dimensions() -> No
             encoding="utf-8"
         )
     )["data"]["current"]
-    claims = fixture["resource_claims"]
-
-    assert {claim["project_id"] for claim in claims} == {"vision-lab", "robotics"}
-    assert len({claim["actor_id"] for claim in claims}) >= 3
-    assert len({claim["task_ref"] for claim in claims}) >= 4
-    assert {claim["state"].upper() for claim in claims} >= {"ACTIVE", "BLOCKED"}
-    assert {claim["runtime_state"] for claim in claims} >= {
-        "ASSIGNED",
-        "RUNNING",
-        "REQUESTED",
-    }
-    for claim in claims:
-        assert set(claim["quantities"]) >= {"cpu_cores", "memory_mib", "gpu_count"}
-    linked_claim = next(claim for claim in claims if claim["id"] == "claim-vision-train")
-    assert linked_claim["native_lease_ids"] == ["lease-vision-train"]
-    assert linked_claim["native_request_ids"] == ["request-vision-train"]
-    shared_task_projects = {
-        claim["project_id"] for claim in claims if claim["task_ref"] == "train-resnet"
-    }
-    assert shared_task_projects == {"vision-lab", "robotics"}
+    for removed in (
+        "resource_claims",
+        "resource_providers",
+        "allocatable_units",
+        "scheduler_targets",
+        "scheduler_jobs",
+        "scheduler_transfers",
+        "workload_profiles",
+        "resource_plan_evaluations",
+        "resource_run_actuals",
+    ):
+        assert removed not in fixture
+    leases = fixture["leases"]
+    assert {lease["project_id"] for lease in leases} == {"vision-lab"}
+    assert {lease["task_ref"] for lease in leases} >= {"train-resnet"}
+    assert {lease["actor_id"] for lease in leases} >= {"agent-trainer"}
     assert fixture["requests"][0]["id"] == "request-robotics-gpu"
     assert any(endpoint["id"] == "cpu-node-01" for endpoint in fixture["endpoints"])
-    assert any(provider["provider_type"] == "scheduler" for provider in fixture["resource_providers"])
+    gpu_endpoint = next(
+        endpoint for endpoint in fixture["endpoints"] if endpoint["id"] == "gpu-node-01"
+    )
+    assert gpu_endpoint["host"] == "10.20.0.21"
+    assert gpu_endpoint["port"] == 2222

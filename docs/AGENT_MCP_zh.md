@@ -45,7 +45,7 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 
 daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgent；daemon 不兼容或未就绪时，调用会明确失败，不会创建备用数据库，也不会改走 SSH。
 
-默认的 `serverpilot-mcp` 只暴露 `gpu_status`、`gpu_apply`、`gpu_release` 三个工具。scheduler、通用资源、endpoint 管理和低层租约兼容工具仍然保留，但只有设置 `SERVERPILOT_MCP_PROFILE=advanced` 才会出现在工具发现结果里。默认配置不需要 `enabled_tools` 白名单。
+`serverpilot-mcp` 只暴露五个工具：`gpu_status`、`gpu_apply`、`gpu_release`、`gpu_add_server`、`gpu_update_server`。这就是全部 MCP 表面。`gpu_add_server` 的 `observation_profile` 直接写在参数 schema 里，接受内置 `linux-nvidia`、`linux-host`、`server-script-v1`，或本机已发现的插件 ID。默认配置不需要 `enabled_tools` 白名单。服务器删除和其他生命周期操作走 App 或 REST。
 
 ## 日常 GPU 路径
 
@@ -76,7 +76,7 @@ ServerPilot 只协调 GPU。申请成功后直接 SSH 上去跑工作负载是�
 
 ## 边界
 
-- 通用资源、管理与 scheduler 操作是 advanced 兼容接口，不进入默认 Agent 上下文。
+- 服务器登记走 `gpu_add_server` / `gpu_update_server`；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。
 - App 负责人工查看和纠错；默认 Agent 路径不需要额外生命周期步骤。
 - ServerPilot 返回 SSH 连接参数但不提供密码、私钥或 shell；它复用当前用户已有凭据，也不代替项目自己的远端执行授权。
 

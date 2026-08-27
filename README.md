@@ -22,7 +22,7 @@
   <img src="https://img.shields.io/badge/Python-3.12%2B-2563EB?logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
   <img src="https://img.shields.io/badge/Windows-native%20App-147AF3?logo=windows&logoColor=white" alt="Native Windows App">
-  <img src="https://img.shields.io/badge/MCP-3%20routine%20tools-7C3AED" alt="Three routine MCP tools">
+  <img src="https://img.shields.io/badge/MCP-5%20routine%20tools-7C3AED" alt="Five routine MCP tools">
   <a href="https://github.com/JinPLu/ServerPilot/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
 
@@ -36,8 +36,9 @@
 > them GPUs one card at a time?
 
 To an agent, ServerPilot is an MCP server: look at cards, take some, give them
-back. To you, it is a macOS or Windows app showing what is free, what is busy,
-whose job is where, and what is failing across every server you registered.
+back, and register or update a host. To you, it is a macOS or Windows app
+showing what is free, what is busy, whose job is where, and what is failing
+across every server you registered. There is no browser UI.
 
 One local user, several servers, several agents. Resource state, requests, and
 human correction all read the same committed snapshot from one local control
@@ -63,17 +64,20 @@ shown group → server → SKU, not as a menu of individual free cards.
 
 ### 🧩 Agents allocate for themselves
 
-The default MCP surface is three tools:
+The MCP surface is exactly five tools:
 
 - 🔍 `gpu_status` — grouped allocatable capacity, what is busy and to whom, and
   telemetry for cards you already hold
 - 🔑 `gpu_apply` — take GPUs (`server_group_id?`, `server_id?`, `gpu_count=1`,
   `task?`)
 - ♻️ `gpu_release` — give them back
+- ➕ `gpu_add_server` — register a host
+- ✏️ `gpu_update_server` — update safe host metadata
 
 A successful request returns the SSH connection, the remote working directory,
 a CUDA selector, and a `lease_id`, so an agent never has to guess a server, a
-directory, or a GPU index.
+directory, or a GPU index. Deleting a server stays in the app and REST; it is
+not an MCP tool, and it refuses while that server holds active leases.
 
 ### 🛠️ You step in only when something is wrong
 
@@ -161,11 +165,13 @@ A GPU becomes allocatable only after a fresh collection succeeds. The full
 protocol, including what the output must contain, is in the
 [collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md) (Chinese).
 
-Do not register a shared scheduler cluster (Slurm, LSF, PBS) as bare metal. Use
-a local plugin to take over observation so only your own jobs are registered,
-and let requests go through an immediate allocation such as `srun --immediate`.
-See [server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md) for the contract and the reference
-implementation.
+Do not register a shared cluster (Slurm, LSF, PBS) as bare metal. A local
+plugin takes over observation so only your own jobs are registered, and
+requests go through that plugin's `apply` / `release`. The bundled
+`slurm-immediate` plugin is the reference; there is no separate scheduler
+submission surface. See
+[server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md)
+for the contract.
 
 ### 3. 🤖 Connect an agent
 
@@ -210,7 +216,10 @@ gpu_status → gpu_apply(server_group_id=<group>, gpu_count=<launch config>, tas
   script or config. The safe default is 1. Never infer it from free capacity.
 - On grouped direct hosts, pass `server_group_id`; the broker then best-fits one
   host inside that group. `server_id` remains for ungrouped hosts and for
-  plugin/scheduler compatibility.
+  plugin-adapted clusters.
+- Inventory uses `gpu_add_server` and `gpu_update_server`. There is no MCP
+  delete; remove a server in the app or REST, which refuses while it holds
+  active leases.
 - Assess a group's workspace, environment notes, and data/weight notes before
   claiming. Endpoints inherit the group workspace or override it. Environment
   notes are descriptive only — they are not executed or injected.
@@ -263,9 +272,10 @@ zsh desktop/build-macos-app.sh
 open "./ServerPilot.app"
 ```
 
-The app is for seeing state, ownership, and failures. Manual reassignment
-updates the lease and the CUDA selector; it does not migrate a running process,
-so the agent has to restart its workload against the new selector.
+The app is for seeing state, ownership, and failures. There is no browser UI.
+Manual reassignment updates the lease and the CUDA selector; it does not
+migrate a running process, so the agent has to restart its workload against the
+new selector.
 
 ## 🛡️ Boundaries and security
 

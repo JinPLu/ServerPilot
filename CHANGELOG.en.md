@@ -6,12 +6,15 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
-**Source now has first-class server groups and a task-declared GPU count; routine MCP picks a host inside a group instead of offering a menu of free cards.**
+**Source is now the daily product: a local daemon, the desktop apps, and five MCP tools. The browser UI and the scheduler/planning surfaces are gone; the claim loop you were using is not.**
 
 - Routine MCP apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`. `gpu_count` is exact job parallelism from the launch script or config. The safe default is 1. It is never inferred from free capacity — a one-card job on an eight-card machine therefore takes one card.
 - `gpu_status` projects allocatable capacity group → server → SKU (`name` / `vram_mib` / `total_count` / `available_count`), not one row per free card.
 - A group carries a workspace plus environment and data/weight notes; a member inherits that workspace or overrides it. Environment notes are descriptive only — they are not executed or injected.
-- Grouped routine direct claims select a group, then one best-fit host inside it. Ungrouped hosts and plugin/scheduler requests still use `server_id`.
+- Grouped routine direct claims select a group, then one best-fit host inside it. Ungrouped hosts and plugin-adapted clusters still use `server_id`.
+- External scheduler submission (targets, jobs, transfers, and their MCP tools), generic resource planning, workload-profile presets, and every `/ui` browser page are gone. Those were never the path an agent used to take cards; `gpu_status → gpu_apply → gpu_release` remains. A Slurm-style cluster is adapted through a local plugin (bundled `slurm-immediate`) instead of a parallel scheduler codebase.
+- Routine MCP is exactly five tools: the three above, plus `gpu_add_server` and `gpu_update_server`. Deleting a server stays in the app and REST; it is not an MCP tool, and it refuses while that server holds active leases.
+- There is no browser UI. Humans watch state, correct ownership, and remove servers in the macOS or Windows app, still from the same local snapshot.
 
 ## 1.9.1 - 2026-08-27
 

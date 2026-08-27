@@ -227,7 +227,6 @@ class Settings:
     bind_host: str = "127.0.0.1"
     bind_port: int = 8787
     daemon_instance_id: str | None = None
-    session_secret: str | None = None
     request_body_limit_bytes: int = 256_000
     rate_limit_per_minute: int = 120
 
@@ -261,5 +260,4 @@ class Settings:
             inventory_path=Path(raw_inventory),
             bind_host=host,
             bind_port=port,
-            session_secret=os.environ.get("SERVERPILOT_SESSION_SECRET"),
         )

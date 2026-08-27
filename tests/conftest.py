@@ -86,7 +86,6 @@ def build_app(
             Settings(
                 database_url=f"sqlite:///{tmp_path / f'{name}.sqlite3'}",
                 inventory_path=path,
-                session_secret="s" * 32,
                 **overrides,
             ),
             **app_kwargs,

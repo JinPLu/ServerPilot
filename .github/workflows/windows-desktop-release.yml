@@ -41,9 +41,6 @@ jobs:
           $versions = Get-ChildItem -Path $root -Recurse -File -Filter "*.py" |
             Where-Object { $_.DirectoryName -like "*serverpilot\migrations\versions" }
           if ($versions.Count -lt 1) { throw "packaged app is missing serverpilot/migrations/versions/*.py" }
-          $templates = Get-ChildItem -Path $root -Recurse -File -Filter "*.html" |
-            Where-Object { $_.DirectoryName -like "*serverpilot\web\templates" }
-          if ($templates.Count -lt 1) { throw "packaged app is missing serverpilot/web/templates/*.html" }
           if (-not (Test-Path (Join-Path $root "serverpilot-mcp.exe"))) {
             throw "packaged app is missing serverpilot-mcp.exe; agents would have no MCP entry point"
           }

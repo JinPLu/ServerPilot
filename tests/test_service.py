@@ -25,17 +25,13 @@ from serverpilot.models import (
     TelemetrySnapshot,
 )
 from serverpilot.schemas import (
-    ActorCreate,
     EndpointCreate,
     EndpointObservation,
     EndpointUpdate,
     LeaseObservedBind,
     RequestCreate,
     ReservationCreate,
-    ResourceClaim,
     RetentionPrune,
-    WorkloadProfileClaim,
-    WorkloadProfileUpsert,
 )
 from serverpilot.service import ACTIVE_LEASE_STATES, ActorContext, BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
@@ -304,87 +300,22 @@ def test_explicit_reservation_rejects_absent_gpu_until_reappears(service, admin)
     assert created["reservation"]["gpu_ids"] == ["endpoint-a:GPU-old"]
 
 
-def test_workload_profile_claim_uses_approved_contract_atomically(service, admin) -> None:
-    service.ingest_observation(observation(count=2))
-    created = service.upsert_workload_profile(
-        admin,
-        WorkloadProfileUpsert.model_validate(
-            {
-                "id": "benchmark-2gpu",
-                "project_id": "project-a",
-                "display_name": "Benchmark two GPU",
-                "purpose": "approved benchmark evaluation",
-                "duration_seconds": 7200,
-                "constraints": {
-                    "gpu_count": 2,
-                    "placement": "pack",
-                },
-            }
-        ),
-        idempotency_key="profile-upsert",
-    )
-    assert created["workload_profile"]["constraints"]["endpoint_ids"] == []
-
-    first = service.claim_workload_profile(
-        admin,
-        "benchmark-2gpu",
-        WorkloadProfileClaim(task_ref="run-2026-07-19"),
-        idempotency_key="profile-claim",
-    )
-    second = service.claim_workload_profile(
-        admin,
-        "benchmark-2gpu",
-        WorkloadProfileClaim(task_ref="run-2026-07-19"),
-        idempotency_key="profile-claim",
-    )
-
-    assert first == second
-    assert first["lease"] is not None
-    assert first["lease"]["state"] == "HELD"
-    request = first["request"]
-    assert request["state"] == "LEASED"
-    assert request["profile_id"] == "benchmark-2gpu"
-    assert request["purpose"] == "approved benchmark evaluation"
-    assert request["duration_seconds"] == 7200
-    assert request["constraints"]["gpu_count"] == 2
-    assert request["constraints"]["endpoint_ids"] == []
-    events = service.list_events(admin)["data"]
-    request_event = next(event for event in events if event["action"] == "request.created")
-    assert request_event["summary"]["profile_id"] == "benchmark-2gpu"
-
-
 def test_routine_claim_fails_immediately_and_can_be_retried_when_capacity_arrives(
     service, admin
 ) -> None:
-    service.upsert_workload_profile(
-        admin,
-        WorkloadProfileUpsert.model_validate(
-            {
-                "id": "queued-eval",
-                "project_id": "project-a",
-                "display_name": "Queued evaluation",
-                "purpose": "approved queued evaluation",
-                "duration_seconds": 7200,
-                "constraints": {"gpu_count": 1},
-            }
-        ),
-        idempotency_key="queued-profile",
-    )
     with pytest.raises(BrokerError) as error:
-        service.claim_workload_profile(
+        service.create_request(
             admin,
-            "queued-eval",
-            WorkloadProfileClaim(task_ref="queued-run"),
+            request_data("queued-run"),
             idempotency_key="queued-claim",
         )
     assert error.value.code == "no_capacity"
     assert service.list_requests(admin)["data"] == []
 
     service.ingest_observation(observation(count=1))
-    claimed = service.claim_workload_profile(
+    claimed = service.create_request(
         admin,
-        "queued-eval",
-        WorkloadProfileClaim(task_ref="retried-run"),
+        request_data("retried-run"),
         idempotency_key="retried-claim",
     )
     assert claimed["request"]["state"] == "LEASED"
@@ -663,30 +594,6 @@ def test_delete_endpoint_rejects_active_leases_then_deletes_after_release(servic
     assert "endpoint-a" in listed
 
 
-def test_delete_endpoint_rejects_active_generic_allocations(service, admin) -> None:
-    service.ingest_observation(observation(count=0))
-    claimed = service.create_resource_claim(
-        admin,
-        ResourceClaim.model_validate(
-            {
-                "project_id": "project-a",
-                "task_ref": "block-delete",
-                "purpose": "generic allocation blocks delete",
-                "provider_type": "host-capacity",
-                "quantities": {"cpu_cores": 2, "memory_mib": 2048},
-            }
-        ),
-        idempotency_key="generic-block-delete",
-    )
-    assert claimed["claim"]["state"] == "active"
-    with pytest.raises(BrokerError) as error:
-        service.delete_endpoint(admin, "endpoint-a", idempotency_key="delete-blocked-generic")
-    assert error.value.code == "endpoint_has_active_allocations"
-    assert error.value.status_code == 409
-    listed = {endpoint["id"] for endpoint in service.list_endpoints(admin)["data"]}
-    assert "endpoint-a" in listed
-
-
 def test_deleted_inventory_endpoint_is_not_resurrected_on_restart(tmp_path: Path) -> None:
     inventory = InventoryConfig(
         schema_version=1,
@@ -755,11 +662,13 @@ def test_claim_auto_creates_project_without_extra_endpoint_scope(service, admin)
     assert claimed["request"]["state"] == "LEASED"
     assert claimed["lease"]["state"] == "HELD"
     assert claimed["lease"]["project_id"] == "storyboard"
-    projects = {project["id"] for project in service.list_projects(admin)["data"]}
-    assert "storyboard" in projects
+    assert any(
+        lease["project_id"] == "storyboard"
+        for lease in service.snapshot(admin)["data"]["leases"]
+    )
 
 
-def test_coordination_board_and_observed_binding_are_agent_self_service(service, admin) -> None:
+def test_observed_binding_is_visible_on_the_control_plane_snapshot(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
         admin,
@@ -782,15 +691,12 @@ def test_coordination_board_and_observed_binding_are_agent_self_service(service,
     assert len(bound["lease"]["workloads"][0]["process_keys"]) == 1
     assert service.list_requests(admin)["data"][0]["state"] == "ACTIVE"
 
-    gpu = service.list_gpus(admin)["data"][0]
+    current = service.control_plane_state(admin)["data"]["current"]
+    gpu = current["gpus"][0]
     assert gpu["state"] == "RUNNING_MANAGED"
     assert gpu["processes"][0]["process_key"]
-    board = service.coordination(admin)["data"]
-    assert board["summary"]["active_agents"] == 1
-    assert board["summary"]["managed_running_gpus"] == 1
-    assert board["servers"][0]["consumers"][0]["agent_name"] == admin.id
-    assert board["leases"][0]["activity"] == "running"
-    assert board["agents"][0]["managed_running_gpus"] == 1
+    assert current["leases"][0]["actor_id"] == admin.id
+    assert current["leases"][0]["state"] == "ACTIVE"
 
 
 def test_collector_auto_binds_new_process_to_its_exact_workload_lease(service, admin) -> None:
@@ -1043,7 +949,7 @@ def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(
     }
     assert not any(
         alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.list_alerts(admin)["data"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
     )
 
 
@@ -1106,7 +1012,7 @@ def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(
     assert gpu["lease"]["state"] == "ACTIVE"
     assert not any(
         alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.list_alerts(admin)["data"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
     )
 
 
@@ -1327,7 +1233,7 @@ def test_initialize_normalizes_legacy_process_attribution_conflict(
     assert gpu["lease"]["state"] == "ACTIVE"
     assert not any(
         alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.list_alerts(admin)["data"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
     )
     assert any(
         event["action"] == "lease.conflict_resolved"
@@ -1389,7 +1295,7 @@ def test_endpoint_operator_can_release_empty_conflicted_lease_after_fresh_observ
     assert service.list_gpus(admin)["data"][0]["state"] == "AVAILABLE"
     assert not any(
         alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.list_alerts(admin)["data"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
     )
 
 
@@ -1452,7 +1358,7 @@ def test_owner_can_release_legacy_conflict_while_process_is_observed(service, ad
     assert released["lease"]["state"] == "RELEASED"
     assert not any(
         alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.list_alerts(admin)["data"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
     )
     assert service.list_gpus(admin)["data"][0]["state"] == "BUSY_UNMANAGED"
 
@@ -1493,16 +1399,15 @@ def test_initialize_resolves_stale_alerts_for_terminal_lease(service, admin) -> 
             )
 
     service._write(seed_stale_alerts)
+    assert {
+        alert["type"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
+        if alert["resource_id"] == lease_id
+    } == {"lease_process_conflict", "orphaned_busy"}
     service.initialize()
-
-    repaired = [
-        alert for alert in service.list_alerts(admin)["data"] if alert["resource_id"] == lease_id
-    ]
-    assert {alert["type"] for alert in repaired} == {
-        "lease_process_conflict",
-        "orphaned_busy",
-    }
-    assert all(alert["active"] is False for alert in repaired)
+    assert not any(
+        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
+    )
 
 
 def test_reconcile_resolves_alerts_for_lease_without_active_resources(service, admin) -> None:
@@ -1542,16 +1447,15 @@ def test_reconcile_resolves_alerts_for_lease_without_active_resources(service, a
             )
 
     service._write(orphan_alerts_from_resources)
+    assert {
+        alert["type"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
+        if alert["resource_id"] == lease_id
+    } == {"lease_process_conflict", "orphaned_busy"}
     service.reconcile(admin)
-
-    repaired = [
-        alert for alert in service.list_alerts(admin)["data"] if alert["resource_id"] == lease_id
-    ]
-    assert {alert["type"] for alert in repaired} == {
-        "lease_process_conflict",
-        "orphaned_busy",
-    }
-    assert all(alert["active"] is False for alert in repaired)
+    assert not any(
+        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
+    )
 
 
 def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin) -> None:
@@ -1981,32 +1885,28 @@ def test_telemetry_prune_deletes_gpu_and_endpoint_history_but_not_current(
     assert service._read(counts) == (1, 1, 1, 1)
 
 
-def test_gpu_history_is_downsampled_to_requested_cap(service, admin) -> None:
+def test_endpoint_history_is_downsampled_to_requested_cap(service, admin) -> None:
     service.ingest_observation(observation(count=1))
-    gpu_id = service.list_gpus(admin)["data"][0]["id"]
 
     def seed_history(session) -> None:  # type: ignore[no-untyped-def]
         start = utcnow() - timedelta(hours=3)
         for index in range(130):
             session.add(
-                TelemetrySnapshot(
-                    gpu_id=gpu_id,
+                EndpointTelemetrySnapshot(
+                    endpoint_id="endpoint-a",
                     observed_at=start + timedelta(minutes=index),
                     collected_at=start + timedelta(minutes=index),
-                    memory_used_mib=index,
-                    memory_free_mib=100_000 - index,
-                    gpu_utilization_pct=index % 100,
-                    memory_utilization_pct=index % 100,
-                    temperature_c=35,
-                    power_watts=100.0,
-                    pstate="P0",
-                    health="OK",
-                    provider="test",
+                    cpu_count=64,
+                    load_1m=float(index % 10),
+                    memory_total_mib=262_144,
+                    memory_available_mib=196_608,
                 )
             )
 
     service._write(seed_history)
-    history = service.gpu_history(admin, gpu_id, window_seconds=21_600, max_points=120)
+    history = service.endpoint_history(
+        admin, "endpoint-a", window_seconds=21_600, max_points=120
+    )
     assert history["data"]["point_count"] == 120
 
 
@@ -2062,17 +1962,6 @@ def test_expired_lease_with_process_becomes_orphan_and_stays_blocked(service, ad
 
 
 def test_allocator_can_claim_an_unregistered_project_without_login_token(service, admin) -> None:
-    created = service.create_actor(
-        admin,
-        ActorCreate(
-            id="story-agent",
-            display_name="Project A agent",
-            role="allocator",
-            project_ids=["project-a"],
-        ),
-        idempotency_key="new-agent",
-    )
-    assert "token" not in created
     agent = service.local_actor("story-agent")
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
@@ -2084,8 +1973,7 @@ def test_allocator_can_claim_an_unregistered_project_without_login_token(service
     assert any(
         item["id"] == claimed["request"]["id"] for item in service.list_requests(agent)["data"]
     )
-    actors = service.list_actors(admin)["data"]
-    assert "tokens" not in str(actors)
+    assert "tokens" not in str(service.snapshot(admin))
 
 
 def test_one_hundred_concurrent_requests_never_double_lease(service, admin) -> None:
@@ -2128,7 +2016,6 @@ def test_database_unique_index_rejects_duplicate_active_gpu(service, admin) -> N
             id="illegal-request",
             actor_id=admin.id,
             project_id="project-a",
-            profile_id=None,
             auto_activate=False,
             task_ref="illegal-duplicate",
             purpose="verify active GPU uniqueness",

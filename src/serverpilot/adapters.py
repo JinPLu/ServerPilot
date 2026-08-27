@@ -9,11 +9,10 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
-import os
 import re
 import shlex
 import subprocess
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 from typing import Any, Literal
@@ -34,16 +33,11 @@ from serverpilot.keepalive_protocol import (
     validate_gpu_uuid,
 )
 
-AdapterId = Literal["raw-ssh", "slurm-command", "server-script-v1"]
+AdapterId = Literal["raw-ssh", "server-script-v1"]
 Capability = Literal[
     "observation",
-    "scheduler",
-    "provisioning-preview",
-    "operation",
     "endpoint_keepalive",
 ]
-OperationId = Literal["scheduler.submit", "scheduler.cancel", "scheduler.upload"]
-ParameterType = Literal["string", "path"]
 RawSSHProbe = Literal["endpoint-telemetry"]
 ObservationProfile = str
 
@@ -137,65 +131,9 @@ class AdapterRegistryError(KeyError):
 
 
 @dataclass(frozen=True, slots=True)
-class ApprovalRequirement:
-    required: Literal[True] = True
-    field: Literal["approval_ref"] = "approval_ref"
-    current_task_only: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class OperationParameter:
-    name: str
-    type: ParameterType
-    required: bool = True
-
-
-@dataclass(frozen=True, slots=True)
-class OperationSpec:
-    id: OperationId
-    title: str
-    parameters: tuple[OperationParameter, ...]
-    approval: ApprovalRequirement
-    executes: Literal[False] = False
-
-    def schema(self) -> dict[str, Any]:
-        return {
-            "id": self.id,
-            "title": self.title,
-            "approval": {
-                "required": self.approval.required,
-                "field": self.approval.field,
-                "current_task_only": self.approval.current_task_only,
-            },
-            "executes": self.executes,
-            "parameters": [
-                {
-                    "name": parameter.name,
-                    "type": parameter.type,
-                    "required": parameter.required,
-                }
-                for parameter in self.parameters
-            ],
-        }
-
-
-@dataclass(frozen=True, slots=True)
-class ProvisioningRecipePreview:
-    id: str
-    title: str
-    summary: str
-    executable: Literal[False] = False
-
-
-@dataclass(frozen=True, slots=True)
 class AdapterDefinition:
     id: AdapterId
     capabilities: frozenset[Capability]
-    operations: tuple[OperationSpec, ...] = ()
-    provisioning_previews: tuple[ProvisioningRecipePreview, ...] = ()
-
-    def operation_schema(self) -> tuple[dict[str, Any], ...]:
-        return tuple(operation.schema() for operation in self.operations)
 
 
 class AdapterRegistry:
@@ -616,181 +554,8 @@ class ServerScriptKeepaliveAdapter:
             )
 
 
-class SlurmCommandSchedulerAdapter:
-    id: AdapterId = "slurm-command"
-
-    def __init__(
-        self,
-        runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-    ) -> None:
-        self.runner = runner
-
-    @staticmethod
-    def transport_prefix(connection: dict[str, Any]) -> list[str]:
-        """Resolve a sealed scheduler transport outside target configuration.
-
-        A target can choose only a profile ID. The profile-to-wrapper mapping
-        comes from the local deployment's environment; each wrapper must be an
-        absolute, zero-argument program that accepts the broker's final remote
-        command. This keeps a cooperative API payload from becoming argv.
-        """
-
-        profile = connection.get("transport_profile")
-        if not isinstance(profile, str) or not re.fullmatch(r"[a-z][a-z0-9-]{1,63}", profile):
-            raise AdapterCommandError("scheduler target has an invalid transport profile")
-
-        raw_profiles = os.environ.get("SERVERPILOT_SCHEDULER_TRANSPORTS") or os.environ.get(
-            "SERVERPILOT_SCHEDULER_TRANSPORTS"
-        )
-        if raw_profiles:
-            try:
-                profiles = json.loads(raw_profiles)
-            except json.JSONDecodeError as exc:
-                raise AdapterCommandError("scheduler transport mapping is invalid JSON") from exc
-            if not isinstance(profiles, dict):
-                raise AdapterCommandError("scheduler transport mapping must be an object")
-        else:
-            legacy_helper = os.environ.get("SERVERPILOT_SCHEDULER_HELPER") or os.environ.get(
-                "SERVERPILOT_SCHEDULER_HELPER"
-            )
-            profiles = {"default": legacy_helper} if legacy_helper else {}
-
-        helper = profiles.get(profile)
-        if not isinstance(helper, str):
-            raise AdapterCommandError(
-                f"scheduler transport profile {profile!r} is not configured locally"
-            )
-        if not os.path.isabs(helper) or any(character in helper for character in ("\x00", "\n", "\r")):
-            raise AdapterCommandError("scheduler transport helper must be an absolute single executable path")
-        return [helper]
-
-    def run(
-        self,
-        connection: dict[str, Any],
-        arguments: list[str],
-        *,
-        mutating: bool,
-        timeout_seconds: int,
-    ) -> str:
-        remote_command = shlex.join(arguments)
-        try:
-            result = self.runner(
-                [*self.transport_prefix(connection), remote_command],
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise AdapterCommandError(
-                "scheduler mutation timed out; its remote outcome is unknown"
-                if mutating
-                else "scheduler access timed out; connect the approved VPN and retry",
-                access_required=not mutating,
-                uncertain=mutating,
-            ) from exc
-        except OSError as exc:
-            raise AdapterCommandError(f"scheduler helper could not start: {type(exc).__name__}") from exc
-        output = _clean_output("\n".join(part for part in (result.stdout, result.stderr) if part))
-        if result.returncode != 0:
-            access_required = result.returncode in {20, 21, 22, 23, 24, 25, 255} or any(
-                marker in output.lower()
-                for marker in (
-                    "connection timed out",
-                    "network is unreachable",
-                    "no route to host",
-                    "vpn disconnected",
-                    "vpn is disconnected",
-                    "vpn required",
-                    "connect the approved vpn",
-                    "认证失败",
-                    "验证",
-                )
-            )
-            message = output[-1500:] if output else f"helper exited with code {result.returncode}"
-            raise AdapterCommandError(
-                message,
-                access_required=access_required,
-                uncertain=mutating and not access_required,
-            )
-        return output
-
-    def upload(
-        self,
-        command: list[str],
-        *,
-        upload_timeout_seconds: int,
-    ) -> str:
-        try:
-            result = self.runner(
-                command,
-                check=False,
-                capture_output=True,
-                text=True,
-                timeout=upload_timeout_seconds,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise AdapterCommandError("staged upload timed out", uncertain=True) from exc
-        except OSError as exc:
-            raise AdapterCommandError(f"scp could not start: {type(exc).__name__}") from exc
-        output = _clean_output("\n".join(part for part in (result.stdout, result.stderr) if part))
-        if result.returncode != 0:
-            access_required = result.returncode == 255
-            raise AdapterCommandError(
-                output[-1500:] or f"scp exited with code {result.returncode}",
-                access_required=access_required,
-                uncertain=not access_required,
-            )
-        return output
-
-
-_APPROVAL = ApprovalRequirement()
 _ADAPTER_DEFINITIONS = (
     AdapterDefinition(id="raw-ssh", capabilities=frozenset({"observation"})),
-    AdapterDefinition(
-        id="slurm-command",
-        capabilities=frozenset({"scheduler", "provisioning-preview", "operation"}),
-        operations=(
-            OperationSpec(
-                id="scheduler.submit",
-                title="Submit approved scheduler workload",
-                parameters=(
-                    OperationParameter("scheduler_target_id", "string"),
-                    OperationParameter("workload_profile_id", "string"),
-                    OperationParameter("approval_ref", "string"),
-                ),
-                approval=_APPROVAL,
-            ),
-            OperationSpec(
-                id="scheduler.cancel",
-                title="Cancel approved scheduler workload",
-                parameters=(
-                    OperationParameter("scheduler_target_id", "string"),
-                    OperationParameter("scheduler_job_id", "string"),
-                    OperationParameter("approval_ref", "string"),
-                ),
-                approval=_APPROVAL,
-            ),
-            OperationSpec(
-                id="scheduler.upload",
-                title="Upload approved scheduler payload",
-                parameters=(
-                    OperationParameter("scheduler_target_id", "string"),
-                    OperationParameter("local_path", "path"),
-                    OperationParameter("remote_directory", "path"),
-                    OperationParameter("approval_ref", "string"),
-                ),
-                approval=_APPROVAL,
-            ),
-        ),
-        provisioning_previews=(
-            ProvisioningRecipePreview(
-                id="slurm-one-off-preview",
-                title="Preview Slurm one-off workload recipe",
-                summary="Builds a non-executable preview from an approved scheduler profile.",
-            ),
-        ),
-    ),
     AdapterDefinition(
         id="server-script-v1",
         capabilities=frozenset({"endpoint_keepalive"}),
@@ -807,10 +572,3 @@ def endpoint_keepalive_adapter(adapter_id: str) -> ServerScriptKeepaliveAdapter:
     if adapter_id != SERVER_SCRIPT_KEEPALIVE_ADAPTER.id:  # sealed exhaustiveness check
         raise AdapterRegistryError(f"unknown endpoint keepalive adapter: {adapter_id}")
     return SERVER_SCRIPT_KEEPALIVE_ADAPTER
-
-
-def scheduler_adapter(
-    runner: Callable[..., subprocess.CompletedProcess[str]] = subprocess.run,
-) -> SlurmCommandSchedulerAdapter:
-    ADAPTER_REGISTRY.require_capability("slurm-command", "scheduler")
-    return SlurmCommandSchedulerAdapter(runner=runner)

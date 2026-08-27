@@ -26,12 +26,6 @@ def test_migration_upgrade_and_downgrade(tmp_path: Path) -> None:
         "telemetry_current",
         "leases",
         "lease_resources",
-        "workload_profiles",
-        "workload_profile_grants",
-        "scheduler_targets",
-        "scheduler_jobs",
-        "scheduler_job_events",
-        "scheduler_transfers",
         "lease_endpoint_commitments",
         "audit_events",
     }.issubset(
@@ -48,6 +42,14 @@ def test_migration_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert "server_group_id" in endpoint_columns
     assert "server_groups" in inspect(database.engine).get_table_names()
     assert "kind" in lease_columns
+    request_columns = {
+        column["name"] for column in inspect(database.engine).get_columns("allocation_requests")
+    }
+    assert "profile_id" not in request_columns
+    request_indexes = {
+        index["name"] for index in inspect(database.engine).get_indexes("allocation_requests")
+    }
+    assert "ix_allocation_requests_profile_id" not in request_indexes
     expires_at = next(
         column for column in inspect(database.engine).get_columns("leases")
         if column["name"] == "expires_at"
@@ -144,8 +146,10 @@ def test_migration_upgrades_existing_schema_to_endpoint_telemetry(tmp_path: Path
     command.upgrade(config, "head")
     assert "endpoint_telemetry_current" in inspect(database.engine).get_table_names()
     assert "endpoint_telemetry_snapshots" in inspect(database.engine).get_table_names()
-    assert "workload_profiles" in inspect(database.engine).get_table_names()
-    assert "scheduler_targets" in inspect(database.engine).get_table_names()
+    tables = set(inspect(database.engine).get_table_names())
+    assert "workload_profiles" not in tables
+    assert "scheduler_targets" not in tables
+    assert "resource_providers" not in tables
     endpoint_columns = {
         column["name"] for column in inspect(database.engine).get_columns("endpoints")
     }
@@ -315,6 +319,12 @@ def test_keepalive_persistence_migration_changes_only_active_ownership(
         migrated_cuda_ordinal = connection.execute(
             text("SELECT cuda_ordinal FROM gpu_devices WHERE id = 'gpu-a'")
         ).scalar_one()
+        request_columns = {
+            column["name"] for column in inspect(database.engine).get_columns("allocation_requests")
+        }
+        request_count = connection.execute(
+            text("SELECT COUNT(*) FROM allocation_requests")
+        ).scalar_one()
 
     assert expiries["active-keeper"] is None
     assert expiries["released-keeper"] is not None
@@ -323,6 +333,8 @@ def test_keepalive_persistence_migration_changes_only_active_ownership(
         current_columns
     )
     assert migrated_cuda_ordinal is None
+    assert "profile_id" not in request_columns
+    assert request_count == 3
 
 
 def test_scheduler_transport_migration_scrubs_legacy_argv_and_disables_target(
@@ -365,7 +377,7 @@ def test_scheduler_transport_migration_scrubs_legacy_argv_and_disables_target(
             },
         )
 
-    command.upgrade(config, "head")
+    command.upgrade(config, "20260827_0032")
     with database.engine.connect() as connection:
         row = connection.execute(
             text(
@@ -382,6 +394,9 @@ def test_scheduler_transport_migration_scrubs_legacy_argv_and_disables_target(
     assert not row.enabled
     assert row.access_status == "unconfigured"
     assert "administrator" in row.access_message
+
+    command.upgrade(config, "head")
+    assert "scheduler_targets" not in inspect(database.engine).get_table_names()
 
 
 def test_migration_uses_packaged_scripts_without_project_tree(tmp_path: Path) -> None:

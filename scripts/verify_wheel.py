@@ -20,16 +20,12 @@ from zipfile import ZipFile
 
 REQUIRED_FILES = frozenset(
     {
-        "serverpilot/web/static/assets/server-room-background.jpg",
-        "serverpilot/web/static/vendor/phosphor/style.css",
-        "serverpilot/web/static/vendor/phosphor/Phosphor.woff2",
         "serverpilot/migrations/env.py",
         "serverpilot/migrations/script.py.mako",
     }
 )
 REQUIRED_TREES = (
     ("serverpilot/migrations/versions/", ".py"),
-    ("serverpilot/web/templates/", ".html"),
 )
 PLUGIN_TREE = "serverpilot/bundled_plugins/"
 

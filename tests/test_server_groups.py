@@ -1,10 +1,6 @@
 from __future__ import annotations
 
-import json
-import re
-import subprocess
 from pathlib import Path
-from urllib.parse import unquote
 
 import pytest
 from fastapi.testclient import TestClient
@@ -28,9 +24,6 @@ from serverpilot.schemas import (
     RequestCreate,
     ServerGroupCreate,
     ServerGroupUpdate,
-    SSHCommandRequest,
-    WorkloadProfileClaim,
-    WorkloadProfileUpsert,
 )
 from serverpilot.service import (
     SYSTEM_ACTOR_ID,
@@ -269,9 +262,9 @@ def test_server_group_crud_and_delete_protection(tmp_path: Path, service, admin)
         idempotency_key="crud-create",
     )
     assert created["server_group"]["environment_notes"] == "plain notes"
-    listed = service.list_server_groups(admin)["data"]
+    listed = service.control_plane_state(admin)["data"]["current"]["server_groups"]
     assert any(item["id"] == "crud-group" for item in listed)
-    fetched = service.get_server_group(admin, "crud-group")["data"]
+    fetched = next(item for item in listed if item["id"] == "crud-group")
     assert fetched["display_name"] == "CRUD"
     updated = service.update_server_group(
         admin,
@@ -280,6 +273,12 @@ def test_server_group_crud_and_delete_protection(tmp_path: Path, service, admin)
         idempotency_key="crud-rename",
     )
     assert updated["server_group"]["display_name"] == "CRUD renamed"
+    renamed = next(
+        item
+        for item in service.control_plane_state(admin)["data"]["current"]["server_groups"]
+        if item["id"] == "crud-group"
+    )
+    assert renamed["display_name"] == "CRUD renamed"
     service.create_endpoint(
         admin,
         EndpointCreate(
@@ -302,6 +301,10 @@ def test_server_group_crud_and_delete_protection(tmp_path: Path, service, admin)
     )
     deleted = service.delete_server_group(admin, "crud-group", idempotency_key="crud-delete")
     assert deleted["changed"] is True
+    assert all(
+        item["id"] != "crud-group"
+        for item in service.control_plane_state(admin)["data"]["current"]["server_groups"]
+    )
     events = service.list_events(admin)["data"]
     assert any(
         event["resource_type"] == "server_group" and event["action"] == "server_group.created"
@@ -558,11 +561,11 @@ def test_server_group_rest_routes(build_app) -> None:
         headers=headers,
     )
     assert created.status_code == 200
-    listed = client.get("/api/v1/server-groups", headers={"X-ServerPilot-Actor": "test-admin"})
-    assert listed.status_code == 200
-    assert any(item["id"] == "api-group" for item in listed.json()["data"])
-    fetched = client.get("/api/v1/server-groups/api-group", headers={"X-ServerPilot-Actor": "test-admin"})
-    assert fetched.json()["data"]["workspace_path"] == "/data/api"
+    state = client.get("/api/v1/state", headers={"X-ServerPilot-Actor": "test-admin"})
+    assert state.status_code == 200
+    groups = state.json()["data"]["current"]["server_groups"]
+    fetched = next(item for item in groups if item["id"] == "api-group")
+    assert fetched["workspace_path"] == "/data/api"
     live = client.get("/health/live")
     assert live.json()["capabilities"] == list(API_CAPABILITIES)
     assert "server_group_crud" in live.json()["capabilities"]
@@ -570,11 +573,6 @@ def test_server_group_rest_routes(build_app) -> None:
     snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "test-admin"})
     assert "server_groups" in snapshot.json()["data"]
 
-
-def _csrf(html: str) -> str:
-    match = re.search(r'name="csrf" value="([^"]+)"', html)
-    assert match is not None
-    return match.group(1)
 
 
 def test_workspace_override_mutation_contract(tmp_path: Path, service, admin) -> None:
@@ -651,19 +649,6 @@ def test_workspace_override_mutation_contract(tmp_path: Path, service, admin) ->
             idempotency_key="clear-group-no-path",
         )
     assert error.value.code == "endpoint_workspace_required"
-    ssh = SSHCommandRequest(
-        command="ssh gpu@inherit-host",
-        server_group_id="override-group",
-        workspace_path_override=None,
-        csrf="csrf-token",
-    )
-    assert ssh.stored_workspace_override() is None
-    ssh_legacy = SSHCommandRequest(
-        command="ssh gpu@legacy-host",
-        workspace_path="/srv/ssh-legacy",
-        csrf="csrf-token",
-    )
-    assert ssh_legacy.stored_workspace_override() == "/srv/ssh-legacy"
 
 
 def test_group_reassignment_keepalive_protection(tmp_path: Path) -> None:
@@ -683,44 +668,33 @@ def test_group_reassignment_keepalive_protection(tmp_path: Path) -> None:
     assert error.value.code == "keepalive_endpoint_connection_in_use"
 
 
-def test_web_page_payload_includes_server_groups(build_app) -> None:
-    app = build_app("web-groups", inventory_config=grouped_inventory())
-    client = TestClient(app)
-    home = client.get("/")
-    assert home.status_code == 200
-    assert 'option value="group-small"' in home.text
-    requests_page = client.get("/ui/requests")
-    assert requests_page.status_code == 200
-    assert 'option value="group-small"' in requests_page.text
-    assert 'option value="__ungrouped__"' in requests_page.text
-
-
-def test_web_noscript_claim_maps_group_and_ungrouped_pin(build_app) -> None:
-    app = build_app("web-claim", inventory_config=grouped_inventory())
+def test_claims_map_group_and_ungrouped_pin(build_app) -> None:
+    app = build_app("rest-claim", inventory_config=grouped_inventory())
     service = app.state.service
     service.ingest_observation(observation(endpoint_id="small-a", count=2))
     service.ingest_observation(observation(endpoint_id="small-b", count=2))
     service.ingest_observation(observation(endpoint_id="legacy-a", count=1))
     client = TestClient(app)
-    csrf = _csrf(client.get("/ui/requests").text)
+    headers = {"X-ServerPilot-Actor": "test-agent"}
     grouped = client.post(
-        "/ui/action/quick-claim",
-        data={
+        "/api/v1/claims",
+        json={
             "project_id": "project-a",
-            "task_ref": "grouped-web-claim",
-            "gpu_count": "1",
-            "placement": "pack",
-            "server_group_id": "group-small",
-            "endpoint_id": "small-a",
-            "csrf": csrf,
-            "confirmed": "yes",
+            "task_ref": "grouped-claim",
+            "purpose": "grouped claim",
+            "constraints": {
+                "gpu_count": 1,
+                "placement": "pack",
+                "server_group_ids": ["group-small"],
+                "same_host": True,
+            },
         },
-        follow_redirects=True,
+        headers={**headers, "Idempotency-Key": "grouped-claim"},
     )
     assert grouped.status_code == 200, grouped.text
-    actor = service.local_actor("human")
+    actor = service.local_actor("test-agent")
     grouped_request = next(
-        item for item in service.list_requests(actor)["data"] if item["task_ref"] == "grouped-web-claim"
+        item for item in service.list_requests(actor)["data"] if item["task_ref"] == "grouped-claim"
     )
     assert grouped_request["constraints"]["server_group_ids"] == ["group-small"]
     assert grouped_request["constraints"]["endpoint_ids"] == []
@@ -728,24 +702,25 @@ def test_web_noscript_claim_maps_group_and_ungrouped_pin(build_app) -> None:
     assert grouped_request["state"] == "LEASED"
 
     ungrouped = client.post(
-        "/ui/action/quick-claim",
-        data={
+        "/api/v1/claims",
+        json={
             "project_id": "project-a",
-            "task_ref": "ungrouped-web-claim",
-            "gpu_count": "1",
-            "placement": "pack",
-            "server_group_id": "__ungrouped__",
-            "endpoint_id": "legacy-a",
-            "csrf": csrf,
-            "confirmed": "yes",
+            "task_ref": "ungrouped-claim",
+            "purpose": "ungrouped claim",
+            "constraints": {
+                "gpu_count": 1,
+                "placement": "pack",
+                "endpoint_ids": ["legacy-a"],
+                "same_host": True,
+            },
         },
-        follow_redirects=True,
+        headers={**headers, "Idempotency-Key": "ungrouped-claim"},
     )
     assert ungrouped.status_code == 200, ungrouped.text
     ungrouped_request = next(
         item
         for item in service.list_requests(actor)["data"]
-        if item["task_ref"] == "ungrouped-web-claim"
+        if item["task_ref"] == "ungrouped-claim"
     )
     assert ungrouped_request["constraints"]["server_group_ids"] == []
     assert ungrouped_request["constraints"]["endpoint_ids"] == ["legacy-a"]
@@ -757,93 +732,84 @@ def test_web_noscript_claim_maps_group_and_ungrouped_pin(build_app) -> None:
     assert ungrouped_lease["resources"][0]["endpoint"]["id"] == "legacy-a"
 
 
-def test_web_endpoint_form_and_ssh_inherit_override(build_app) -> None:
-    app = build_app("web-ssh", inventory_config=grouped_inventory())
+def test_endpoint_create_inherits_and_overrides_group_workspace(build_app) -> None:
+    app = build_app("rest-endpoints", inventory_config=grouped_inventory())
     client = TestClient(app)
     service = app.state.service
-    csrf = _csrf(client.get("/").text)
+    actor_headers = {"X-ServerPilot-Actor": "test-admin"}
     inherited = client.post(
-        "/ui/action/endpoint",
-        data={
+        "/api/v1/endpoints",
+        json={
             "id": "form-inherit",
             "host": "127.0.0.8",
-            "port": "2210",
+            "port": 2210,
             "ssh_user": "gpu",
             "server_group_id": "group-small",
-            "workspace_path": "",
             "owner_project_id": "project-a",
-            "enabled": "true",
-            "csrf": csrf,
-            "confirmed": "yes",
-            "environment_notes": "must-not-become-env",
         },
-        follow_redirects=True,
+        headers={**actor_headers, "Idempotency-Key": "form-inherit"},
     )
     assert inherited.status_code == 200, inherited.text
-    form_endpoint = next(
-        item for item in service.list_endpoints(service.local_actor("human"))["data"]
-        if item["id"] == "form-inherit"
-    )
+    form_endpoint = inherited.json()["endpoint"]
     assert form_endpoint["server_group_id"] == "group-small"
     assert form_endpoint["workspace_path"] == "/data/small"
     assert form_endpoint["workspace_path_override"] is None
-    assert "must-not-become-env" not in str(form_endpoint)
 
     ssh_inherit = client.post(
-        "/ui/endpoints/ssh/commit",
+        "/api/v1/endpoints",
         json={
-            "command": "ssh gpu@ssh-inherit-host",
+            "id": "ssh-inherit-host",
+            "host": "ssh-inherit-host",
+            "port": 22,
+            "ssh_user": "gpu",
             "server_group_id": "group-small",
-            "workspace_path_override": None,
-            "project_ids": ["project-a"],
-            "csrf": csrf,
+            "owner_project_id": "project-a",
         },
+        headers={**actor_headers, "Idempotency-Key": "ssh-inherit"},
     )
     assert ssh_inherit.status_code == 200, ssh_inherit.text
-    inherited_ssh = ssh_inherit.json()["data"]["endpoint"]
+    inherited_ssh = ssh_inherit.json()["endpoint"]
     assert inherited_ssh["server_group_id"] == "group-small"
     assert inherited_ssh["workspace_path"] == "/data/small"
     assert inherited_ssh["workspace_path_override"] is None
 
     ssh_override = client.post(
-        "/ui/endpoints/ssh/commit",
+        "/api/v1/endpoints",
         json={
-            "command": "ssh gpu@ssh-override-host",
+            "id": "ssh-override-host",
+            "host": "ssh-override-host",
+            "port": 22,
+            "ssh_user": "gpu",
             "server_group_id": "group-small",
             "workspace_path_override": "/data/ssh-override",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
+            "owner_project_id": "project-a",
         },
+        headers={**actor_headers, "Idempotency-Key": "ssh-override"},
     )
     assert ssh_override.status_code == 200, ssh_override.text
-    overridden = ssh_override.json()["data"]["endpoint"]
+    overridden = ssh_override.json()["endpoint"]
     assert overridden["workspace_path"] == "/data/ssh-override"
     assert overridden["workspace_path_override"] == "/data/ssh-override"
 
     ssh_legacy = client.post(
-        "/ui/endpoints/ssh/commit",
+        "/api/v1/endpoints",
         json={
-            "command": "ssh gpu@ssh-legacy-host",
+            "id": "ssh-legacy-host",
+            "host": "ssh-legacy-host",
+            "port": 22,
+            "ssh_user": "gpu",
             "workspace_path": "/srv/ssh-legacy",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
+            "owner_project_id": "project-a",
         },
+        headers={**actor_headers, "Idempotency-Key": "ssh-legacy"},
     )
     assert ssh_legacy.status_code == 200, ssh_legacy.text
-    legacy = ssh_legacy.json()["data"]["endpoint"]
+    legacy = ssh_legacy.json()["endpoint"]
     assert legacy["server_group_id"] is None
     assert legacy["workspace_path"] == "/srv/ssh-legacy"
     assert legacy["workspace_path_override"] == "/srv/ssh-legacy"
-
-
-ROOT = Path(__file__).resolve().parents[1]
-WEB_JS = (ROOT / "src" / "serverpilot" / "web" / "static" / "app.js").read_text(encoding="utf-8")
-WEB_DASHBOARD = (ROOT / "src" / "serverpilot" / "web" / "templates" / "dashboard.html").read_text(
-    encoding="utf-8"
-)
-WEB_PAGE = (ROOT / "src" / "serverpilot" / "web" / "templates" / "page.html").read_text(
-    encoding="utf-8"
-)
+    ids = {item["id"] for item in service.list_endpoints(service.local_actor("test-admin"))["data"]}
+    assert {"form-inherit", "ssh-inherit-host", "ssh-override-host", "ssh-legacy-host"} <= ids
 
 
 def _no_idempotency(service: BrokerService) -> None:
@@ -851,148 +817,9 @@ def _no_idempotency(service: BrokerService) -> None:
         assert session.scalars(select(IdempotencyRecord)).all() == []
 
 
-def _eval_quick_claim_constraints(payload: dict[str, object]) -> dict[str, object]:
-    marker = "const buildQuickClaimConstraints = "
-    start = WEB_JS.index(marker)
-    end = WEB_JS.index("// end buildQuickClaimConstraints", start)
-    fn = WEB_JS[start:end].rstrip()
-    if fn.endswith(";"):
-        fn = fn[:-1]
-    script = (
-        f"{fn};\n"
-        "try {\n"
-        f"  process.stdout.write(JSON.stringify({{ok:true,value:buildQuickClaimConstraints({json.dumps(payload)})}}));\n"
-        "} catch (error) {\n"
-        "  process.stdout.write(JSON.stringify({ok:false,error:String(error.message||error)}));\n"
-        "}\n"
-    )
-    completed = subprocess.run(
-        ["node", "-e", script],
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    return json.loads(completed.stdout)
 
 
-def test_web_forms_omit_stock_workspace_value() -> None:
-    assert 'value="/srv/serverpilot-workspace"' not in WEB_DASHBOARD
-    assert 'value="/srv/serverpilot-workspace"' not in WEB_PAGE
-    assert 'placeholder="/srv/serverpilot-workspace"' in WEB_DASHBOARD
-    assert 'placeholder="/srv/serverpilot-workspace"' in WEB_PAGE
 
-
-def test_web_group_form_matches_backend_id_and_text_limits() -> None:
-    group_id = next(line for line in WEB_DASHBOARD.splitlines() if 'id="group-id"' in line)
-    assert 'pattern="[a-z][a-z0-9-]{1,127}"' in group_id
-    group_description = next(
-        line for line in WEB_DASHBOARD.splitlines() if 'id="group-description"' in line
-    )
-    assert 'maxlength="1000"' in group_description
-    group_notes = next(
-        line for line in WEB_DASHBOARD.splitlines() if 'id="group-environment-notes"' in line
-    )
-    assert 'maxlength="8000"' in group_notes
-
-
-def test_web_live_js_claim_contract_rejects_empty_group_and_pins_one_host() -> None:
-    empty = _eval_quick_claim_constraints(
-        {"hasFormalGroups": True, "groupID": "", "endpointID": "", "gpuCount": 1, "placement": "pack"}
-    )
-    assert empty["ok"] is False
-    assert "分组" in empty["error"]
-    grouped = _eval_quick_claim_constraints(
-        {
-            "hasFormalGroups": True,
-            "groupID": "group-small",
-            "endpointID": "small-a",
-            "gpuCount": 2,
-            "placement": "pack",
-            "gpuIds": ["small-a:GPU-1"],
-        }
-    )
-    assert grouped["ok"] is True
-    assert grouped["value"] == {
-        "gpu_count": 1,
-        "placement": "exact",
-        "server_group_ids": ["group-small"],
-        "same_host": True,
-        "gpu_ids": ["small-a:GPU-1"],
-    }
-    missing_ungrouped = _eval_quick_claim_constraints(
-        {
-            "hasFormalGroups": True,
-            "groupID": "__ungrouped__",
-            "endpointID": "",
-            "gpuCount": 1,
-            "placement": "pack",
-        }
-    )
-    assert missing_ungrouped["ok"] is False
-    ungrouped = _eval_quick_claim_constraints(
-        {
-            "hasFormalGroups": True,
-            "groupID": "__ungrouped__",
-            "endpointID": "legacy-a",
-            "gpuCount": 1,
-            "placement": "pack",
-        }
-    )
-    assert ungrouped["ok"] is True
-    assert ungrouped["value"] == {
-        "gpu_count": 1,
-        "placement": "pack",
-        "endpoint_ids": ["legacy-a"],
-        "same_host": True,
-    }
-    assert 'fetch("/api/v1/claims"' in WEB_JS
-    submit = WEB_JS.split("quick-claim-form")[1].split("reset-group-form")[0]
-    assert "buildQuickClaimConstraints" in submit
-    assert submit.index("buildQuickClaimConstraints") < submit.index('fetch("/api/v1/claims"')
-
-
-def test_web_noscript_empty_group_does_not_allocate(build_app) -> None:
-    app = build_app("empty-group", inventory_config=grouped_inventory())
-    service = app.state.service
-    service.ingest_observation(observation(endpoint_id="small-a", count=2))
-    client = TestClient(app)
-    actor = service.local_actor("human")
-    csrf = _csrf(client.get("/ui/requests").text)
-    empty = client.post(
-        "/ui/action/quick-claim",
-        data={
-            "project_id": "project-a",
-            "task_ref": "empty-group",
-            "gpu_count": "1",
-            "placement": "pack",
-            "server_group_id": "",
-            "endpoint_id": "small-a",
-            "csrf": csrf,
-            "confirmed": "yes",
-        },
-        follow_redirects=False,
-    )
-    assert empty.status_code == 303
-    assert "未完成" in unquote(empty.headers["location"])
-    assert service.list_requests(actor)["data"] == []
-    _no_idempotency(service)
-    missing = client.post(
-        "/ui/action/quick-claim",
-        data={
-            "project_id": "project-a",
-            "task_ref": "missing-ungrouped",
-            "gpu_count": "1",
-            "placement": "pack",
-            "server_group_id": "__ungrouped__",
-            "endpoint_id": "",
-            "csrf": csrf,
-            "confirmed": "yes",
-        },
-        follow_redirects=False,
-    )
-    assert missing.status_code == 303
-    assert service.list_requests(actor)["data"] == []
-    _no_idempotency(service)
 
 
 def test_unknown_server_group_id_fails_before_persistence(build_app) -> None:
@@ -1220,162 +1047,42 @@ def test_routine_exact_grouped_pin_requires_group(build_app) -> None:
     _no_idempotency(service)
 
 
-def test_preset_claim_requires_bound_group_on_grouped_fleet(tmp_path: Path) -> None:
-    service, admin = grouped_service(tmp_path)
-    service.ingest_observation(observation(endpoint_id="small-a", count=2))
-    service.upsert_workload_profile(
-        admin,
-        WorkloadProfileUpsert.model_validate(
-            {
-                "id": "ungrouped-preset",
-                "project_id": "project-a",
-                "display_name": "No group",
-                "purpose": "must pick a group",
-                "duration_seconds": 3600,
-                "constraints": {"gpu_count": 1, "placement": "pack"},
-            }
-        ),
-        idempotency_key="preset-no-group",
-    )
-    with pytest.raises(BrokerError) as error:
-        service.claim_workload_profile(
-            admin,
-            "ungrouped-preset",
-            WorkloadProfileClaim(task_ref="preset-no-group-run"),
-            idempotency_key="preset-no-group-run",
-        )
-    assert error.value.code == "group_selection_required"
-    assert service.list_requests(admin)["data"] == []
-    with service.database.session() as session:
-        assert [
-            record.key
-            for record in session.scalars(select(IdempotencyRecord)).all()
-            if record.action == "workload_profile.claim"
-        ] == []
-    service.upsert_workload_profile(
-        admin,
-        WorkloadProfileUpsert.model_validate(
-            {
-                "id": "grouped-preset",
-                "project_id": "project-a",
-                "display_name": "Small group",
-                "purpose": "bound to small",
-                "duration_seconds": 3600,
-                "constraints": {
-                    "gpu_count": 1,
-                    "placement": "pack",
-                    "server_group_ids": ["group-small"],
-                },
-            }
-        ),
-        idempotency_key="preset-grouped",
-    )
-    claimed = service.claim_workload_profile(
-        admin,
-        "grouped-preset",
-        WorkloadProfileClaim(task_ref="preset-grouped-run"),
-        idempotency_key="preset-grouped-run",
-    )
-    assert claimed["lease"]["resources"][0]["endpoint"]["id"] == "small-a"
-    assert claimed["request"]["constraints"]["server_group_ids"] == ["group-small"]
-
-
-def test_web_preset_form_maps_server_group_into_constraints(build_app) -> None:
-    form = WEB_PAGE.split('action="/ui/action/workload-profile"')[1].split("</form>")[0]
-    assert 'name="server_group_id"' in form
-    app = build_app("preset-form", inventory_config=grouped_inventory())
-    service = app.state.service
-    service.ingest_observation(observation(endpoint_id="small-a", count=2))
-    client = TestClient(app)
-    csrf = _csrf(client.get("/").text)
-    saved = client.post(
-        "/ui/action/workload-profile",
-        data={
-            "id": "web-grouped-preset",
-            "display_name": "Web grouped",
-            "project_id": "project-a",
-            "gpu_count": "1",
-            "duration_hours": "2",
-            "enabled": "true",
-            "server_group_id": "group-small",
-            "purpose": "web preset with group",
-            "csrf": csrf,
-            "confirmed": "yes",
-        },
-        follow_redirects=False,
-    )
-    assert saved.status_code == 303, saved.text
-    assert "未完成" not in unquote(saved.headers["location"])
-    actor = service.local_actor("human")
-    profile = next(
-        item
-        for item in service.list_workload_profiles(actor)["data"]
-        if item["id"] == "web-grouped-preset"
-    )
-    assert profile["constraints"]["server_group_ids"] == ["group-small"]
-    claimed = client.post(
-        "/ui/action/profile-claim",
-        data={
-            "profile_id": "web-grouped-preset",
-            "task_ref": "web-preset-run",
-            "csrf": csrf,
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert claimed.status_code == 200, claimed.text
-    request = next(
-        item for item in service.list_requests(actor)["data"] if item["task_ref"] == "web-preset-run"
-    )
-    assert request["constraints"]["server_group_ids"] == ["group-small"]
-    assert request["state"] == "LEASED"
-
-
-def test_web_grouped_create_blank_inherits_and_typed_stock_is_override(build_app) -> None:
+def test_ungrouped_create_requires_workspace_and_typed_path_is_override(build_app) -> None:
     app = build_app("stock-workspace", inventory_config=grouped_inventory())
     client = TestClient(app)
     service = app.state.service
-    csrf = _csrf(client.get("/").text)
+    headers = {"X-ServerPilot-Actor": "test-admin"}
     ungrouped_blank = client.post(
-        "/ui/action/endpoint",
-        data={
+        "/api/v1/endpoints",
+        json={
             "id": "blank-ungrouped",
             "host": "127.0.0.9",
-            "port": "2211",
+            "port": 2211,
             "ssh_user": "gpu",
-            "server_group_id": "",
-            "workspace_path": "",
             "owner_project_id": "project-a",
-            "enabled": "true",
-            "csrf": csrf,
-            "confirmed": "yes",
         },
-        follow_redirects=False,
+        headers={**headers, "Idempotency-Key": "blank-ungrouped"},
     )
-    assert ungrouped_blank.status_code == 303
-    assert "工作区" in unquote(ungrouped_blank.headers["location"])
-    assert all(item["id"] != "blank-ungrouped" for item in service.list_endpoints(service.local_actor("human"))["data"])
+    assert ungrouped_blank.status_code == 422, ungrouped_blank.text
+    assert ungrouped_blank.json()["error"]["code"] in {"endpoint_workspace_required", "validation_error"}
+    assert all(
+        item["id"] != "blank-ungrouped"
+        for item in service.list_endpoints(service.local_actor("test-admin"))["data"]
+    )
     stock = client.post(
-        "/ui/action/endpoint",
-        data={
+        "/api/v1/endpoints",
+        json={
             "id": "typed-stock",
             "host": "127.0.0.10",
-            "port": "2212",
+            "port": 2212,
             "ssh_user": "gpu",
             "server_group_id": "group-small",
             "workspace_path": "/srv/serverpilot-workspace",
             "owner_project_id": "project-a",
-            "enabled": "true",
-            "csrf": csrf,
-            "confirmed": "yes",
         },
-        follow_redirects=True,
+        headers={**headers, "Idempotency-Key": "typed-stock"},
     )
     assert stock.status_code == 200, stock.text
-    typed = next(
-        item
-        for item in service.list_endpoints(service.local_actor("human"))["data"]
-        if item["id"] == "typed-stock"
-    )
+    typed = stock.json()["endpoint"]
     assert typed["workspace_path_override"] == "/srv/serverpilot-workspace"
     assert typed["workspace_path"] == "/srv/serverpilot-workspace"

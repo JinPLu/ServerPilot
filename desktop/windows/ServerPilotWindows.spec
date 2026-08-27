@@ -24,7 +24,6 @@ a = Analysis(
         "uvicorn.protocols.http.h11_impl",
         "uvicorn.lifespan.on",
         "uvicorn.lifespan.off",
-        "jinja2.ext",
         "tkinter",
         "tkinter.messagebox",
         "clr",

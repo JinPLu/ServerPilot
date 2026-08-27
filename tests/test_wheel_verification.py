@@ -27,7 +27,6 @@ _spec.loader.exec_module(verify_wheel)
 COMPLETE = (
     *sorted(verify_wheel.REQUIRED_FILES),
     "serverpilot/migrations/versions/20260719_0001_initial.py",
-    "serverpilot/web/templates/dashboard.html",
 )
 PLUGIN = "serverpilot/bundled_plugins/slurm-immediate"
 
@@ -75,7 +74,6 @@ def test_a_wheel_without_any_bundled_plugin_is_rejected(tmp_path: Path) -> None:
             "serverpilot/migrations/versions/20260719_0001_initial.py",
             "missing serverpilot/migrations/versions/*.py",
         ),
-        ("serverpilot/web/templates/dashboard.html", "missing serverpilot/web/templates/*.html"),
         ("serverpilot/migrations/env.py", "missing serverpilot/migrations/env.py"),
     ],
 )

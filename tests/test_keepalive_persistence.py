@@ -13,7 +13,7 @@ from sqlalchemy.exc import IntegrityError
 from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.database import Database
 from serverpilot.models import Actor, AllocationRequest, Lease, Project
-from serverpilot.schemas import ActorCreate, EndpointCreate, EndpointUpdate, RequestCreate
+from serverpilot.schemas import EndpointCreate, EndpointUpdate, RequestCreate
 from serverpilot.service import (
     SYSTEM_ACTOR_ID,
     SYSTEM_PROJECT_ID,
@@ -140,8 +140,11 @@ def test_system_identity_is_tokenless_hidden_and_reserved(service, admin) -> Non
         assert session.get(Project, SYSTEM_PROJECT_ID) is not None
         assert "api_tokens" not in inspect(session.bind).get_table_names()
 
-    assert SYSTEM_ACTOR_ID not in {item["id"] for item in service.list_actors(admin)["data"]}
-    assert SYSTEM_PROJECT_ID not in {item["id"] for item in service.list_projects(admin)["data"]}
+    snapshot = service.snapshot(admin)["data"]
+    assert "actors" not in snapshot
+    assert "projects" not in snapshot
+    assert SYSTEM_ACTOR_ID not in {lease.get("actor_id") for lease in snapshot["leases"]}
+    assert SYSTEM_PROJECT_ID not in {lease.get("project_id") for lease in snapshot["leases"]}
 
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         RequestCreate.model_validate(
@@ -154,19 +157,6 @@ def test_system_identity_is_tokenless_hidden_and_reserved(service, admin) -> Non
                 "kind": "keepalive",
             }
         )
-
-    with pytest.raises(BrokerError, match="internal identity") as actor_error:
-        service.create_actor(
-            admin,
-            ActorCreate(
-                id=SYSTEM_ACTOR_ID,
-                display_name="forged",
-                role="admin",
-                project_ids=[],
-            ),
-            idempotency_key="forge-system-actor",
-        )
-    assert actor_error.value.code == "reserved_system_identity"
 
     with pytest.raises(BrokerError, match="internal project") as project_error:
         service.create_request(
@@ -254,7 +244,6 @@ def test_workload_kind_is_explicit_and_keepalive_is_outside_quota_and_fair_queue
                 id="keepalive-queued-test",
                 actor_id=SYSTEM_ACTOR_ID,
                 project_id=SYSTEM_PROJECT_ID,
-                profile_id=None,
                 auto_activate=False,
                 task_ref="keepalive",
                 purpose="internal keepalive",
@@ -276,7 +265,6 @@ def test_workload_kind_is_explicit_and_keepalive_is_outside_quota_and_fair_queue
                 id="keepalive-leased-test",
                 actor_id=SYSTEM_ACTOR_ID,
                 project_id=SYSTEM_PROJECT_ID,
-                profile_id=None,
                 auto_activate=False,
                 task_ref="keepalive-active",
                 purpose="internal keepalive",

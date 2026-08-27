@@ -22,7 +22,7 @@
   <img src="https://img.shields.io/badge/Python-3.12%2B-2563EB?logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
   <img src="https://img.shields.io/badge/Windows-native%20App-147AF3?logo=windows&logoColor=white" alt="Native Windows App">
-  <img src="https://img.shields.io/badge/MCP-3%20routine%20tools-7C3AED" alt="Three routine MCP tools">
+  <img src="https://img.shields.io/badge/MCP-5%20routine%20tools-7C3AED" alt="Five routine MCP tools">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
 
@@ -34,7 +34,7 @@
 
 > 🤖 Agent 会写代码、跑实验了，GPU 还需要一张张指定吗？
 
-对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还。对人，它是一个 macOS 或 Windows App：看多台服务器的空闲、占用、任务和异常。
+对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还，以及登记或更新主机。对人，它是一个 macOS 或 Windows App：看多台服务器的空闲、占用、任务和异常。没有浏览器界面。
 
 一个本机用户，管理多台服务器与协作 Agent；资源状态、申请和人工纠错始终围绕同一份本机控制面快照。
 
@@ -53,13 +53,15 @@
 
 ### 🧩 Agent 自主调度：有空卡，Agent 自己领
 
-默认 MCP 只有三个日常工具：
+MCP 正好五个工具：
 
 - 🔍 `gpu_status`：查看分组后的可申请容量、忙卡归属，以及自己已持有卡的遥测
 - 🔑 `gpu_apply`：申请 GPU（`server_group_id?`、`server_id?`、`gpu_count=1`、`task?`）
 - ♻️ `gpu_release`：明确归还
+- ➕ `gpu_add_server`：登记一台主机
+- ✏️ `gpu_update_server`：更新安全的主机元数据
 
-申请成功后，Agent 会拿到 SSH 连接、远端工作目录、CUDA selector 和 `lease_id`，不用再猜服务器、目录或 GPU 编号。
+申请成功后，Agent 会拿到 SSH 连接、远端工作目录、CUDA selector 和 `lease_id`，不用再猜服务器、目录或 GPU 编号。删除服务器只在 App 和 REST，不是 MCP 工具；该服务器还有进行中租约时会拒绝。
 
 ### 🛠️ 人类纠错反馈：平时不打扰，需要时再纠正
 
@@ -109,7 +111,7 @@ serverpilot-collect --schema-version 2
 
 在 App 里登记 SSH 连接和一个绝对远端工作目录。最新一次采集成功后，GPU 才进入可申请状态。详细要求见[服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)。
 
-共享调度器集群（Slurm / LSF / PBS）不要按裸机接入：用一个本机插件接管观测，只登记当前用户自己的作业，申请走 `srun --immediate` 一类的立即申请。接入方式与参考实现见[服务器插件](docs/PLUGINS_zh.md)。
+共享集群（Slurm / LSF / PBS）不要按裸机接入：用本机插件接管观测，只登记当前用户自己的作业，申请走该插件的 `apply` / `release`。随包参考插件是 `slurm-immediate`，没有另一套调度器提交面。接入方式见[服务器插件](docs/PLUGINS_zh.md)。
 
 ### 3. 🤖 接入 Agent
 
@@ -142,7 +144,8 @@ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, tas
 ```
 
 - 日常申请签名是 `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`。Agent 不传 GPU ID，`gpu_apply` 负责选卡，一份租约始终只落在一台机器上。`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，绝不从空闲容量推断。
-- 已分组的裸机先传 `server_group_id`，再由分配器在组内 best-fit 一台主机；未分组主机以及插件/调度器兼容路径仍可用 `server_id`。
+- 已分组的裸机先传 `server_group_id`，再由分配器在组内 best-fit 一台主机；未分组主机以及插件接入的集群仍可用 `server_id`。
+- 登记和更新主机用 `gpu_add_server`、`gpu_update_server`。MCP 不提供删除；在 App 或 REST 移除服务器，有进行中租约时会拒绝。
 - 申请前先看分组的工作目录、环境说明和数据/权重说明。成员继承组工作目录，或按服务器覆盖。环境说明只供阅读，不会被执行或注入。
 - `gpu_status` 按 组 → 服务器 → SKU 讲可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，也不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配。
 - SSH 后先进入返回的 `workspace.path`，再使用 CUDA selector。`workspace.path` 是远端工作目录，不是代码仓库。
@@ -172,7 +175,7 @@ zsh desktop/build-macos-app.sh
 open "./ServerPilot.app"
 ```
 
-App 负责看状态、看归属、看异常。人工改派只更新租约和 CUDA selector，不迁移正在运行的进程；受影响的 Agent 要按新 selector 重启工作负载。
+App 负责看状态、看归属、看异常。没有浏览器界面。人工改派只更新租约和 CUDA selector，不迁移正在运行的进程；受影响的 Agent 要按新 selector 重启工作负载。
 
 ## 🛡️ 边界与安全
 

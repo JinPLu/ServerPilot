@@ -1,19 +1,24 @@
 # Adapter 能力与边界
 
-adapter 只实现已注册的观测或调度协议；资源身份、准入、租约和审计始终属于
+adapter 只实现已注册的观测或占卡协议；资源身份、准入、租约和审计始终属于
 ServerPilot。它不是第二个控制面，也不是远程命令入口。
+
+密封的是调用契约（动词固定、参数形状固定、输出严格校验），不再是实现来源。
+配置只能选择当前可发现的 observation profile：三个内置值
+`linux-nvidia`、`linux-host`、`server-script-v1`，或本机已发现的插件 ID。
+不能携带 shell、argv、SSH 参数、机密信息或 Agent 自定义 target。
+
+本机插件以当前用户权限运行，放进插件目录的脚本由用户自己负责。
+Slurm 一类集群通过同一套 observation profile / 插件机制接入，和普通主机一样登记为
+endpoint，而不是单独的调度器对象。采集协议见
+[COLLECTOR_SCRIPT_zh.md](COLLECTOR_SCRIPT_zh.md)，插件契约见 [PLUGINS_zh.md](PLUGINS_zh.md)。
 
 | Adapter | 能力 | 允许的工作 | 不允许 |
 | --- | --- | --- | --- |
 | `raw-ssh` | observation | 固定的主机 / GPU 遥测和已观测 PID 的进程详情 | 任意 shell、读取私钥、写入租约 / 申请 |
 | `server-script-v1` | endpoint_keepalive | 先预检 `serverpilot-keepalive --protocol-info`，再执行固定的 `serverpilot-keepalive --schema-version 3` 做空闲 GPU 占卡；身份恢复只读执行固定的 `--inspect --schema-version 3` | 项目任务启停、调用方指定 PID/GPU、路径或环境 |
-| `slurm-command` | scheduler | 固定的 Slurm 查询、提交、取消和上传 | 裸机分配、绕过 approval |
 
-未知 adapter、未知 capability、过期或冲突的观测、不确定的远端结果，一律 fail closed。配置只能选择
-当前可发现的 profile（三个内置值或已发现的插件 id），不能携带 shell、argv、SSH 参数、机密信息
-或 Agent 自定义 target。密封的是调用契约（动词固定、参数形状固定、输出严格校验），不再是实现来源。
-本机插件以当前用户权限运行，放进插件目录的脚本由用户自己负责。采集协议见
-[COLLECTOR_SCRIPT_zh.md](COLLECTOR_SCRIPT_zh.md)，插件契约见 [PLUGINS_zh.md](PLUGINS_zh.md)。
+未知 adapter、未知 capability、过期或冲突的观测、不确定的远端结果，一律 fail closed。
 
 ## 空闲占卡
 
@@ -43,12 +48,6 @@ GPU 干扰和停止响应，仍须在获授权的目标主机上验证。
 即时受管的申请，只有在普通分配失败、且服务已规划出完整并验证过的逐卡回收方案时，才会停止这些
 worker、重新采集确认为空，然后重试原申请。它不影响同机其他卡、未托管进程和直接 SSH 任务；
 要在这台机器上直接 SSH 干活前，管理员应显式关闭该 endpoint 的占卡策略。
-
-## 外部调度器
-
-外部集群是 `SchedulerTarget`，不是 endpoint。transport / inspection profile 是封闭 ID，由部署管理员
-映射到固定包装器，API 不保存路径或参数。Agent 使用 scheduler 工具；VPN / 访问通道或服务不可用
-时报错并停止，不回退到 SSH。
 
 ## 控制面不可用时的人工恢复
 

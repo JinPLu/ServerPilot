@@ -105,7 +105,7 @@
         <label id="claim-endpoint-wrap" hidden>未分组服务器（按单机申请）<select name="endpoint" id="claim-endpoint"><option value="">自动选择未分组服务器</option></select></label>
         <label>最小可用显存 GiB（可选）<input name="minimumFreeVRAM" type="number" min="0" step="1" placeholder="例如：60"></label>
       </div>
-      <p class="dialog-help" id="claim-help">分组申请由后端在组内 best-fit，不指定单机。未分组服务器与外部调度器仍按单机申请。容量不足时返回 no_capacity，不会进入排队。</p>
+      <p class="dialog-help" id="claim-help">分组申请由后端在组内 best-fit，不指定单机。未分组服务器仍按单机申请。容量不足时返回 no_capacity，不会进入排队。</p>
       <div class="dialog-actions"><button class="button secondary" type="button" value="cancel">取消</button><button class="button primary" id="submit-claim" value="default">申请 GPU</button></div>
     </form>
   </dialog>

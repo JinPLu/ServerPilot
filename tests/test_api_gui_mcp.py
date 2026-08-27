@@ -1,16 +1,11 @@
 from __future__ import annotations
 
 import asyncio
-import csv
-import io
 import json
-import re
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
-from pathlib import Path
 
 import pytest
-import yaml
 from fastapi.testclient import TestClient
 from typer.testing import CliRunner
 
@@ -19,16 +14,10 @@ from serverpilot import cli as cli_module
 from serverpilot.api import RateLimiter, RequestBodyLimitMiddleware
 from serverpilot.cli import app as cli_app
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
-from serverpilot.mcp_server import ROUTINE_MCP_TOOL_NAMES, mcp, routine_mcp
-from serverpilot.schemas import EndpointUpsert, RequestCreate, ResourceClaim, ResourceQuantities
+from serverpilot.mcp_server import ROUTINE_MCP_TOOL_NAMES, mcp
+from serverpilot.schemas import RequestCreate
 from serverpilot.service import BrokerError
 from tests.helpers import observation, process_for_gpu, tools
-
-
-def _csrf(html: str) -> str:
-    match = re.search(r'name="csrf" value="([^"]+)"', html)
-    assert match is not None
-    return match.group(1)
 
 
 def test_rate_limiter_serializes_concurrent_checks() -> None:
@@ -97,88 +86,11 @@ def test_request_body_limit_forwards_disconnect_after_replaying_body() -> None:
     ]
 
 
-def test_event_csv_export_projects_only_declared_columns(build_app) -> None:
-    app = build_app("event-export")
-    service = app.state.service
-    service.ingest_observation(observation(count=1))
-    actor = service.local_actor("export-agent")
-    service.create_request(
-        actor,
-        RequestCreate.model_validate(
-            {
-                "project_id": "project-a",
-                "task_ref": "exported-task",
-                "purpose": "create an event with before and after payloads",
-                "constraints": {"gpu_count": 1},
-            }
-        ),
-        idempotency_key="event-export",
-    )
-
-    response = TestClient(app).get(
-        "/api/v1/events/export.csv",
-        headers={"X-ServerPilot-Actor": actor.id},
-    )
-
-    assert response.status_code == 200
-    rows = list(csv.DictReader(io.StringIO(response.text)))
-    assert rows
-    assert set(rows[0]) == {
-        "id",
-        "created_at",
-        "actor_id",
-        "action",
-        "resource_type",
-        "resource_id",
-        "result",
-        "summary",
-    }
-
-
-def test_web_dashboard_uses_the_canonical_public_capacity_projection() -> None:
-    source = (Path(__file__).resolve().parents[1] / "src/serverpilot/web/static/app.js").read_text(
-        encoding="utf-8"
-    )
-
-    assert "gpu.publicly_available === true" in source
-    assert "const publicStatus = gpu.public_status" in source
-    assert "gpu.publicly_available !== true && claimedStates.has(gpu.state)" in source
-    assert '纯 CPU 服务器（不参与 GPU 分配）' in source
-    claimed_definition = next(line for line in source.splitlines() if "const claimedStates" in line)
-    assert "KEEPALIVE" not in claimed_definition
-
-
 def test_api_gui_and_idempotency(build_app) -> None:
     app = build_app("api")
     service = app.state.service
     service.ingest_observation(observation(count=1))
     client = TestClient(app)
-    home = client.get("/")
-    assert home.status_code == 200
-    assert "我的计算资源" in home.text
-    assert "添加服务器" in home.text
-    assert 'id="server-groups"' in home.text
-    assert 'id="gpu-detail"' in home.text
-    assert 'id="detail-recent-average"' in home.text
-    assert 'id="resource-search"' in home.text
-    assert 'class="resource-list-head"' in home.text
-    assert 'id="toggle-coordination"' in home.text
-    assert 'id="coordination-reopen"' in home.text
-    assert 'id="refresh-dashboard"' in home.text
-    assert 'aria-label="刷新"' in home.text
-    assert 'id="refresh-interval"' in home.text
-    assert "从不自动刷新" in home.text
-    assert 'data-resource-filter="attention"' in home.text
-    assert "/static/assets/server-room-background.jpg" in home.text
-
-    assert "展开全部" in home.text
-    assert "/static/vendor/phosphor/style.css?v=2.1.2" in home.text
-    assert "uPlot.iife.min.js" not in home.text
-    assert "API token" not in home.text
-    assert "/ui/action/quick-claim" in home.text
-    assert "/ui/identities" in home.text
-    assert "/ui/projects" not in home.text
-    assert 'name="purpose"' not in home.text
     headers = {"X-ServerPilot-Actor": "test-agent", "Idempotency-Key": "api-key"}
     payload = {
         "project_id": "project-a",
@@ -212,12 +124,6 @@ def test_api_gui_and_idempotency(build_app) -> None:
     assert compact.status_code == 200
     assert "processes" not in compact.json()["data"][0]
     assert compact.json()["data"][0]["owner"] == "test-agent"
-    history = client.get(
-        f"/api/v1/gpus/{compact.json()['data'][0]['id']}/history?window_seconds=3600&points=120",
-        headers={"X-ServerPilot-Actor": "test-agent"},
-    )
-    assert history.status_code == 200
-    assert history.json()["data"]["point_count"] <= 120
     endpoint_history = client.get(
         "/api/v1/endpoints/endpoint-a/history?window_seconds=3600&points=120",
         headers={"X-ServerPilot-Actor": "test-agent"},
@@ -229,12 +135,8 @@ def test_api_gui_and_idempotency(build_app) -> None:
         headers={"X-ServerPilot-Actor": "test-agent"},
     )
     assert invalid_endpoint_history.status_code == 422
-    requests = client.get("/ui/requests")
-    assert requests.status_code == 200
-    assert "申请 GPU" in requests.text
-    assert "可用 CPU 核数" in requests.text
-    assert "可用内存 GiB" in requests.text
-    assert "单卡可用显存 GiB" in requests.text
+    assert client.get("/").status_code == 404
+    assert client.get("/ui/requests").status_code == 404
 
 
 def test_operator_release_can_correct_another_agents_lease_but_generic_release_cannot(
@@ -319,13 +221,6 @@ def test_operator_reassignment_uses_a_separate_app_correction_route(
         "Idempotency-Key": "operator-reassign",
     }
 
-    forbidden = client.patch(
-        f"/api/v1/leases/{lease['id']}/gpus",
-        headers=headers,
-        json={"gpu_ids": [target_gpu]},
-    )
-    assert forbidden.status_code == 403
-    assert forbidden.json()["error"]["code"] == "lease_forbidden"
     missing_app_marker = client.patch(
         f"/api/v1/operator/leases/{lease['id']}/gpus",
         headers=headers,
@@ -341,34 +236,6 @@ def test_operator_reassignment_uses_a_separate_app_correction_route(
     assert moved.status_code == 200
     assert moved.json()["lease"]["actor_id"] == owner.id
     assert moved.json()["lease"]["gpu_ids"] == [target_gpu]
-
-
-def test_generic_resource_claim_release_still_works_after_operator_route_change(
-    build_app
-) -> None:
-    app = build_app("resource-release")
-    service = app.state.service
-    service.ingest_observation(observation(count=1))
-    actor = service.local_actor("resource-owner")
-    created = service.create_resource_claim(
-        actor,
-        ResourceClaim(
-            project_id="project-a",
-            task_ref="cpu-memory-release",
-            purpose="regression",
-            quantities=ResourceQuantities(cpu_cores=1, memory_mib=1024),
-        ),
-        idempotency_key="resource-release-create",
-    )
-
-    released = service.release_resource_claim(
-        actor,
-        created["claim"]["id"],
-        reason="completed",
-        idempotency_key="resource-release-complete",
-    )
-
-    assert released["claim"]["state"] == "released"
 
 
 def test_snapshot_api_uses_latest_complete_gpu_set(build_app) -> None:
@@ -414,15 +281,12 @@ def test_control_plane_state_api_exposes_current_and_history_contract(
         "leases",
         "requests",
         "reservations",
-        "resource_providers",
-        "scheduler_targets",
-        "scheduler_jobs",
-        "workload_profiles",
+        "host_capacity",
     }.issubset(current)
-    assert {
-        "resource_plan_evaluations",
-        "resource_run_actuals",
-    }.issubset(history)
+    assert history == {}
+    assert "resource_providers" not in current
+    assert "workload_profiles" not in current
+    assert "scheduler_targets" not in current
     assert current["gpus"][0]["state"] == "AVAILABLE"
 
 
@@ -456,58 +320,6 @@ def test_lease_api_suppresses_executable_resources_when_claimed_gpu_absent(
     assert set(lease["gpu_ids"]) == {"endpoint-a:GPU-old", "endpoint-a:GPU-new"}
     assert lease["absent_gpu_ids"] == ["endpoint-a:GPU-old"]
     assert lease["resources"] == []
-
-
-def test_workload_profile_rest_and_gui_claim(build_app) -> None:
-    app = build_app("profiles")
-    service = app.state.service
-    service.ingest_observation(observation(count=1))
-    client = TestClient(app)
-    headers = {"X-ServerPilot-Actor": "profile-agent", "Idempotency-Key": "profile-upsert"}
-    profile = {
-        "id": "api-eval-1gpu",
-        "project_id": "project-a",
-        "display_name": "API evaluation",
-        "purpose": "approved API evaluation",
-        "duration_seconds": 3600,
-        "constraints": {
-            "gpu_count": 1,
-            "placement": "pack",
-            "endpoint_ids": ["endpoint-a"],
-        },
-        "enabled": True,
-    }
-    created = client.post("/api/v1/workload-profiles", json=profile, headers=headers)
-    assert created.status_code == 200
-    assert created.json()["workload_profile"]["id"] == "api-eval-1gpu"
-
-    listed = client.get(
-        "/api/v1/workload-profiles?project_id=project-a",
-        headers={"X-ServerPilot-Actor": "profile-agent"},
-    )
-    assert listed.status_code == 200
-    assert [item["id"] for item in listed.json()["data"]] == ["api-eval-1gpu"]
-
-    page = client.get("/ui/requests")
-    assert page.status_code == 200
-    assert "/ui/action/profile-claim" in page.text
-    assert 'value="api-eval-1gpu"' in page.text
-    claimed = client.post(
-        "/ui/action/profile-claim",
-        data={
-            "profile_id": "api-eval-1gpu",
-            "task_ref": "profile-gui-task",
-            "csrf": _csrf(page.text),
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert claimed.status_code == 200
-    assert "GPU 已申领，待使用" in claimed.text
-    request = service.list_requests(service.local_actor("human"))["data"][0]
-    assert request["profile_id"] == "api-eval-1gpu"
-    assert request["purpose"] == "approved API evaluation"
-    assert request["state"] == "LEASED"
 
 
 def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
@@ -583,143 +395,6 @@ def test_api_claim_bootstraps_an_empty_project_registry(build_app) -> None:
     assert claimed.json()["lease"]["project_id"] == "x"
 
 
-def test_general_resource_rest_contracts_delegate_and_fail_closed(
-    build_app
-) -> None:
-    app = build_app("general-resources")
-    service = app.state.service
-    calls = []
-
-    service.list_resource_providers = lambda actor, provider_type=None, enabled=None: {  # type: ignore[attr-defined]
-        "schema_version": "v1",
-        "data": [{"actor": actor.id, "provider_type": provider_type, "enabled": enabled}],
-    }
-    service.resource_monitor = lambda actor, project_id=None: {  # type: ignore[attr-defined]
-        "schema_version": "v1",
-        "data": {"actor": actor.id, "project_id": project_id},
-    }
-
-    def evaluate_resource_plan(actor, evaluation, *, idempotency_key):  # type: ignore[no-untyped-def]
-        calls.append(("evaluate", actor.id, evaluation.project_id, idempotency_key))
-        return {"schema_version": "v1", "evaluation": {"project_id": evaluation.project_id}}
-
-    def claim_resource(actor, claim, *, idempotency_key):  # type: ignore[no-untyped-def]
-        calls.append(("claim", actor.id, claim.quantities.cpu_cores, idempotency_key))
-        return {"schema_version": "v1", "claim": {"project_id": claim.project_id}}
-
-    def release_resource_claim(actor, claim_id, *, reason, idempotency_key):  # type: ignore[no-untyped-def]
-        calls.append(("release", actor.id, claim_id, reason, idempotency_key))
-        return {"schema_version": "v1", "claim": {"id": claim_id, "state": "RELEASED"}}
-
-    def record_resource_run_actual(
-        actor, actual, *, claim_id=None, evaluation_id=None, idempotency_key
-    ):  # type: ignore[no-untyped-def]
-        calls.append(("actual", actor.id, actual.outcome, claim_id, evaluation_id, idempotency_key))
-        return {"schema_version": "v1", "actual": {"outcome": actual.outcome}}
-
-    service.evaluate_resource_plan = evaluate_resource_plan  # type: ignore[attr-defined]
-    service.claim_resource = claim_resource  # type: ignore[attr-defined]
-    service.release_resource_claim = release_resource_claim  # type: ignore[attr-defined]
-    service.record_resource_run_actual = record_resource_run_actual  # type: ignore[attr-defined]
-
-    client = TestClient(app)
-    headers = {"X-ServerPilot-Actor": "resource-agent", "Idempotency-Key": "resource-key"}
-    providers = client.get(
-        "/api/v1/resource-providers?provider_type=host-capacity&enabled=true",
-        headers={"X-ServerPilot-Actor": "resource-agent"},
-    )
-    assert providers.status_code == 200
-    assert providers.json()["data"][0] == {
-        "actor": "resource-agent",
-        "provider_type": "host-capacity",
-        "enabled": True,
-    }
-    monitor = client.get(
-        "/api/v1/resource-monitor?project_id=project-a",
-        headers={"X-ServerPilot-Actor": "resource-agent"},
-    )
-    assert monitor.status_code == 200
-    assert monitor.json()["data"]["project_id"] == "project-a"
-    missing = client.get(
-        "/api/v1/resource-claims",
-        headers={"X-ServerPilot-Actor": "resource-agent"},
-    )
-    assert missing.status_code == 200
-    assert missing.json()["data"] == []
-
-    evaluation = {
-        "project_id": "project-a",
-        "task_ref": "train-1",
-        "baseline_runtime_seconds": 1200,
-        "marginal_min_saved_seconds": 120,
-        "marginal_min_saved_ratio": 0.10,
-        "selected_candidate_key": "cpu-8",
-        "candidates": [
-            {
-                "candidate_key": "cpu-8",
-                "provider_type": "host-capacity",
-                "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-                "predicted_runtime_seconds": 600,
-                "predicted_saved_seconds": 600,
-                "predicted_saved_ratio": 0.5,
-                "satisfies_marginal_threshold": True,
-                "selected": True,
-            }
-        ],
-    }
-    assert (
-        client.post(
-            "/api/v1/resource-plan-evaluations", json=evaluation, headers=headers
-        ).status_code
-        == 200
-    )
-    claim = {
-        "project_id": "project-a",
-        "task_ref": "train-1",
-        "purpose": "cpu-only training",
-        "provider_type": "host-capacity",
-        "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-        "forecast": {
-            "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-            "predicted_runtime_seconds": 600,
-            "predicted_saved_seconds": 600,
-            "predicted_saved_ratio": 0.5,
-        },
-    }
-    assert client.post("/api/v1/resource-claims", json=claim, headers=headers).status_code == 200
-    assert (
-        client.post(
-            "/api/v1/resource-claims/claim-1/release",
-            json={"reason": "done"},
-            headers=headers,
-        ).status_code
-        == 200
-    )
-    actual = {
-        "project_id": "project-a",
-        "task_ref": "train-1",
-        "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-        "started_at": datetime(2026, 8, 4, 1, 0, tzinfo=UTC).isoformat(),
-        "completed_at": datetime(2026, 8, 4, 1, 10, tzinfo=UTC).isoformat(),
-        "actual_duration_seconds": 600,
-        "outcome": "succeeded",
-    }
-    assert (
-        client.post(
-            "/api/v1/resource-run-actuals?claim_id=claim-1&evaluation_id=eval-1",
-            json=actual,
-            headers=headers,
-        ).status_code
-        == 200
-    )
-    assert calls == [
-        ("evaluate", "resource-agent", "project-a", "resource-key"),
-        ("claim", "resource-agent", 8.0, "resource-key"),
-        ("release", "resource-agent", "claim-1", "done", "resource-key"),
-        ("actual", "resource-agent", "succeeded", "claim-1", "eval-1", "resource-key"),
-    ]
-
-
 def test_coordination_api_and_observed_binding(build_app) -> None:
     app = build_app("coordination")
     service = app.state.service
@@ -754,21 +429,16 @@ def test_coordination_api_and_observed_binding(build_app) -> None:
     )
     assert bound.status_code == 200
     assert bound.json()["lease"]["workloads"][0]["run_id"] == f"explicit:lease:{lease_id}"
-    coordination = client.get(
-        "/api/v1/coordination",
+    current = client.get(
+        "/api/v1/state",
         headers={"X-ServerPilot-Actor": "coordination-agent"},
-    )
-    assert coordination.status_code == 200
-    capacity = coordination.json()["data"]["servers"][0]["capacity"]
-    assert capacity["available_cpu_cores"] == 60.0
-    assert capacity["available_memory_mib"] == 196_608
-    assert capacity["total_vram_mib"] == 100_000
-    board = client.get(
-        "/api/v1/coordination", headers={"X-ServerPilot-Actor": "coordination-agent"}
-    )
-    assert board.status_code == 200
-    assert board.json()["data"]["servers"][0]["capacity"]["managed_running_gpus"] == 1
-    assert board.json()["data"]["leases"][0]["activity"] == "running"
+    ).json()["data"]["current"]
+    host = current["host_capacity"][0]["capacity"]
+    assert host["observed_available_cpu_cores"] == 60.0
+    assert host["observed_available_memory_mib"] == 196_608
+    assert current["gpus"][0]["total_vram_mib"] == 100_000
+    assert current["gpus"][0]["state"] == "RUNNING_MANAGED"
+    assert current["leases"][0]["state"] == "ACTIVE"
 
 
 def test_endpoint_project_grant_route_is_not_exposed(build_app) -> None:
@@ -919,7 +589,7 @@ def test_removed_maintenance_and_delete_routes(build_app) -> None:
         },
         headers=headers,
     )
-    assert created.status_code == 405
+    assert created.status_code == 404
 
 
 def test_project_creation_route_and_gui_are_not_exposed(build_app) -> None:
@@ -931,192 +601,40 @@ def test_project_creation_route_and_gui_are_not_exposed(build_app) -> None:
         json={"id": "storyboard", "display_name": "Storyboard"},
         headers={"X-ServerPilot-Actor": "project-admin", "Idempotency-Key": "unused"},
     )
-    assert response.status_code == 405
+    assert response.status_code == 404
     assert client.get("/ui/projects").status_code == 404
-    identities = client.get("/ui/identities")
-    assert identities.status_code == 200
-    assert "/ui/action/project" not in identities.text
+    assert client.get("/ui/identities").status_code == 404
 
 
-def test_click_first_gui_forms_and_all_human_pages(build_app) -> None:
-    app = build_app("clicks")
-    service = app.state.service
-    service.ingest_observation(observation(count=1))
-    client = TestClient(app)
-
-    request_page = client.get("/ui/requests")
-    assert request_page.status_code == 200
-    assert 'name="task_ref"' in request_page.text
-    assert 'name="purpose"' not in request_page.text
-    assert "/ui/action/quick-claim" in request_page.text
-    assert "JSON payload" not in request_page.text
-    submitted = client.post(
-        "/ui/action/quick-claim",
-        data={
-            "project_id": "project-a",
-            "task_ref": "click-first-request",
-            "gpu_count": "1",
-            "placement": "pack",
-            "endpoint_id": "",
-            "csrf": _csrf(request_page.text),
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert submitted.status_code == 200
-    assert "GPU 已申领，待使用" in submitted.text
-
-    lease = service.list_leases(service.local_actor("human"))["data"][0]
-    assert lease["state"] == "HELD"
-    request = service.list_requests(service.local_actor("human"))["data"][0]
-    assert request["state"] == "LEASED"
-    assert request["purpose"] == "click-first-request"
-
-    home_page = client.get("/")
-    added_server = client.post(
-        "/ui/action/endpoint",
-        data={
-            "id": "click-server",
-            "host": "127.0.0.2",
-            "port": "2203",
-            "ssh_user": "gpu",
-            "workspace_path": "/srv/click-server",
-            "owner_project_id": "project-a",
-            "expected_gpu_count": "2",
-            "enabled": "true",
-            "csrf": _csrf(home_page.text),
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert added_server.status_code == 200
-    assert "click-server" in added_server.text
-
-    actor_page = client.get("/")
-    rejected_switch = client.post(
-        "/ui/actor",
-        data={"actor_id": "click-agent", "csrf": "wrong"},
-        follow_redirects=False,
-    )
-    assert rejected_switch.status_code == 403
-    switched = client.post(
-        "/ui/actor",
-        data={"actor_id": "click-agent", "csrf": _csrf(actor_page.text)},
-        follow_redirects=True,
-    )
-    assert switched.status_code == 200
-    assert 'value="click-agent"' in switched.text
-
-    for page in [
-        "/",
-        "/ui/gpus",
-        "/ui/requests",
-        "/ui/leases",
-        "/ui/reservations",
-        "/ui/identities",
-        "/ui/maintenance",
-        "/ui/alerts",
-        "/ui/audit",
-        "/ui/doctor",
-    ]:
-        response = client.get(page)
-        assert response.status_code == 200, page
-        assert "/ui/action/reservation" not in response.text
-        assert "/ui/action/cancel-reservation" not in response.text
-        assert "/ui/action/maintenance" not in response.text
-        assert "/ui/action/cancel-request" not in response.text
-        assert "/ui/action/endpoint-enabled" not in response.text
-    reservations = client.get("/ui/reservations")
-    assert "现有预约" in reservations.text
-    assert "此页只读查看已有安排" in reservations.text
-    maintenance = client.get("/ui/maintenance")
-    assert "维护窗口" in maintenance.text
-    assert "此页只读查看已有维护窗口" in maintenance.text
-    gpu_id = service.list_gpus(service.local_actor("click-agent"))["data"][0]["id"]
-    assert client.get(f"/ui/gpus/{gpu_id}").status_code == 200
-
-
-def test_web_delete_endpoint_action_does_not_remove_server(build_app) -> None:
-    app = build_app("web-delete")
-    client = TestClient(app)
-    home = client.get("/")
-    created = client.post(
-        "/ui/action/endpoint",
-        data={
-            "id": "web-delete-server",
-            "host": "127.0.0.3",
-            "port": "2204",
-            "ssh_user": "gpu",
-            "workspace_path": "/srv/web-delete-server",
-            "owner_project_id": "project-a",
-            "expected_gpu_count": "1",
-            "enabled": "true",
-            "csrf": _csrf(home.text),
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert created.status_code == 200
-    removed = client.post(
-        "/ui/action/delete-endpoint",
-        data={
-            "endpoint_id": "web-delete-server",
-            "csrf": _csrf(created.text),
-            "confirmed": "yes",
-        },
-        follow_redirects=True,
-    )
-    assert removed.status_code == 200
-    endpoints = {
-        endpoint["id"]
-        for endpoint in app.state.service.list_endpoints(
-            app.state.service.local_actor("human")
-        )["data"]
-    }
-    assert "web-delete-server" in endpoints
 
 
 def test_mcp_exposes_required_tools() -> None:
     tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
     names = set(by_name)
-    assert {
-        "control_plane_state",
+    assert names == {
         "gpu_status",
+        "gpu_apply",
+        "gpu_release",
+        "gpu_add_server",
+        "gpu_update_server",
+    }
+    assert "gpu_grant_server_project" not in names
+    assert "gpu_scheduler_upload" not in names
+    assert "gpu_scheduler_transfer_status" not in names
+    for retired_routine_tool in (
+        "control_plane_state",
         "gpu_coordination",
         "gpu_list",
         "gpu_who",
-        "gpu_apply",
-        "gpu_scheduler_targets",
-        "gpu_scheduler_access_status",
-        "gpu_scheduler_profiles",
-        "gpu_scheduler_submit_profile",
-        "gpu_scheduler_submit_once",
-        "gpu_scheduler_job_status",
-        "gpu_scheduler_cancel",
         "gpu_activate_lease",
         "gpu_renew_lease",
         "gpu_release_lease",
         "gpu_bind_workload",
         "gpu_bind_observed_workload",
         "gpu_history",
-        "gpu_release",
-        "gpu_add_server",
         "gpu_list_observation_profiles",
-        "gpu_update_server",
         "gpu_set_keepalive",
-        "resource_providers",
-        "resource_monitor",
-        "resource_claims",
-        "resource_evaluate_plan",
-        "resource_claim",
-        "resource_release",
-        "resource_record_actual",
-    }.issubset(names)
-    assert "gpu_grant_server_project" not in names
-    assert "gpu_scheduler_upload" not in names
-    assert "gpu_scheduler_transfer_status" not in names
-    for retired_routine_tool in (
         "gpu_list_profiles",
         "gpu_claim",
         "gpu_claim_profile",
@@ -1130,9 +648,6 @@ def test_mcp_exposes_required_tools() -> None:
     assert "idempotency_key" not in apply_schema["properties"]
     assert "profile_id" not in apply_schema["properties"]
     assert "gpu_ids" not in apply_schema["properties"]
-    bind_schema = by_name["gpu_bind_observed_workload"].inputSchema
-    assert set(bind_schema["required"]) == {"lease_id"}
-    assert {"lease_id", "run_id", "idempotency_key", "agent_name"} == set(bind_schema["properties"])
     assert by_name["gpu_release"].inputSchema["required"] == ["lease_id"]
     assert set(by_name["gpu_release"].inputSchema["properties"]) == {"lease_id"}
     status_schema = by_name["gpu_status"].inputSchema
@@ -1144,6 +659,14 @@ def test_mcp_exposes_required_tools() -> None:
         "CPU-only servers, and scheduler clusters you can request on demand; "
         "pass lease_id for per-card telemetry on cards you hold."
     )
+    add_schema = by_name["gpu_add_server"].inputSchema
+    assert add_schema["properties"]["observation_profile"]["default"] == "server-script-v1"
+    add_profile = add_schema["properties"]["observation_profile"]["description"]
+    assert "linux-nvidia" in add_profile
+    assert "linux-host" in add_profile
+    assert "server-script-v1" in add_profile
+    assert "plugin" in add_profile.lower()
+    assert "linux-nvidia" in by_name["gpu_add_server"].description
     for name in (
         "gpu_add_server",
         "gpu_update_server",
@@ -1152,18 +675,24 @@ def test_mcp_exposes_required_tools() -> None:
 
 
 def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
-    tools = asyncio.run(routine_mcp.list_tools())
+    tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
     names = set(by_name)
 
     assert names == set(ROUTINE_MCP_TOOL_NAMES)
     assert "control_plane_state" not in names
     assert "resource_claim" not in names
-    assert "gpu_add_server" not in names
     assert "gpu_claim" not in names
     assert "gpu_list" not in names
+    assert "gpu_list_observation_profiles" not in names
     assert not any(name.startswith("gpu_scheduler_") for name in names)
-    assert names == {"gpu_status", "gpu_apply", "gpu_release"}
+    assert names == {
+        "gpu_status",
+        "gpu_apply",
+        "gpu_release",
+        "gpu_add_server",
+        "gpu_update_server",
+    }
     assert by_name["gpu_status"].description == (
         "List grouped allocatable GPU capacity, busy_gpus and who holds them, "
         "CPU-only servers, and scheduler clusters you can request on demand; "
@@ -1240,15 +769,6 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
     calls = []
 
     class FakeClient:
-        def coordination(self):  # type: ignore[no-untyped-def]
-            calls.append(("GET", "/api/v1/coordination"))
-            return {
-                "schema_version": "v1",
-                "snapshot_revision": 1,
-                "server_time": "2026-08-06T00:00:00Z",
-                "data": {},
-            }
-
         def post(self, path, body=None, *, idempotency_key=None):  # type: ignore[no-untyped-def]
             calls.append(("POST", path, body))
             return {
@@ -1269,16 +789,6 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
             }
 
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
-
-    assert tools.gpu_coordination() == {
-        "schema_version": "v1",
-        "snapshot_revision": 1,
-        "server_time": "2026-08-06T00:00:00Z",
-        "data": {},
-    }
-    assert calls == [("GET", "/api/v1/coordination")]
-
-    calls.clear()
     monkeypatch.setattr(
         mcp_server,
         "_routine_client",
@@ -1985,296 +1495,7 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
     }
 
 
-def test_mcp_general_resource_tools_delegate_and_enforce_marginal_policy(monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    calls = []
 
-    class FakeClient:
-        def resource_providers(self, *, provider_type=None, enabled=None):  # type: ignore[no-untyped-def]
-            calls.append(("providers", provider_type, enabled))
-            return {"schema_version": "v1", "data": []}
-
-        def resource_monitor(self, *, project_id=None):  # type: ignore[no-untyped-def]
-            calls.append(("monitor", project_id))
-            return {"schema_version": "v1", "data": {}}
-
-        def resource_claims(self, *, project_id=None, state=None):  # type: ignore[no-untyped-def]
-            calls.append(("claims", project_id, state))
-            return {"schema_version": "v1", "data": []}
-
-        def evaluate_resource_plan(self, evaluation, *, idempotency_key):  # type: ignore[no-untyped-def]
-            calls.append(("evaluate", evaluation["selected_candidate_key"], idempotency_key))
-            return {"schema_version": "v1", "evaluation": {}}
-
-        def claim_resource(self, claim, *, idempotency_key):  # type: ignore[no-untyped-def]
-            calls.append(("claim", claim["quantities"]["cpu_cores"], idempotency_key))
-            return {"schema_version": "v1", "claim": {}}
-
-        def release_resource_claim(self, claim_id, *, reason, idempotency_key):  # type: ignore[no-untyped-def]
-            calls.append(("release", claim_id, reason, idempotency_key))
-            return {"schema_version": "v1", "claim": {}}
-
-        def record_resource_run_actual(
-            self, actual, *, claim_id=None, evaluation_id=None, idempotency_key
-        ):  # type: ignore[no-untyped-def]
-            calls.append(("actual", actual["outcome"], claim_id, evaluation_id, idempotency_key))
-            return {"schema_version": "v1", "actual": {}}
-
-    monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
-
-    evaluation = {
-        "project_id": "project-a",
-        "task_ref": "task",
-        "baseline_runtime_seconds": 1200,
-        "marginal_min_saved_seconds": 120,
-        "marginal_min_saved_ratio": 0.10,
-        "selected_candidate_key": "cpu-8",
-        "candidates": [
-            {
-                "candidate_key": "cpu-8",
-                "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-                "predicted_runtime_seconds": 600,
-                "predicted_saved_seconds": 600,
-                "predicted_saved_ratio": 0.5,
-                "satisfies_marginal_threshold": True,
-                "selected": True,
-            }
-        ],
-    }
-    assert tools.resource_providers(provider_type="host-capacity")["data"] == []
-    assert tools.resource_monitor(project_id="project-a")["data"] == {}
-    assert tools.resource_claims(state="ACTIVE")["data"] == []
-    assert (
-        tools.resource_evaluate_plan("agent", evaluation, idempotency_key="eval-key")[
-            "evaluation"
-        ]
-        == {}
-    )
-
-    invalid_threshold = {**evaluation, "marginal_min_saved_seconds": 60}
-    with pytest.raises(ValueError, match="marginal_min_saved_seconds must be 120"):
-        tools.resource_evaluate_plan("agent", invalid_threshold)
-
-    claim = {
-        "project_id": "project-a",
-        "task_ref": "task",
-        "purpose": "cpu-only",
-        "quantities": {"cpu_cores": 8},
-        "forecast": {
-            "quantities": {"cpu_cores": 8},
-            "predicted_runtime_seconds": 600,
-        },
-    }
-    assert tools.resource_claim("agent", claim, idempotency_key="claim-key")["claim"] == {}
-    assert (
-        tools.resource_release(
-            "agent", "claim-1", reason="done", idempotency_key="release-key"
-        )["claim"]
-        == {}
-    )
-    actual = {
-        "project_id": "project-a",
-        "task_ref": "task",
-        "quantities": {"cpu_cores": 8},
-        "outcome": "succeeded",
-    }
-    assert (
-        tools.resource_record_actual(
-            "agent",
-            actual,
-            claim_id="claim-1",
-            evaluation_id="eval-1",
-            idempotency_key="actual-key",
-        )["actual"]
-        == {}
-    )
-    assert calls == [
-        ("providers", "host-capacity", None),
-        ("monitor", "project-a"),
-        ("claims", None, "ACTIVE"),
-        ("evaluate", "cpu-8", "eval-key"),
-        ("claim", 8, "claim-key"),
-        ("release", "claim-1", "done", "release-key"),
-        ("actual", "succeeded", "claim-1", "eval-1", "actual-key"),
-    ]
-
-
-def test_ssh_preview_is_non_mutating_and_commit_uses_the_submitted_command(
-    build_app
-) -> None:
-    app = build_app("ssh-preview")
-    client = TestClient(app)
-    csrf = _csrf(client.get("/").text)
-    service = app.state.service
-    actor = service.local_actor("human")
-    endpoints_before = service.list_endpoints(actor)["data"]
-    events_before = service.list_events(actor)["data"]
-
-    preview = client.post(
-        "/ui/endpoints/ssh/preview",
-        json={
-            "command": "  ssh GPU_User@New-Host  ",
-            "workspace_path": "/srv/new-host",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert preview.status_code == 200
-    data = preview.json()["data"]
-    assert data["status"] == "new"
-    assert data["normalized_command"] == "ssh GPU_User@new-host"
-    assert data["endpoint"] == {
-        "id": "server-new-host-p22",
-        "host": "new-host",
-        "port": 22,
-        "ssh_user": "GPU_User",
-        "ssh_alias": None,
-        "workspace_path": "/srv/new-host",
-        "labels": ["gpu", "direct-ssh"],
-        "storage_group": None,
-        "expected_gpu_count": None,
-        "expected_gpu_total_vram_mib": None,
-        "project_ids": ["project-a"],
-        "enabled": True,
-    }
-    assert service.list_endpoints(actor)["data"] == endpoints_before
-    assert service.list_events(actor)["data"] == events_before
-
-    committed = client.post(
-        "/ui/endpoints/ssh/commit",
-        json={
-            "command": "  ssh GPU_User@New-Host  ",
-            "workspace_path": "/srv/new-host",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert committed.status_code == 200
-    assert committed.json()["data"]["endpoint"]["id"] == "server-new-host-p22"
-
-
-def test_ssh_preview_reports_existing_address_and_id_collision(build_app) -> None:
-    app = build_app("ssh-collisions")
-    client = TestClient(app)
-    csrf = _csrf(client.get("/").text)
-    service = app.state.service
-    actor = service.local_actor("human")
-
-    existing = client.post(
-        "/ui/endpoints/ssh/preview",
-        json={
-            "command": "ssh -p 2201 gpu@127.0.0.1",
-            "workspace_path": "/srv/project-a",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert existing.status_code == 200
-    assert existing.json()["data"]["status"] == "existing"
-    assert existing.json()["data"]["endpoint"]["id"] == "endpoint-a"
-    assert existing.json()["data"]["existing_endpoint"]["id"] == "endpoint-a"
-
-    service.upsert_endpoint(
-        actor,
-        EndpointUpsert(
-            id="server-collision-host-p22",
-            host="other-host",
-            port=22,
-            ssh_user="gpu",
-            workspace_path="/srv/collision",
-            project_ids=["project-a"],
-        ),
-        idempotency_key="collision-setup",
-    )
-    collision = client.post(
-        "/ui/endpoints/ssh/preview",
-        json={
-            "command": "ssh gpu@collision-host",
-            "workspace_path": "/srv/collision",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert collision.status_code == 200
-    collision_data = collision.json()["data"]
-    assert collision_data["status"] == "id_collision"
-    assert collision_data["id_collision"]["host"] == "other-host"
-
-    rejected = client.post(
-        "/ui/endpoints/ssh/commit",
-        json={
-            "command": "ssh gpu@collision-host",
-            "workspace_path": "/srv/collision",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert rejected.status_code == 409
-    assert rejected.json()["error"]["code"] == "endpoint_id_collision"
-    resolved = client.post(
-        "/ui/endpoints/ssh/commit",
-        json={
-            "command": "ssh gpu@collision-host",
-            "endpoint_id": "collision-host-explicit",
-            "workspace_path": "/srv/collision-explicit",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert resolved.status_code == 200
-    assert resolved.json()["data"]["endpoint"]["id"] == "collision-host-explicit"
-
-
-def test_ssh_batch_registers_valid_lines_and_skips_invalid_or_duplicate_lines(
-    build_app
-) -> None:
-    app = build_app("ssh-batch")
-    client = TestClient(app)
-    csrf = _csrf(client.get("/").text)
-    commands = [
-        "ssh -p 2201 gpu@batch-host",
-        "not an ssh command",
-        "ssh -p 2202 gpu@batch-host",
-        "ssh -p 2201 root@batch-host",
-    ]
-
-    preview = client.post(
-        "/ui/endpoints/ssh/batch/preview",
-        json={
-            "commands": commands,
-            "workspace_path": "/srv/batch-project",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert preview.status_code == 200
-    preview_data = preview.json()["data"]
-    assert preview_data["valid_count"] == 2
-    assert [entry["status"] for entry in preview_data["entries"]] == [
-        "new",
-        "invalid",
-        "new",
-        "duplicate",
-    ]
-
-    committed = client.post(
-        "/ui/endpoints/ssh/batch/commit",
-        json={
-            "commands": commands,
-            "workspace_path": "/srv/batch-project",
-            "project_ids": ["project-a"],
-            "csrf": csrf,
-        },
-    )
-    assert committed.status_code == 200
-    result = committed.json()["data"]
-    assert result["registered_count"] == 2
-    assert result["updated_count"] == 0
-    assert [entry["status"] for entry in result["entries"]] == [
-        "registered",
-        "invalid",
-        "registered",
-        "duplicate",
-    ]
 
 
 def test_app_starts_with_projects_and_no_endpoints(build_app) -> None:
@@ -2285,10 +1506,7 @@ def test_app_starts_with_projects_and_no_endpoints(build_app) -> None:
     )
     app = build_app("empty", inventory_config=inventory)
     client = TestClient(app)
-    home = client.get("/")
-    assert home.status_code == 200
-    assert "添加第一台 GPU 服务器" in home.text
-    assert "ssh -p 22 gpu@gpu-host.example.com" in home.text
+    assert client.get("/").status_code == 404
     response = client.get("/api/v1/endpoints", headers={"X-ServerPilot-Actor": "agent"})
     assert response.status_code == 200
     assert response.json()["data"] == []
@@ -2337,45 +1555,6 @@ def test_cli_state_uses_canonical_client_contract(monkeypatch: pytest.MonkeyPatc
     assert result.exit_code == 0
     assert '"snapshot_revision": 12' in result.stdout
     assert calls == [(12, 2.0, 0.5)]
-
-
-def test_cli_resource_evaluate_uses_client_contract(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls = []
-
-    class FakeClient:
-        def evaluate_resource_plan(self, evaluation, *, idempotency_key):  # type: ignore[no-untyped-def]
-            calls.append((evaluation["selected_candidate_key"], bool(idempotency_key)))
-            return {"schema_version": "v1", "evaluation": {"id": "eval-1"}}
-
-    monkeypatch.setattr(cli_module, "_client", lambda url, actor: FakeClient())
-    payload = {
-        "project_id": "project-a",
-        "task_ref": "cpu-task",
-        "baseline_runtime_seconds": 1200,
-        "selected_candidate_key": "cpu-8",
-        "candidates": [
-            {
-                "candidate_key": "cpu-8",
-                "provider_type": "host-capacity",
-                "quantities": {"cpu_cores": 8, "memory_mib": 32768},
-                "predicted_runtime_seconds": 600,
-                "predicted_saved_seconds": 600,
-                "predicted_saved_ratio": 0.5,
-                "satisfies_marginal_threshold": True,
-                "selected": True,
-            }
-        ],
-    }
-    path = tmp_path / "evaluation.yaml"
-    path.write_text(yaml.safe_dump(payload), encoding="utf-8")
-
-    result = CliRunner().invoke(cli_app, ["resource", "evaluate", "--file", str(path), "--json"])
-
-    assert result.exit_code == 0
-    assert '"eval-1"' in result.stdout
-    assert calls == [("cpu-8", True)]
 
 
 def _routine_status_fixture(gpu_count: int) -> dict[str, object]:

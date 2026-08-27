@@ -95,18 +95,8 @@
       "admission_boundary": "Fixture: allocation only.",
       "absent_gpu_ids": [],
       "maintenance": [],
-      "alerts": [],
-      "resource_providers": [],
-      "allocatable_units": [],
-      "resource_claims": [],
-      "scheduler_targets": [],
-      "scheduler_jobs": [],
-      "scheduler_transfers": [],
-      "workload_profiles": []
+      "alerts": []
     },
-    "history": {
-      "resource_plan_evaluations": [],
-      "resource_run_actuals": []
-    }
+    "history": {}
   }
 }

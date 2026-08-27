@@ -159,7 +159,6 @@ def _client(tmp_path: Path, inventory) -> TestClient:
             database_url=f"sqlite:///{tmp_path / 'mcp-entry.sqlite3'}",
             inventory_path=inventory_path,
             project_root=Path(__file__).resolve().parents[1],
-            session_secret="test-secret",
         )
     )
     return TestClient(app)

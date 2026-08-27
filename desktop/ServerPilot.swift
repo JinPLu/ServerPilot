@@ -1005,12 +1005,7 @@ private struct DashboardView: View {
         else { return store.notice }
 
         guard let runningLease = store.snapshot.leases.first(where: { lease in
-            guard notice.contains(lease.id) else { return false }
-            if lease.runtimeState == "RUNNING" { return true }
-            return store.snapshot.resourceClaims.contains { claim in
-                claim.nativeLeaseIDs.contains(lease.id)
-                    && (claim.runtimeState == "RUNNING" || claim.state == "RUNNING")
-            }
+            notice.contains(lease.id) && lease.runtimeState == "RUNNING"
         }) else { return notice }
 
         let task = runningLease.taskReference ?? runningLease.purpose ?? "未命名任务"
@@ -4669,12 +4664,6 @@ private struct ClaimSheet: View {
                         selection: $endpointID
                     )
                 }
-            }
-            if !store.snapshot.schedulerTargets.isEmpty {
-                Text("外部调度目标仍按原有路径申请，不会与服务器组混在一起。")
-                    .font(Typography.annotation)
-                    .foregroundStyle(DesignTokens.mutedInk)
-                    .fixedSize(horizontal: false, vertical: true)
             }
             if let validationMessage {
                 InlineValidation(message: validationMessage)

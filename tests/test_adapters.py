@@ -1,9 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import json
-import os
-import subprocess
 from typing import Any
 
 import pytest
@@ -16,30 +13,13 @@ from serverpilot.adapters import (
     RAW_SSH_HOST_ONLY_QUERY,
     AdapterRegistryError,
     RawSSHObservationAdapter,
-    SlurmCommandSchedulerAdapter,
 )
 from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
 from serverpilot.config import EndpointConfig
-from serverpilot.slurm import CommandSlurmProvider, SlurmProviderError
-
-# The adapter requires a transport helper to be absolute on the host it runs on.
-# Python 3.13 stopped treating a single leading slash as absolute on Windows, so
-# a POSIX literal is not a valid helper path there.
-HELPER_ROOT = "C:\\ServerPilot\\bin" if os.name == "nt" else "/usr/local/bin"
-HELPER_A = os.path.join(HELPER_ROOT, "serverpilot-test-helper-a")
-HELPER_B = os.path.join(HELPER_ROOT, "serverpilot-test-helper-b")
-
-
-@pytest.fixture(autouse=True)
-def approved_scheduler_helper(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv(
-        "SERVERPILOT_SCHEDULER_TRANSPORTS",
-        json.dumps({"test-a": HELPER_A, "test-b": HELPER_B}),
-    )
 
 
 def test_registry_is_sealed_to_known_adapters() -> None:
-    assert ADAPTER_REGISTRY.ids() == ("raw-ssh", "slurm-command", "server-script-v1")
+    assert ADAPTER_REGISTRY.ids() == ("raw-ssh", "server-script-v1")
     assert ADAPTER_REGISTRY.require_capability("raw-ssh", "observation").id == "raw-ssh"
     assert (
         ADAPTER_REGISTRY.require_capability("server-script-v1", "endpoint_keepalive").id
@@ -47,37 +27,8 @@ def test_registry_is_sealed_to_known_adapters() -> None:
     )
     with pytest.raises(AdapterRegistryError, match="unknown adapter"):
         ADAPTER_REGISTRY.get("unknown")
-    with pytest.raises(AdapterRegistryError, match="does not provide scheduler"):
-        ADAPTER_REGISTRY.require_capability("raw-ssh", "scheduler")
-
-
-def test_operation_schema_is_registered_metadata_with_task_approval() -> None:
-    definition = ADAPTER_REGISTRY.require_capability("slurm-command", "operation")
-    schemas = definition.operation_schema()
-    assert {schema["id"] for schema in schemas} == {
-        "scheduler.submit",
-        "scheduler.cancel",
-        "scheduler.upload",
-    }
-    forbidden = {"argv", "shell", "env", "agent_target", "password", "secret", "token"}
-    for schema in schemas:
-        assert schema["executes"] is False
-        assert schema["approval"] == {
-            "required": True,
-            "field": "approval_ref",
-            "current_task_only": True,
-        }
-        parameter_names = {parameter["name"] for parameter in schema["parameters"]}
-        assert "approval_ref" in parameter_names
-        assert forbidden.isdisjoint(parameter_names)
-
-
-def test_provisioning_preview_is_non_executable() -> None:
-    definition = ADAPTER_REGISTRY.require_capability(
-        "slurm-command", "provisioning-preview"
-    )
-    assert definition.provisioning_previews
-    assert all(not preview.executable for preview in definition.provisioning_previews)
+    with pytest.raises(AdapterRegistryError, match="does not provide endpoint_keepalive"):
+        ADAPTER_REGISTRY.require_capability("raw-ssh", "endpoint_keepalive")
 
 
 def test_raw_ssh_adapter_runs_fixed_ssh_invocation(
@@ -312,59 +263,3 @@ def test_raw_ssh_adapter_times_out_and_reaps_a_hung_connected_probe(
 
     assert process is not None
     assert process.killed is True
-
-
-def test_slurm_command_adapter_preserves_runner_contract() -> None:
-    calls: list[tuple[list[str], dict[str, Any]]] = []
-
-    def runner(command: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append((command, kwargs))
-        return subprocess.CompletedProcess(command, 0, stdout="\x1b[31mok\r\n", stderr="")
-
-    output = SlurmCommandSchedulerAdapter(runner=runner).run(
-        {"transport_profile": "test-a", "inspection_profile": "slurm-capacity"},
-        ["sinfo", "-h"],
-        mutating=False,
-        timeout_seconds=3,
-    )
-
-    assert output == "ok"
-    assert calls == [
-        (
-            [HELPER_A, "sinfo -h"],
-            {"check": False, "capture_output": True, "text": True, "timeout": 3},
-        )
-    ]
-
-
-def test_scheduler_transport_profiles_route_distinct_targets_to_distinct_wrappers() -> None:
-    calls: list[list[str]] = []
-
-    def runner(command: list[str], **_kwargs: Any) -> subprocess.CompletedProcess[str]:
-        calls.append(command)
-        return subprocess.CompletedProcess(command, 0, stdout="ok", stderr="")
-
-    adapter = SlurmCommandSchedulerAdapter(runner=runner)
-    for profile in ("test-a", "test-b"):
-        adapter.run(
-            {"transport_profile": profile},
-            ["sinfo", "-h"],
-            mutating=False,
-            timeout_seconds=3,
-        )
-
-    assert [call[0] for call in calls] == [
-        HELPER_A,
-        HELPER_B,
-    ]
-    assert all(call[-1] == "sinfo -h" for call in calls)
-
-
-def test_command_slurm_provider_uses_adapter_errors() -> None:
-    provider = CommandSlurmProvider(runner=lambda *_args, **_kwargs: None)
-
-    with pytest.raises(SlurmProviderError, match="not configured locally") as exc_info:
-        provider._run({"transport_profile": "unknown"}, ["sinfo"], mutating=False)
-
-    assert exc_info.value.access_required is False
-    assert exc_info.value.uncertain is False

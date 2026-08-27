@@ -157,9 +157,8 @@ def test_historical_contact_column_is_inert_and_not_projected(service, admin) ->
         idempotency_key="legacy-contact-claim",
     )
     assert allocated["lease"] is not None
-    assert "coordination_uri" not in _keys(service.list_actors(admin))
     assert "coordination_uri" not in _keys(allocated)
-    assert "coordination_uri" not in _keys(service.coordination(admin))
+    assert "coordination_uri" not in _keys(service.snapshot(admin))
 
 
 def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) -> None:  # type: ignore[no-untyped-def]

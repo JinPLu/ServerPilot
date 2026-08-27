@@ -137,6 +137,11 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "ordinal",
         "workspace_path",
         "gpu_release",
+        "gpu_add_server",
+        "gpu_update_server",
+        "linux-nvidia",
+        "linux-host",
+        "server-script-v1",
         "human-readable",
         "ui title",
         "ssh",
@@ -161,8 +166,12 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # status became grouped capacity: the caller has to be told to assess
     # group notes first, pass server_group_id for direct grouped hosts, and
     # not pin those hosts with server_id, or it treats two 4-GPU servers as
-    # one 8-GPU menu.  Contract sentences are never cut to fit this bound.
-    assert len(adapter.split()) < 340
+    # one 8-GPU menu.  It moved from 340 to 380 when the five-tool surface
+    # became the whole MCP contract: the caller has to be told server
+    # deletion and other lifecycle work happen in the app or REST, or it
+    # looks for a second MCP profile that no longer exists.
+    # Contract sentences are never cut to fit this bound.
+    assert len(adapter.split()) < 380
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -178,9 +187,11 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
 
     mcp_instructions = _plain_policy_text(mcp.instructions).lower()
     for runtime_contract in (
-        "three tools",
+        "five tools",
         "gpu_status",
         "gpu_apply",
+        "gpu_add_server",
+        "gpu_update_server",
         "cuda_visible_devices",
         "gpu_cuda_visible_devices",
         "workspace_path",
@@ -237,6 +248,8 @@ def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contrac
         "gpu_status(server_id?, lease_id?)",
         "gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)",
         "gpu_release(lease_id)",
+        "gpu_add_server(",
+        "gpu_update_server(",
     )
     forbidden = (
         "gpu_claim(",
@@ -272,14 +285,14 @@ def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contrac
 
 def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:
     global_policy = _plain_policy_text(POLICY.read_text(encoding="utf-8")).lower()
-    assert "advanced compatibility tools are outside the routine path" in global_policy
+    assert "advanced" not in global_policy
+    assert "these five tools are the whole mcp surface" in global_policy
 
     mcp_instructions = _plain_policy_text(mcp.instructions).lower()
     assert "advanced" not in mcp_instructions
-    # scheduler_servers became a routine gpu_status field when a cluster could
-    # be reached through a plugin: an agent that is not told about it reads the
-    # empty gpus[] of an unclaimed cluster as "no capacity". The advanced
-    # scheduler tools themselves stay out of the routine surface.
+    # scheduler_servers remains a routine gpu_status field when a cluster can
+    # be reached through a plugin. The retired scheduler tools must not
+    # reappear in policy or instructions.
     for advanced_tool in (
         "gpu_scheduler_targets",
         "gpu_scheduler_access_status",
@@ -291,6 +304,7 @@ def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:
         "gpu_scheduler_upload",
         "gpu_scheduler_transfer_status",
     ):
+        assert advanced_tool not in global_policy
         assert advanced_tool not in mcp_instructions
 
 

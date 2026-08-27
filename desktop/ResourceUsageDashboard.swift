@@ -32,11 +32,9 @@ private struct ResourceUsageBucket {
     var projectIDs: Set<String> = []
     var actorIDs: Set<String> = []
     var taskReferences: Set<String> = []
-    var claims: [ResourceClaimRecord] = []
     var leases: [LeaseRecord] = []
     var requests: [AllocationRequestRecord] = []
     var reservations: [ReservationRecord] = []
-    var actuals: [ResourceRunActualRecord] = []
 }
 
 private struct ResourceUsageGroup: Identifiable {
@@ -46,28 +44,9 @@ private struct ResourceUsageGroup: Identifiable {
     let projectIDs: [String]
     let actorIDs: [String]
     let taskReferences: [String]
-    let claims: [ResourceClaimRecord]
     let leases: [LeaseRecord]
     let requests: [AllocationRequestRecord]
     let reservations: [ReservationRecord]
-    let actuals: [ResourceRunActualRecord]
-
-    private let assignedClaimStates = Set(["HELD", "ACTIVE"])
-    private let pendingClaimStates = Set(["BLOCKED", "QUEUED", "PENDING_APPROVAL", "REQUESTED"])
-
-    var assignedClaims: [ResourceClaimRecord] {
-        claims.filter {
-            assignedClaimStates.contains($0.state) && $0.runtimeState != "RUNNING"
-        }
-    }
-
-    var runningClaims: [ResourceClaimRecord] {
-        claims.filter { $0.runtimeState == "RUNNING" || $0.state == "RUNNING" }
-    }
-
-    var pendingClaims: [ResourceClaimRecord] {
-        claims.filter { pendingClaimStates.contains($0.state) }
-    }
 
     var visibleLegacyRequests: [AllocationRequestRecord] {
         requests
@@ -82,32 +61,20 @@ private struct ResourceUsageGroup: Identifiable {
     }
 
     var assignedQuantities: ResourceQuantityRecord {
-        combinedQuantities(
-            assignedClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: assignedLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
-                )
-            ]
+        ResourceQuantityRecord(
+            gpuCount: assignedLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
         )
     }
 
     var runningQuantities: ResourceQuantityRecord {
-        combinedQuantities(
-            runningClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: runningLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
-                )
-            ]
+        ResourceQuantityRecord(
+            gpuCount: runningLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
         )
     }
 
     var requestedQuantities: ResourceQuantityRecord {
-        combinedQuantities(
-            pendingClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: visibleLegacyRequests.reduce(0) { $0 + $1.gpuCount }
-                )
-            ]
+        ResourceQuantityRecord(
+            gpuCount: visibleLegacyRequests.reduce(0) { $0 + $1.gpuCount }
         )
     }
 
@@ -123,11 +90,11 @@ private struct ResourceUsageGroup: Identifiable {
     }
 
     var activityCount: Int {
-        claims.count + leases.count + visibleLegacyRequests.count + reservations.count + actuals.count
+        leases.count + visibleLegacyRequests.count + reservations.count
     }
 
     var visibleActivityCount: Int {
-        assignedClaims.count + runningClaims.count + leases.count + actuals.count
+        leases.count
     }
 }
 
@@ -159,45 +126,19 @@ private struct ResourceUsageProjection {
         taskCount = Set(identities.map { "\($0.projectID)\u{1F}\($0.taskReference)" }).count
         activeTaskCount = resourceUsageActiveTaskCount(snapshot: snapshot)
 
-        let linkedLeaseIDs = Set(snapshot.resourceClaims.flatMap(\.nativeLeaseIDs))
-        let linkedRequestIDs = Set(snapshot.resourceClaims.flatMap(\.nativeRequestIDs))
-        let legacyLeases = snapshot.leases.filter { !linkedLeaseIDs.contains($0.id) }
-        let legacyRequests = snapshot.requests.filter {
-            !linkedRequestIDs.contains($0.id) && resourceUsageRequestIsPending($0)
-        }
-        let assignedClaims = snapshot.resourceClaims.filter {
-            ["HELD", "ACTIVE"].contains($0.state) && $0.runtimeState != "RUNNING"
-        }
-        let runningClaims = snapshot.resourceClaims.filter {
-            $0.runtimeState == "RUNNING" || $0.state == "RUNNING"
-        }
-        let pendingClaims = snapshot.resourceClaims.filter {
-            ["BLOCKED", "QUEUED", "PENDING_APPROVAL", "REQUESTED"].contains($0.state)
-        }
-        assignedQuantities = combinedQuantities(
-            assignedClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: legacyLeases
-                        .filter { $0.runtimeState != "RUNNING" }
-                        .reduce(0) { $0 + $1.gpuIDs.count }
-                )
-            ]
+        let pendingRequests = snapshot.requests.filter(resourceUsageRequestIsPending)
+        assignedQuantities = ResourceQuantityRecord(
+            gpuCount: snapshot.leases
+                .filter { $0.runtimeState != "RUNNING" }
+                .reduce(0) { $0 + $1.gpuIDs.count }
         )
-        runningQuantities = combinedQuantities(
-            runningClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: legacyLeases
-                        .filter { $0.runtimeState == "RUNNING" }
-                        .reduce(0) { $0 + $1.gpuIDs.count }
-                )
-            ]
+        runningQuantities = ResourceQuantityRecord(
+            gpuCount: snapshot.leases
+                .filter { $0.runtimeState == "RUNNING" }
+                .reduce(0) { $0 + $1.gpuIDs.count }
         )
-        requestedQuantities = combinedQuantities(
-            pendingClaims.map(\.quantities) + [
-                ResourceQuantityRecord(
-                    gpuCount: legacyRequests.reduce(0) { $0 + $1.gpuCount }
-                )
-            ]
+        requestedQuantities = ResourceQuantityRecord(
+            gpuCount: pendingRequests.reduce(0) { $0 + $1.gpuCount }
         )
 
         groupsByScope = [scope: makeResourceUsageGroups(snapshot: snapshot, scope: scope)]
@@ -509,37 +450,16 @@ private struct ResourceUsageGroupDetail: View {
                     }
                 }
 
-                if !group.assignedClaims.isEmpty || !group.runningClaims.isEmpty || !group.leases.isEmpty {
+                if !group.leases.isEmpty {
                     ResourceUsageSection(title: "当前使用") {
                         VStack(spacing: 0) {
-                            ForEach(Array(group.assignedClaims.enumerated()), id: \.element.id) { index, claim in
-                                if index > 0 { ResourceUsageRowDivider() }
-                                ResourceClaimDetailRow(claim: claim)
-                            }
-                            ForEach(Array(group.runningClaims.enumerated()), id: \.element.id) { index, claim in
-                                if index > 0 || !group.assignedClaims.isEmpty { ResourceUsageRowDivider() }
-                                ResourceClaimDetailRow(claim: claim)
-                            }
                             ForEach(Array(group.leases.enumerated()), id: \.element.id) { index, lease in
-                                if index > 0 || !group.assignedClaims.isEmpty || !group.runningClaims.isEmpty {
-                                    ResourceUsageRowDivider()
-                                }
+                                if index > 0 { ResourceUsageRowDivider() }
                                 ResourceLeaseDetailRow(
                                     store: store,
                                     lease: lease,
                                     release: { release(lease) }
                                 )
-                            }
-                        }
-                    }
-                }
-
-                if !group.actuals.isEmpty {
-                    ResourceUsageSection(title: "任务记录") {
-                        VStack(spacing: 0) {
-                            ForEach(Array(group.actuals.enumerated()), id: \.element.id) { index, actual in
-                                if index > 0 { ResourceUsageRowDivider() }
-                                ResourceActualDetailRow(actual: actual)
                             }
                         }
                     }
@@ -647,35 +567,6 @@ private struct ResourceUsageRowDivider: View {
         Rectangle()
             .fill(DesignTokens.surfaceStroke)
             .frame(height: 1)
-    }
-}
-
-private struct ResourceClaimDetailRow: View {
-    let claim: ResourceClaimRecord
-
-    var body: some View {
-        ResourceUsageRecordShell {
-            HStack(spacing: 10) {
-                ResourceRecordIcon(systemName: "key.fill")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(claim.taskReference.isEmpty ? (claim.purpose ?? "未命名任务") : claim.taskReference)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(claim.projectID)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(DesignTokens.mutedInk)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 10)
-                Text(claim.quantities.compactLabel)
-                    .font(Typography.annotation.weight(.semibold))
-                    .foregroundStyle(DesignTokens.ink)
-                    .lineLimit(1)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("当前使用 \(claim.taskReference)")
-        .accessibilityValue("\(claim.projectID)，\(claim.quantities.compactLabel)")
     }
 }
 
@@ -926,38 +817,6 @@ private struct LeaseReassignmentSheet: View {
     }
 }
 
-private struct ResourceActualDetailRow: View {
-    let actual: ResourceRunActualRecord
-
-    var body: some View {
-        ResourceUsageRecordShell {
-            HStack(spacing: 10) {
-                ResourceRecordIcon(systemName: "checklist.checked")
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(actual.taskReference.isEmpty ? actual.id : actual.taskReference)
-                        .font(.subheadline.weight(.semibold))
-                        .lineLimit(1)
-                    Text(actual.projectID)
-                        .font(.caption2.weight(.medium))
-                        .foregroundStyle(DesignTokens.mutedInk)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 10)
-                Text(actual.quantities.compactLabel)
-                    .font(Typography.annotation.weight(.semibold))
-                    .foregroundStyle(DesignTokens.ink)
-                    .lineLimit(1)
-                Text("时长 \(usageDuration(actual.actualDurationSeconds))")
-                    .font(.caption2.weight(.medium))
-                    .foregroundStyle(DesignTokens.mutedInk)
-            }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("任务记录 \(actual.taskReference)")
-        .accessibilityValue("\(actual.quantities.compactLabel)，时长 \(usageDuration(actual.actualDurationSeconds))")
-    }
-}
-
 private struct ResourceUsageRecordShell<Content: View>: View {
     @ViewBuilder let content: Content
 
@@ -994,7 +853,7 @@ private struct ResourceUsageIdentity {
 
 private extension ResourceQuantityRecord {
     var hasResources: Bool {
-        cpuCores > 0 || memoryMiB > 0 || gpuCount > 0 || nodeCount > 0 || schedulerUnits > 0
+        cpuCores > 0 || memoryMiB > 0 || gpuCount > 0 || nodeCount > 0
     }
 }
 
@@ -1014,12 +873,6 @@ private func resourceUsageReservationIsPending(_ reservation: ReservationRecord)
     reservation.state.uppercased() == "PENDING"
 }
 
-private func resourceUsageClaimStatus(_ claim: ResourceClaimRecord) -> String {
-    if claim.runtimeState == "RUNNING" || claim.state == "RUNNING" { return "运行" }
-    if ["HELD", "ACTIVE"].contains(claim.state) { return "已分配" }
-    return claim.stateLabel
-}
-
 private func resourceUsageLeaseStatus(_ lease: LeaseRecord) -> String {
     if lease.runtimeState == "RUNNING" { return "运行" }
     if ["HELD", "ACTIVE"].contains(lease.state) { return "已分配" }
@@ -1027,40 +880,21 @@ private func resourceUsageLeaseStatus(_ lease: LeaseRecord) -> String {
 }
 
 private func resourceUsageActiveTaskCount(snapshot: BrokerSnapshot) -> Int {
-    let linkedLeaseIDs = Set(snapshot.resourceClaims.flatMap(\.nativeLeaseIDs))
-    let activeClaims = snapshot.resourceClaims.filter {
-        ["HELD", "ACTIVE", "RUNNING"].contains($0.state) || $0.runtimeState == "RUNNING"
-    }
-    let claimTasks = activeClaims.map {
+    Set(snapshot.leases.map {
         "\($0.projectID)\u{1F}\(normalizedTask($0.taskReference, purpose: $0.purpose))"
-    }
-    let legacyLeaseTasks = snapshot.leases
-        .filter { !linkedLeaseIDs.contains($0.id) }
-        .map {
-            "\($0.projectID)\u{1F}\(normalizedTask($0.taskReference, purpose: $0.purpose))"
-        }
-    return Set(claimTasks + legacyLeaseTasks).count
+    }).count
 }
 
 private func resourceUsageIdentities(snapshot: BrokerSnapshot) -> [ResourceUsageIdentity] {
     var identities: [ResourceUsageIdentity] = []
-    let linkedLeaseIDs = Set(snapshot.resourceClaims.flatMap(\.nativeLeaseIDs))
-    let linkedRequestIDs = Set(snapshot.resourceClaims.flatMap(\.nativeRequestIDs))
-    identities.append(contentsOf: snapshot.resourceClaims.map {
+    identities.append(contentsOf: snapshot.leases.map {
         ResourceUsageIdentity(
             projectID: $0.projectID,
             actorID: $0.actorID,
             taskReference: normalizedTask($0.taskReference, purpose: $0.purpose)
         )
     })
-    identities.append(contentsOf: snapshot.leases.filter { !linkedLeaseIDs.contains($0.id) }.map {
-        ResourceUsageIdentity(
-            projectID: $0.projectID,
-            actorID: $0.actorID,
-            taskReference: normalizedTask($0.taskReference, purpose: $0.purpose)
-        )
-    })
-    identities.append(contentsOf: snapshot.requests.filter { !linkedRequestIDs.contains($0.id) }.map {
+    identities.append(contentsOf: snapshot.requests.map {
         ResourceUsageIdentity(
             projectID: $0.projectID,
             actorID: $0.actorID,
@@ -1074,16 +908,11 @@ private func resourceUsageIdentities(snapshot: BrokerSnapshot) -> [ResourceUsage
             taskReference: normalizedTask($0.purpose)
         )
     })
-    identities.append(contentsOf: snapshot.resourceRunActuals.map {
-        ResourceUsageIdentity(projectID: $0.projectID, actorID: $0.actorID, taskReference: normalizedTask($0.taskReference))
-    })
     return identities
 }
 
 private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUsageScope) -> [ResourceUsageGroup] {
     var buckets: [String: ResourceUsageBucket] = [:]
-    let linkedLeaseIDs = Set(snapshot.resourceClaims.flatMap(\.nativeLeaseIDs))
-    let linkedRequestIDs = Set(snapshot.resourceClaims.flatMap(\.nativeRequestIDs))
 
     func add(
         projectID: String,
@@ -1112,21 +941,14 @@ private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUs
         buckets[key] = bucket
     }
 
-    for claim in snapshot.resourceClaims {
-        add(
-            projectID: claim.projectID,
-            actorID: claim.actorID,
-            taskReference: normalizedTask(claim.taskReference, purpose: claim.purpose)
-        ) { $0.claims.append(claim) }
-    }
-    for lease in snapshot.leases where !linkedLeaseIDs.contains(lease.id) {
+    for lease in snapshot.leases {
         add(
             projectID: lease.projectID,
             actorID: lease.actorID,
             taskReference: normalizedTask(lease.taskReference, purpose: lease.purpose)
         ) { $0.leases.append(lease) }
     }
-    for request in snapshot.requests where !linkedRequestIDs.contains(request.id) {
+    for request in snapshot.requests {
         add(
             projectID: request.projectID,
             actorID: request.actorID,
@@ -1140,13 +962,6 @@ private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUs
             taskReference: normalizedTask(reservation.purpose)
         ) { $0.reservations.append(reservation) }
     }
-    for actual in snapshot.resourceRunActuals {
-        add(
-            projectID: actual.projectID,
-            actorID: actual.actorID,
-            taskReference: normalizedTask(actual.taskReference)
-        ) { $0.actuals.append(actual) }
-    }
 
     return buckets.values.map { bucket in
         ResourceUsageGroup(
@@ -1156,11 +971,9 @@ private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUs
             projectIDs: bucket.projectIDs.sorted(),
             actorIDs: bucket.actorIDs.sorted(),
             taskReferences: bucket.taskReferences.sorted(),
-            claims: bucket.claims.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") },
             leases: bucket.leases.sorted { ($0.issuedAt ?? "") > ($1.issuedAt ?? "") },
             requests: bucket.requests.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") },
-            reservations: bucket.reservations.sorted { ($0.startsAt ?? "") > ($1.startsAt ?? "") },
-            actuals: bucket.actuals.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") }
+            reservations: bucket.reservations.sorted { ($0.startsAt ?? "") > ($1.startsAt ?? "") }
         )
     }
     .filter { $0.visibleActivityCount > 0 }
@@ -1177,8 +990,7 @@ private func combinedQuantities(_ values: [ResourceQuantityRecord]) -> ResourceQ
         cpuCores: values.reduce(0) { $0 + $1.cpuCores },
         memoryMiB: values.reduce(0) { $0 + $1.memoryMiB },
         gpuCount: values.reduce(0) { $0 + $1.gpuCount },
-        nodeCount: values.reduce(0) { $0 + $1.nodeCount },
-        schedulerUnits: values.reduce(0) { $0 + $1.schedulerUnits }
+        nodeCount: values.reduce(0) { $0 + $1.nodeCount }
     )
 }
 

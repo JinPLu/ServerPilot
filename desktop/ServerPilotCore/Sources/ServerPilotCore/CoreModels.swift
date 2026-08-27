@@ -184,7 +184,6 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
     public let memoryMiB: Int
     public let gpuCount: Int
     public let nodeCount: Int
-    public let schedulerUnits: Int
 
     public init(raw: [String: Any] = [:]) {
         cpuCores = raw.optionalDouble("cpu_cores")
@@ -202,23 +201,18 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
         nodeCount = raw.optionalInt("node_count")
             ?? raw.optionalInt("nodes")
             ?? 0
-        schedulerUnits = raw.optionalInt("scheduler_units")
-            ?? raw.optionalInt("scheduler_unit_count")
-            ?? 0
     }
 
     public init(
         cpuCores: Double = 0,
         memoryMiB: Int = 0,
         gpuCount: Int = 0,
-        nodeCount: Int = 0,
-        schedulerUnits: Int = 0
+        nodeCount: Int = 0
     ) {
         self.cpuCores = cpuCores
         self.memoryMiB = memoryMiB
         self.gpuCount = gpuCount
         self.nodeCount = nodeCount
-        self.schedulerUnits = schedulerUnits
     }
 
     public var compactLabel: String {
@@ -237,9 +231,6 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
         if nodeCount > 0 {
             parts.append("\(nodeCount) 节点")
         }
-        if schedulerUnits > 0 {
-            parts.append("\(schedulerUnits) 调度单元")
-        }
         return parts.isEmpty ? "无资源" : parts.joined(separator: " · ")
     }
 
@@ -252,219 +243,6 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
 
     private static func gibibytes(_ mebibytes: Int) -> Int {
         Int((Double(mebibytes) / 1024).rounded())
-    }
-}
-
-public struct ResourceProviderRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let providerType: String
-    public let displayName: String
-    public let endpointID: String?
-    public let schedulerTargetID: String?
-    public let state: String
-    public let enabled: Bool
-    public let total: ResourceQuantityRecord
-    public let committed: ResourceQuantityRecord
-    public let available: ResourceQuantityRecord
-    public let ownerProjectID: String?
-    public let freshnessSeconds: Double?
-    public let updatedAt: String?
-
-    public init?(raw: [String: Any]) {
-        guard let id = raw.string("id") else { return nil }
-        self.id = id
-        providerType = raw.string("provider_type") ?? raw.string("type") ?? "direct-gpu"
-        displayName = raw.string("display_name") ?? raw.string("name") ?? id
-        endpointID = raw.string("endpoint_id")
-        schedulerTargetID = raw.string("scheduler_target_id")
-        state = (raw.string("state") ?? raw.string("lifecycle_state") ?? "UNKNOWN").uppercased()
-        enabled = raw.bool("enabled", default: true)
-        total = ResourceQuantityRecord(raw: raw["total"] as? [String: Any] ?? raw["capacity"] as? [String: Any] ?? [:])
-        committed = ResourceQuantityRecord(raw: raw["committed"] as? [String: Any] ?? raw["commitment"] as? [String: Any] ?? [:])
-        available = ResourceQuantityRecord(raw: raw["available"] as? [String: Any] ?? raw["free"] as? [String: Any] ?? [:])
-        ownerProjectID = raw.string("owner_project_id")
-        freshnessSeconds = raw.optionalDouble("freshness_seconds")
-        updatedAt = raw.string("updated_at") ?? raw.string("observed_at")
-    }
-
-    public init(
-        id: String,
-        providerType: String,
-        displayName: String,
-        endpointID: String? = nil,
-        schedulerTargetID: String? = nil,
-        state: String,
-        enabled: Bool = true,
-        total: ResourceQuantityRecord = ResourceQuantityRecord(),
-        committed: ResourceQuantityRecord = ResourceQuantityRecord(),
-        available: ResourceQuantityRecord = ResourceQuantityRecord(),
-        ownerProjectID: String? = nil,
-        freshnessSeconds: Double? = nil,
-        updatedAt: String? = nil
-    ) {
-        self.id = id
-        self.providerType = providerType
-        self.displayName = displayName
-        self.endpointID = endpointID
-        self.schedulerTargetID = schedulerTargetID
-        self.state = state
-        self.enabled = enabled
-        self.total = total
-        self.committed = committed
-        self.available = available
-        self.ownerProjectID = ownerProjectID
-        self.freshnessSeconds = freshnessSeconds
-        self.updatedAt = updatedAt
-    }
-
-    public var providerLabel: String {
-        switch providerType {
-        case "direct-gpu": return "GPU"
-        case "host-capacity": return "CPU 与内存"
-        case "scheduler": return "外部计算平台"
-        default: return providerType
-        }
-    }
-
-    public var stateLabel: String {
-        switch state {
-        case "ONLINE", "READY": return "在线"
-        case "AVAILABLE": return "空闲"
-        case "PENDING", "QUEUED", "SUBMITTED": return "正在连接"
-        case "ALLOCATED", "LEASED", "RUNNING": return "使用中"
-        case "STALE": return "无响应"
-        case "ERROR": return "连接失败"
-        case "CONFLICT": return "归属不一致"
-        case "DISABLED": return "已停用"
-        case "DRAINING": return "不可分配"
-        default: return state
-        }
-    }
-
-    public var trustBoundary: String? {
-        if providerType == "scheduler", ["PENDING", "QUEUED", "SUBMITTED"].contains(state) {
-            return "外部系统尚未确认，因此暂不计入可用资源。"
-        }
-        if !enabled { return "此资源已停用，暂时不能申请。" }
-        if ["STALE", "ERROR", "CONFLICT", "DISABLED", "DRAINING"].contains(state) {
-            return "资源暂不可用。"
-        }
-        return nil
-    }
-}
-
-public struct AllocatableUnitRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let providerID: String
-    public let unitKey: String
-    public let unitType: String
-    public let endpointID: String?
-    public let gpuID: String?
-    public let schedulerTargetID: String?
-    public let state: String
-    public let quantities: ResourceQuantityRecord
-    public let committed: ResourceQuantityRecord
-    public let ownerProjectID: String?
-    public let actorID: String?
-    public let nativeSchedulerJobID: String?
-
-    public init?(raw: [String: Any]) {
-        guard let id = raw.string("id") else { return nil }
-        self.id = id
-        providerID = raw.string("provider_id") ?? raw.string("provider") ?? ""
-        unitKey = raw.string("unit_key") ?? raw.string("key") ?? id
-        unitType = raw.string("unit_type") ?? raw.string("type") ?? "gpu"
-        endpointID = raw.string("endpoint_id")
-        gpuID = raw.string("gpu_id")
-        schedulerTargetID = raw.string("scheduler_target_id")
-        state = (raw.string("state") ?? "UNKNOWN").uppercased()
-        quantities = ResourceQuantityRecord(raw: raw["quantities"] as? [String: Any] ?? raw)
-        committed = ResourceQuantityRecord(raw: raw["committed"] as? [String: Any] ?? raw["commitment"] as? [String: Any] ?? [:])
-        ownerProjectID = raw.string("owner_project_id") ?? raw.string("project_id")
-        actorID = raw.string("actor_id")
-        nativeSchedulerJobID = raw.string("native_scheduler_job_id") ?? raw.string("scheduler_job_id")
-    }
-}
-
-public struct SchedulerTargetRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let displayName: String
-    public let kind: String
-    public let adapter: String
-    public let enabled: Bool
-    public let accessStatus: String
-    public let accessMessage: String?
-
-    public init?(raw: [String: Any]) {
-        guard let id = raw.string("id") else { return nil }
-        self.id = id
-        displayName = raw.string("display_name") ?? raw.string("name") ?? id
-        kind = raw.string("kind") ?? "external-scheduler"
-        adapter = raw.string("adapter") ?? ""
-        enabled = raw.bool("enabled", default: true)
-        let access = raw["last_access"] as? [String: Any] ?? [:]
-        accessStatus = (access.string("status") ?? "unknown").uppercased()
-        accessMessage = access.string("message")
-    }
-}
-
-public struct SchedulerJobRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let targetID: String
-    public let actorID: String
-    public let projectID: String
-    public let taskReference: String
-    public let state: String
-    public let rawState: String?
-    public let schedulerJobID: String?
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id"),
-            let targetID = raw.string("target_id"),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id")
-        else {
-            return nil
-        }
-        self.id = id
-        self.targetID = targetID
-        self.actorID = actorID
-        self.projectID = projectID
-        taskReference = raw.string("task_ref") ?? raw.string("task_reference") ?? ""
-        state = (raw.string("state") ?? "UNKNOWN").uppercased()
-        rawState = raw.string("raw_state")
-        schedulerJobID = raw.string("scheduler_job_id")
-    }
-}
-
-public struct SchedulerTransferRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let targetID: String
-    public let actorID: String
-    public let projectID: String
-    public let state: String
-    public let remoteDirectory: String?
-    public let remoteStagedPath: String?
-    public let errorMessage: String?
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id"),
-            let targetID = raw.string("target_id"),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id")
-        else {
-            return nil
-        }
-        self.id = id
-        self.targetID = targetID
-        self.actorID = actorID
-        self.projectID = projectID
-        state = (raw.string("state") ?? "UNKNOWN").uppercased()
-        remoteDirectory = raw.string("remote_directory")
-        remoteStagedPath = raw.string("remote_staged_path")
-        errorMessage = raw.string("error_message")
     }
 }
 
@@ -927,16 +705,10 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
 }
 
 public struct BrokerStateHistory: Equatable, Sendable {
-    public let resourcePlanEvaluations: [ResourcePlanEvaluationRecord]
-    public let resourceRunActuals: [ResourceRunActualRecord]
+    public static let empty = BrokerStateHistory()
 
-    public static let empty = BrokerStateHistory(raw: [:])
-
-    public init(raw: [String: Any]) {
-        resourcePlanEvaluations = (raw["resource_plan_evaluations"] as? [[String: Any]] ?? [])
-            .compactMap(ResourcePlanEvaluationRecord.init)
-        resourceRunActuals = (raw["resource_run_actuals"] as? [[String: Any]] ?? [])
-            .compactMap(ResourceRunActualRecord.init)
+    public init(raw: [String: Any] = [:]) {
+        _ = raw
     }
 }
 
@@ -1090,14 +862,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
     public var leases: [LeaseRecord]
     public var requests: [AllocationRequestRecord]
     public var reservations: [ReservationRecord]
-    public var resourceProviders: [ResourceProviderRecord]
-    public var allocatableUnits: [AllocatableUnitRecord]
-    public var schedulerTargets: [SchedulerTargetRecord]
-    public var schedulerJobs: [SchedulerJobRecord]
-    public var schedulerTransfers: [SchedulerTransferRecord]
-    public var resourceClaims: [ResourceClaimRecord]
-    public var resourcePlanEvaluations: [ResourcePlanEvaluationRecord]
-    public var resourceRunActuals: [ResourceRunActualRecord]
     public var history: BrokerStateHistory
     public var dataAgeSeconds: Double?
     public var freshnessSeconds: Double?
@@ -1114,14 +878,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         leases: [],
         requests: [],
         reservations: [],
-        resourceProviders: [],
-        allocatableUnits: [],
-        schedulerTargets: [],
-        schedulerJobs: [],
-        schedulerTransfers: [],
-        resourceClaims: [],
-        resourcePlanEvaluations: [],
-        resourceRunActuals: [],
         history: .empty,
         dataAgeSeconds: nil,
         freshnessSeconds: nil,
@@ -1178,23 +934,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         leases = (payload["leases"] as? [[String: Any]] ?? []).compactMap(LeaseRecord.init)
         requests = (payload["requests"] as? [[String: Any]] ?? []).compactMap(AllocationRequestRecord.init)
         reservations = (payload["reservations"] as? [[String: Any]] ?? []).compactMap(ReservationRecord.init)
-        resourceProviders = (payload["resource_providers"] as? [[String: Any]] ?? []).compactMap(ResourceProviderRecord.init)
-        allocatableUnits = (payload["allocatable_units"] as? [[String: Any]] ?? []).compactMap(AllocatableUnitRecord.init)
-        schedulerTargets = (payload["scheduler_targets"] as? [[String: Any]] ?? []).compactMap(SchedulerTargetRecord.init)
-        schedulerJobs = (payload["scheduler_jobs"] as? [[String: Any]] ?? []).compactMap(SchedulerJobRecord.init)
-        schedulerTransfers = (payload["scheduler_transfers"] as? [[String: Any]] ?? [])
-            .compactMap(SchedulerTransferRecord.init)
-        resourceClaims = (payload["resource_claims"] as? [[String: Any]] ?? []).compactMap(ResourceClaimRecord.init)
-        let currentResourcePlanEvaluations = (payload["resource_plan_evaluations"] as? [[String: Any]] ?? [])
-            .compactMap(ResourcePlanEvaluationRecord.init)
-        resourcePlanEvaluations = currentResourcePlanEvaluations.isEmpty
-            ? history.resourcePlanEvaluations
-            : currentResourcePlanEvaluations
-        let currentResourceRunActuals = (payload["resource_run_actuals"] as? [[String: Any]] ?? [])
-            .compactMap(ResourceRunActualRecord.init)
-        resourceRunActuals = currentResourceRunActuals.isEmpty
-            ? history.resourceRunActuals
-            : currentResourceRunActuals
         dataAgeSeconds = payload.optionalDouble("data_age_seconds")
         freshnessSeconds = payload.optionalDouble("freshness_seconds")
         admissionBoundary = payload.string("admission_boundary") ?? BrokerSnapshot.empty.admissionBoundary
@@ -1211,14 +950,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         leases: [LeaseRecord],
         requests: [AllocationRequestRecord],
         reservations: [ReservationRecord] = [],
-        resourceProviders: [ResourceProviderRecord] = [],
-        allocatableUnits: [AllocatableUnitRecord] = [],
-        schedulerTargets: [SchedulerTargetRecord] = [],
-        schedulerJobs: [SchedulerJobRecord] = [],
-        schedulerTransfers: [SchedulerTransferRecord] = [],
-        resourceClaims: [ResourceClaimRecord] = [],
-        resourcePlanEvaluations: [ResourcePlanEvaluationRecord] = [],
-        resourceRunActuals: [ResourceRunActualRecord] = [],
         history: BrokerStateHistory = .empty,
         dataAgeSeconds: Double?,
         freshnessSeconds: Double? = nil,
@@ -1234,14 +965,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         self.leases = leases
         self.requests = requests
         self.reservations = reservations
-        self.resourceProviders = resourceProviders
-        self.allocatableUnits = allocatableUnits
-        self.schedulerTargets = schedulerTargets
-        self.schedulerJobs = schedulerJobs
-        self.schedulerTransfers = schedulerTransfers
-        self.resourceClaims = resourceClaims
-        self.resourcePlanEvaluations = resourcePlanEvaluations
-        self.resourceRunActuals = resourceRunActuals
         self.history = history
         self.dataAgeSeconds = dataAgeSeconds
         self.freshnessSeconds = freshnessSeconds
@@ -1261,73 +984,10 @@ public struct BrokerSnapshot: Equatable, Sendable {
             && leases == other.leases
             && requests == other.requests
             && reservations == other.reservations
-            && resourceProviders == other.resourceProviders
-            && allocatableUnits == other.allocatableUnits
-            && schedulerTargets == other.schedulerTargets
-            && schedulerJobs == other.schedulerJobs
-            && schedulerTransfers == other.schedulerTransfers
-            && resourceClaims == other.resourceClaims
-            && resourcePlanEvaluations == other.resourcePlanEvaluations
-            && resourceRunActuals == other.resourceRunActuals
             && history == other.history
             && dataAgeSeconds == other.dataAgeSeconds
             && freshnessSeconds == other.freshnessSeconds
             && admissionBoundary == other.admissionBoundary
-    }
-
-    public var monitoringProviders: [ResourceProviderRecord] {
-        let operationalEndpointIDs = Set(operationalEndpoints.map(\.id))
-        var providers = resourceProviders.filter {
-            $0.endpointID == nil || operationalEndpointIDs.contains($0.endpointID ?? "")
-        }
-        let explicitKeys = Set(providers.map {
-            "\($0.providerType):\($0.endpointID ?? $0.schedulerTargetID ?? $0.id)"
-        })
-        providers.append(contentsOf: operationalEndpoints.compactMap { endpoint in
-            let key = "direct-gpu:\(endpoint.id)"
-            guard !explicitKeys.contains(key) else { return nil }
-            let endpointGPUs = gpus(for: endpoint)
-            guard !endpointGPUs.isEmpty else { return nil }
-            let availableGPUs = endpoint.monitorStatus == "ONLINE"
-                ? endpointGPUs.filter(\.isPubliclyAvailable).count
-                : 0
-            return ResourceProviderRecord(
-                id: "direct-gpu:\(endpoint.id)",
-                providerType: "direct-gpu",
-                displayName: endpoint.displayName,
-                endpointID: endpoint.id,
-                state: endpoint.monitorStatus,
-                enabled: endpoint.enabled,
-                total: ResourceQuantityRecord(gpuCount: endpointGPUs.count),
-                committed: ResourceQuantityRecord(gpuCount: max(0, endpointGPUs.count - availableGPUs)),
-                available: ResourceQuantityRecord(gpuCount: availableGPUs),
-                updatedAt: endpoint.monitorLastSuccessAt
-            )
-        })
-        providers.append(contentsOf: operationalEndpoints.compactMap { endpoint in
-            let key = "host-capacity:\(endpoint.id)"
-            guard !explicitKeys.contains(key) else { return nil }
-            guard endpoint.cpuCount != nil || endpoint.memoryTotalMiB != nil else { return nil }
-            return ResourceProviderRecord(
-                id: "host-capacity:\(endpoint.id)",
-                providerType: "host-capacity",
-                displayName: endpoint.displayName,
-                endpointID: endpoint.id,
-                state: endpoint.monitorStatus,
-                enabled: endpoint.enabled,
-                total: ResourceQuantityRecord(
-                    cpuCores: Double(endpoint.cpuCount ?? 0),
-                    memoryMiB: endpoint.memoryTotalMiB ?? 0
-                ),
-                committed: ResourceQuantityRecord(
-                    cpuCores: max(0, Double(endpoint.cpuCount ?? 0) - (endpoint.availableCPUCores ?? 0)),
-                    memoryMiB: max(0, (endpoint.memoryTotalMiB ?? 0) - (endpoint.memoryAvailableMiB ?? 0))
-                ),
-                available: ResourceQuantityRecord.availableHost(endpoint: endpoint),
-                updatedAt: endpoint.monitorLastSuccessAt
-            )
-        })
-        return providers
     }
 
     public func gpus(for endpoint: EndpointRecord) -> [GPURecord] {
@@ -1373,169 +1033,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
 
     public func stableRequestSelection(currentID: String) -> String {
         requests.contains { $0.id == currentID } ? currentID : (requests.first?.id ?? "")
-    }
-}
-
-public struct ResourceClaimRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let actorID: String
-    public let projectID: String
-    public let taskReference: String
-    public let purpose: String?
-    public let state: String
-    public let runtimeState: String
-    public let providerType: String?
-    public let quantities: ResourceQuantityRecord
-    public let nativeLeaseIDs: [String]
-    public let nativeRequestIDs: [String]
-    public let createdAt: String?
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id"),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id")
-        else {
-            return nil
-        }
-        self.id = id
-        self.actorID = actorID
-        self.projectID = projectID
-        self.taskReference = raw.string("task_ref") ?? raw.string("task_reference") ?? ""
-        self.purpose = raw.string("purpose")
-        self.state = (raw.string("state") ?? "UNKNOWN").uppercased()
-        self.runtimeState = (raw.string("runtime_state") ?? self.state).uppercased()
-        self.providerType = raw.string("provider_type")
-        self.quantities = ResourceQuantityRecord(
-            raw: raw["quantities"] as? [String: Any]
-                ?? raw["requested_quantities"] as? [String: Any]
-                ?? [:]
-        )
-        self.nativeLeaseIDs = raw["native_lease_ids"] as? [String] ?? []
-        self.nativeRequestIDs = raw["native_request_ids"] as? [String] ?? []
-        self.createdAt = raw.string("created_at")
-    }
-
-    public var stateLabel: String {
-        if runtimeState == "RUNNING" { return "运行中" }
-        switch state {
-        case "QUEUED": return "排队中"
-        case "PENDING_APPROVAL": return "等待批准"
-        case "BLOCKED": return "等待资源"
-        case "HELD", "ACTIVE": return "使用中"
-        case "RUNNING": return "运行中"
-        case "REJECTED": return "已拒绝"
-        case "RELEASED": return "已释放"
-        default: return state
-        }
-    }
-}
-
-public struct ResourcePlanEvaluationRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let claimID: String?
-    public let actorID: String
-    public let projectID: String
-    public let taskReference: String
-    public let selectedCandidateKey: String?
-    public let minimumSavedSeconds: Int?
-    public let minimumSavedRatio: Double?
-    public let createdAt: String?
-    public let candidates: [ResourcePlanCandidateRecord]
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id"),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id")
-        else {
-            return nil
-        }
-        self.id = id
-        self.claimID = raw.string("claim_id")
-        self.actorID = actorID
-        self.projectID = projectID
-        self.taskReference = raw.string("task_ref") ?? raw.string("task_reference") ?? ""
-        self.selectedCandidateKey = raw.string("selected_candidate_key")
-        self.minimumSavedSeconds = raw.optionalInt("minimum_saved_seconds") ?? raw.optionalInt("min_saved_seconds")
-            ?? raw.optionalInt("marginal_min_saved_seconds")
-        self.minimumSavedRatio = raw.optionalDouble("minimum_saved_ratio")
-            ?? raw.optionalDouble("min_saved_ratio")
-            ?? raw.optionalDouble("marginal_min_saved_ratio")
-        self.createdAt = raw.string("created_at")
-        self.candidates = (raw["candidates"] as? [[String: Any]] ?? []).compactMap(ResourcePlanCandidateRecord.init)
-    }
-
-    public var selectedCandidate: ResourcePlanCandidateRecord? {
-        candidates.first { $0.candidateKey == selectedCandidateKey || $0.selected }
-    }
-}
-
-public struct ResourcePlanCandidateRecord: Identifiable, Equatable, Sendable {
-    public var id: String { candidateKey }
-    public let candidateKey: String
-    public let providerType: String?
-    public let quantities: ResourceQuantityRecord
-    public let predictedRuntimeSeconds: Int
-    public let predictedSavedSeconds: Int
-    public let predictedSavedRatio: Double
-    public let selected: Bool
-    public let rejectionReason: String?
-
-    public init?(raw: [String: Any]) {
-        guard let candidateKey = raw.string("candidate_key") ?? raw.string("id") else { return nil }
-        self.candidateKey = candidateKey
-        self.providerType = raw.string("provider_type")
-        self.quantities = ResourceQuantityRecord(raw: raw["quantities"] as? [String: Any] ?? raw)
-        self.predictedRuntimeSeconds = raw.optionalInt("predicted_runtime_seconds")
-            ?? raw.optionalInt("predicted_remaining_seconds")
-            ?? 0
-        self.predictedSavedSeconds = raw.optionalInt("predicted_saved_seconds") ?? 0
-        self.predictedSavedRatio = raw.optionalDouble("predicted_saved_ratio") ?? 0
-        self.selected = raw.bool("selected", default: false)
-        self.rejectionReason = raw.string("rejection_reason")
-    }
-
-    public var decisionLabel: String {
-        if selected { return "已选择" }
-        if let rejectionReason, !rejectionReason.isEmpty { return rejectionReason }
-        return "未选择"
-    }
-}
-
-public struct ResourceRunActualRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let evaluationID: String?
-    public let claimID: String?
-    public let actorID: String
-    public let projectID: String
-    public let taskReference: String
-    public let providerType: String?
-    public let quantities: ResourceQuantityRecord
-    public let predictedDurationSeconds: Int?
-    public let actualDurationSeconds: Int?
-    public let createdAt: String?
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id") ?? raw.optionalInt("id").map(String.init),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id")
-        else {
-            return nil
-        }
-        self.id = id
-        self.evaluationID = raw.string("evaluation_id")
-        self.claimID = raw.string("claim_id")
-        self.actorID = actorID
-        self.projectID = projectID
-        self.taskReference = raw.string("task_ref") ?? raw.string("task_reference") ?? ""
-        self.providerType = raw.string("provider_type")
-        self.quantities = ResourceQuantityRecord(raw: raw["quantities"] as? [String: Any] ?? [:])
-        self.predictedDurationSeconds = raw.optionalInt("predicted_duration_seconds")
-            ?? raw.optionalInt("predicted_runtime_seconds")
-        self.actualDurationSeconds = raw.optionalInt("actual_duration_seconds")
-        self.createdAt = raw.string("created_at")
     }
 }
 

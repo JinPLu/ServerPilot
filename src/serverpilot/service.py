@@ -23,7 +23,6 @@ from serverpilot.models import (
     Actor,
     ActorProject,
     Alert,
-    AllocatableUnit,
     AllocationRequest,
     AuditEvent,
     Endpoint,
@@ -41,33 +40,14 @@ from serverpilot.models import (
     Project,
     ProviderState,
     Reservation,
-    ResourceAllocation,
-    ResourcePlanEvaluation,
-    ResourceProvider,
-    ResourceRunActual,
     Revision,
     RuntimeSetting,
-    SchedulerJob,
-    SchedulerJobEvent,
-    SchedulerTarget,
-    SchedulerTransfer,
     ServerGroup,
     TelemetryCurrent,
     TelemetrySnapshot,
     WorkloadBinding,
-    WorkloadProfile,
-    WorkloadProfileGrant,
 )
-from serverpilot.models import (
-    ResourceClaim as ResourceClaimModel,
-)
-from serverpilot.models import (
-    ResourcePlanCandidate as ResourcePlanCandidateModel,
-)
-from serverpilot.planner import ResourcePlanCandidate, select_smallest_useful_plan
 from serverpilot.schemas import (
-    ActorCreate,
-    AlertAcknowledge,
     CollectorSettingsUpdate,
     EndpointCreate,
     EndpointObservation,
@@ -79,29 +59,9 @@ from serverpilot.schemas import (
     RequestCreate,
     ReservationCreate,
     ResourceConstraints,
-    ResourcePlanEvaluationInput,
-    ResourceQuantities,
-    ResourceRunActualInput,
     RetentionPrune,
-    SchedulerJobCancel,
-    SchedulerOneOffSubmit,
-    SchedulerProfileSubmit,
-    SchedulerTargetUpsert,
-    SchedulerUploadRequest,
     ServerGroupCreate,
     ServerGroupUpdate,
-    WorkloadProfileClaim,
-    WorkloadProfileUpsert,
-)
-from serverpilot.schemas import (
-    ResourceClaim as ResourceClaimInput,
-)
-from serverpilot.slurm import (
-    CommandSlurmProvider,
-    SlurmProvider,
-    SlurmProviderError,
-    broker_job_name,
-    broker_state,
 )
 from serverpilot.timeutil import ensure_utc, json_dump, json_load, utcnow
 
@@ -110,8 +70,6 @@ SYSTEM_ACTOR_ID = RESERVED_SYSTEM_ID
 SYSTEM_PROJECT_ID = RESERVED_SYSTEM_ID
 TERMINAL_LEASE_STATES = {"RELEASED", "EXPIRED_EMPTY"}
 LEASE_SCOPED_BLOCKING_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy"}
-TERMINAL_SCHEDULER_JOB_STATES = {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
-TERMINAL_SCHEDULER_TRANSFER_STATES = {"COMPLETED", "FAILED", "DEFERRED"}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
 TELEMETRY_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
@@ -122,7 +80,6 @@ TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
 # collection and lose its workload attribution.
 PROCESS_START_TIME_JITTER_SECONDS = 2
 MUTATING_ROLES = {"allocator", "operator", "admin"}
-RESOURCE_SNAPSHOT_HISTORY_LIMIT = 50
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
 COLLECTOR_INTERVAL_SETTING_KEY = "collector_interval_seconds"
 PLUGIN_CAPACITY_SETTING_PREFIX = "pc:"
@@ -208,14 +165,10 @@ class BrokerService:
         self,
         database: Database,
         inventory: InventoryConfig,
-        slurm_provider: SlurmProvider | None = None,
     ) -> None:
         self.database = database
         self.inventory = inventory
-        self.slurm_provider = slurm_provider or CommandSlurmProvider()
         self._collector_settings_lock = threading.Lock()
-        self._scheduler_submit_lock = threading.Lock()
-        self._scheduler_transfer_lock = threading.Lock()
 
     # ---- initialization, identity and transaction primitives -----------------
 
@@ -241,7 +194,6 @@ class BrokerService:
             if sync_inventory or not has_inventory or has_unowned_endpoints:
                 self._upsert_inventory(session, now)
             self._ensure_system_identity(session, now)
-            self._defer_interrupted_scheduler_transfers(session, now)
             self._normalize_legacy_workload_conflicts(
                 session,
                 now,
@@ -981,39 +933,15 @@ class BrokerService:
         return commitment_lease_id is not None
 
     @staticmethod
-    def _endpoint_has_active_allocations(session: Session, endpoint_id: str) -> bool:
-        return (
-            session.scalar(
-                select(ResourceAllocation.id)
-                .join(AllocatableUnit, AllocatableUnit.id == ResourceAllocation.unit_id)
-                .where(
-                    AllocatableUnit.endpoint_id == endpoint_id,
-                    ResourceAllocation.state == "active",
-                )
-                .limit(1)
-            )
-            is not None
-        )
-
-    @staticmethod
     def _purge_endpoint_restrict_history(session: Session, endpoint_id: str) -> None:
         gpu_ids = list(
             session.scalars(select(GPUDevice.id).where(GPUDevice.endpoint_id == endpoint_id))
-        )
-        unit_ids = list(
-            session.scalars(
-                select(AllocatableUnit.id).where(AllocatableUnit.endpoint_id == endpoint_id)
-            )
         )
         session.execute(
             delete(LeaseEndpointCommitment).where(LeaseEndpointCommitment.endpoint_id == endpoint_id)
         )
         if gpu_ids:
             session.execute(delete(LeaseResource).where(LeaseResource.gpu_id.in_(gpu_ids)))
-        if unit_ids:
-            session.execute(
-                delete(ResourceAllocation).where(ResourceAllocation.unit_id.in_(unit_ids))
-            )
         session.flush()
 
     @staticmethod
@@ -1415,160 +1343,11 @@ class BrokerService:
         )
 
     @staticmethod
-    def _project_dict(project: Project) -> dict[str, Any]:
-        return {
-            "id": project.id,
-            "display_name": project.display_name,
-            "weight": project.weight,
-            "quota_gpus": project.quota_gpus,
-            "concurrency_limit": project.concurrency_limit,
-            "enabled": project.enabled,
-        }
-
-    @staticmethod
-    def _workload_profile_dict(
-        profile: WorkloadProfile,
-        grant_project_ids: Iterable[str] = (),
-    ) -> dict[str, Any]:
-        return {
-            "id": profile.id,
-            "project_id": profile.project_id,
-            "display_name": profile.display_name,
-            "purpose": profile.purpose,
-            "duration_seconds": profile.duration_seconds,
-            "constraints": json_load(profile.constraints_json),
-            "runtime_kind": profile.runtime_kind,
-            "scheduler_target_id": profile.scheduler_target_id,
-            "scheduler": (
-                json_load(profile.scheduler_spec_json)
-                if profile.scheduler_spec_json is not None
-                else None
-            ),
-            "grant_project_ids": sorted(grant_project_ids),
-            "grant_all_projects": profile.grant_all_projects,
-            "retain_submission_body": profile.retain_submission_body,
-            "enabled": profile.enabled,
-            "created_at": _iso(profile.created_at),
-            "updated_at": _iso(profile.updated_at),
-        }
-
-    @staticmethod
-    def _scheduler_target_dict(target: SchedulerTarget) -> dict[str, Any]:
-        connection = json_load(target.connection_json)
-        transport_profile = (
-            connection.get("transport_profile") if isinstance(connection, dict) else None
-        )
-        inspection_profile = (
-            connection.get("inspection_profile") if isinstance(connection, dict) else None
-        )
-        return {
-            "id": target.id,
-            "display_name": target.display_name,
-            "kind": "external-scheduler",
-            "adapter": target.adapter,
-            "transport_profile": transport_profile,
-            "inspection_profile": inspection_profile,
-            "credential_refs": json_load(target.credential_refs_json),
-            "capabilities": json_load(target.capabilities_json),
-            "access_hint": target.access_hint,
-            "last_access": {
-                "status": target.access_status or "unknown",
-                "message": target.access_message,
-                "checked_at": _iso(target.access_checked_at),
-            },
-            "data_transfer": (
-                {
-                    "mode": "staged-upload",
-                    "overwrite_existing_destination": False,
-                }
-                if "data-transfer" in json_load(target.capabilities_json)
-                else None
-            ),
-            "enabled": target.enabled,
-            "created_at": _iso(target.created_at),
-            "updated_at": _iso(target.updated_at),
-        }
-
-    @staticmethod
-    def _scheduler_job_dict(
-        job: SchedulerJob,
-        events: Iterable[SchedulerJobEvent] = (),
-    ) -> dict[str, Any]:
-        return {
-            "id": job.id,
-            "target_id": job.target_id,
-            "actor_id": job.actor_id,
-            "project_id": job.project_id,
-            "profile_id": job.profile_id,
-            "task_ref": job.task_ref,
-            "purpose": job.purpose,
-            "approval_ref": job.approval_ref,
-            "request": json_load(job.request_json),
-            "script_body_retained": job.script_body is not None and job.retain_submission_body,
-            "scheduler_job_id": job.scheduler_job_id,
-            "state": job.state,
-            "raw_state": job.raw_state,
-            "allocated_tres": json_load(job.allocated_tres_json),
-            "node_list": job.node_list,
-            "stdout_path": job.stdout_path,
-            "stderr_path": job.stderr_path,
-            "exit_code": job.exit_code,
-            "error_message": job.error_message,
-            "submitted_at": _iso(job.submitted_at),
-            "started_at": _iso(job.started_at),
-            "completed_at": _iso(job.completed_at),
-            "created_at": _iso(job.created_at),
-            "updated_at": _iso(job.updated_at),
-            "events": [
-                {
-                    "id": event.id,
-                    "state": event.state,
-                    "raw_state": event.raw_state,
-                    "detail": json_load(event.detail_json),
-                    "created_at": _iso(event.created_at),
-                }
-                for event in events
-            ],
-        }
-
-    @staticmethod
-    def _scheduler_transfer_dict(transfer: SchedulerTransfer) -> dict[str, Any]:
-        return {
-            "id": transfer.id,
-            "target_id": transfer.target_id,
-            "actor_id": transfer.actor_id,
-            "project_id": transfer.project_id,
-            "approval_ref": transfer.approval_ref,
-            "local_source_path": transfer.local_source_path,
-            "remote_directory": transfer.remote_directory,
-            "remote_staged_path": transfer.remote_staged_path,
-            "source_size_bytes": transfer.source_size_bytes,
-            "state": transfer.state,
-            "error_message": transfer.error_message,
-            "created_at": _iso(transfer.created_at),
-            "updated_at": _iso(transfer.updated_at),
-            "completed_at": _iso(transfer.completed_at),
-        }
-
-    @staticmethod
-    def _actor_dict(actor: Actor, project_ids: Iterable[str]) -> dict[str, Any]:
-        return {
-            "id": actor.id,
-            "display_name": actor.display_name,
-            "role": actor.role,
-            "enabled": actor.enabled,
-            "project_ids": sorted(project_ids),
-            "created_at": _iso(actor.created_at),
-            "updated_at": _iso(actor.updated_at),
-        }
-
-    @staticmethod
     def _request_dict(request: AllocationRequest) -> dict[str, Any]:
         return {
             "id": request.id,
             "actor_id": request.actor_id,
             "project_id": request.project_id,
-            "profile_id": request.profile_id,
             "task_ref": request.task_ref,
             "purpose": request.purpose,
             "constraints": json_load(request.constraints_json),
@@ -1829,8 +1608,8 @@ class BrokerService:
         """Summarize the recent observed history for one GPU.
 
         The current sample is included only when it is newer than the last
-        persisted history point, matching :meth:`gpu_history` and avoiding a
-        duplicate observation in the rolling average.
+        persisted history point, matching :meth:`endpoint_history` and
+        avoiding a duplicate observation in the rolling average.
         """
 
         if not samples:
@@ -1961,136 +1740,6 @@ class BrokerService:
             return None
         used_cores = usage_delta / 1_000_000 / elapsed_seconds
         return round(used_cores / quota_cores * 100, 2)
-
-    @staticmethod
-    def _resource_quantities_dict(quantities: ResourceQuantities) -> dict[str, Any]:
-        return quantities.model_dump(mode="json")
-
-    @staticmethod
-    def _provider_dict(provider: ResourceProvider) -> dict[str, Any]:
-        return {
-            "id": provider.id,
-            "provider_type": provider.provider_type,
-            "display_name": provider.display_name,
-            "endpoint_id": provider.endpoint_id,
-            "scheduler_target_id": provider.scheduler_target_id,
-            "native_ref": json_load(provider.native_ref_json),
-            "metadata": json_load(provider.metadata_json),
-            "enabled": provider.enabled,
-            "created_at": _iso(provider.created_at),
-            "updated_at": _iso(provider.updated_at),
-        }
-
-    @staticmethod
-    def _allocatable_unit_dict(unit: AllocatableUnit) -> dict[str, Any]:
-        return {
-            "id": unit.id,
-            "provider_id": unit.provider_id,
-            "unit_key": unit.unit_key,
-            "unit_type": unit.unit_type,
-            "endpoint_id": unit.endpoint_id,
-            "gpu_id": unit.gpu_id,
-            "scheduler_target_id": unit.scheduler_target_id,
-            "total_gpu_count": unit.total_gpu_count,
-            "total_cpu_cores": unit.total_cpu_cores,
-            "total_memory_mib": unit.total_memory_mib,
-            "total_vram_mib": unit.total_vram_mib,
-            "labels": json_load(unit.labels_json),
-            "native_ref": json_load(unit.native_ref_json),
-            "state": unit.state,
-            "enabled": unit.enabled,
-            "created_at": _iso(unit.created_at),
-            "updated_at": _iso(unit.updated_at),
-        }
-
-    @staticmethod
-    def _resource_claim_dict(claim: ResourceClaimModel) -> dict[str, Any]:
-        return {
-            "id": claim.id,
-            "actor_id": claim.actor_id,
-            "project_id": claim.project_id,
-            "task_ref": claim.task_ref,
-            "purpose": claim.purpose,
-            "provider_type": claim.provider_type,
-            "requested_quantities": json_load(claim.requested_quantities_json),
-            "forecast": json_load(claim.forecast_json) if claim.forecast_json else None,
-            "state": claim.state,
-            "created_at": _iso(claim.created_at),
-            "updated_at": _iso(claim.updated_at),
-        }
-
-    @staticmethod
-    def _resource_allocation_dict(
-        allocation: ResourceAllocation,
-        *,
-        unit: AllocatableUnit | None = None,
-    ) -> dict[str, Any]:
-        return {
-            "id": allocation.id,
-            "claim_id": allocation.claim_id,
-            "unit_id": allocation.unit_id,
-            "unit_type": unit.unit_type if unit else None,
-            "endpoint_id": unit.endpoint_id if unit else None,
-            "gpu_id": unit.gpu_id if unit else None,
-            "scheduler_target_id": unit.scheduler_target_id if unit else None,
-            "native_lease_id": allocation.native_lease_id,
-            "native_scheduler_job_id": allocation.native_scheduler_job_id,
-            "quantities": json_load(allocation.quantities_json),
-            "state": allocation.state,
-            "created_at": _iso(allocation.created_at),
-            "updated_at": _iso(allocation.updated_at),
-        }
-
-    @staticmethod
-    def _resource_plan_evaluation_dict(
-        evaluation: ResourcePlanEvaluation,
-        candidates: Iterable[ResourcePlanCandidateModel] = (),
-    ) -> dict[str, Any]:
-        return {
-            "id": evaluation.id,
-            "claim_id": evaluation.claim_id,
-            "actor_id": evaluation.actor_id,
-            "project_id": evaluation.project_id,
-            "task_ref": evaluation.task_ref,
-            "baseline_runtime_seconds": evaluation.baseline_runtime_seconds,
-            "marginal_min_saved_seconds": evaluation.marginal_min_saved_seconds,
-            "marginal_min_saved_ratio": evaluation.marginal_min_saved_ratio,
-            "selected_candidate_key": evaluation.selected_candidate_key,
-            "forecast": json_load(evaluation.forecast_json),
-            "created_at": _iso(evaluation.created_at),
-            "candidates": [
-                {
-                    "candidate_key": candidate.candidate_key,
-                    "provider_type": candidate.provider_type,
-                    "quantities": json_load(candidate.quantities_json),
-                    "predicted_runtime_seconds": candidate.predicted_runtime_seconds,
-                    "predicted_saved_seconds": candidate.predicted_saved_seconds,
-                    "predicted_saved_ratio": candidate.predicted_saved_ratio,
-                    "satisfies_marginal_threshold": candidate.satisfies_marginal_threshold,
-                    "selected": candidate.selected,
-                    "rejection_reason": candidate.rejection_reason,
-                }
-                for candidate in candidates
-            ],
-        }
-
-    @staticmethod
-    def _resource_actual_dict(actual: ResourceRunActual) -> dict[str, Any]:
-        return {
-            "id": actual.id,
-            "evaluation_id": actual.evaluation_id,
-            "claim_id": actual.claim_id,
-            "actor_id": actual.actor_id,
-            "project_id": actual.project_id,
-            "task_ref": actual.task_ref,
-            "started_at": _iso(actual.started_at),
-            "completed_at": _iso(actual.completed_at),
-            "actual_duration_seconds": actual.actual_duration_seconds,
-            "quantities": json_load(actual.quantities_json),
-            "outcome": actual.outcome,
-            "notes": json_load(actual.notes_json),
-            "created_at": _iso(actual.created_at),
-        }
 
     def _current_processes(
         self, session: Session, gpu_id: str, now: datetime
@@ -3020,7 +2669,6 @@ class BrokerService:
                     id=secrets.token_hex(16),
                     actor_id=SYSTEM_ACTOR_ID,
                     project_id=SYSTEM_PROJECT_ID,
-                    profile_id=None,
                     auto_activate=False,
                     task_ref=f"keepalive:{endpoint.id}:{gpu.id}",
                     purpose="ServerPilot idle GPU keepalive",
@@ -3231,7 +2879,6 @@ class BrokerService:
                         id=secrets.token_hex(16),
                         actor_id=SYSTEM_ACTOR_ID,
                         project_id=SYSTEM_PROJECT_ID,
-                        profile_id=None,
                         auto_activate=False,
                         task_ref=f"keepalive:{endpoint.id}:{gpu.id}",
                         purpose="ServerPilot idle GPU keepalive",
@@ -4262,148 +3909,17 @@ class BrokerService:
 
             visible_gpu_ids = {gpu.id for gpu in endpoint_gpus}
 
-            # The desktop consumes one revision-consistent snapshot.  Include the
-            # generic CPU/memory resource records here instead of making the GUI
-            # stitch together several REST reads from different revisions.
-            providers = [
-                provider
-                for provider in session.scalars(
-                    select(ResourceProvider).order_by(ResourceProvider.id)
+            alert_payloads = [
+                self._alert_dict(alert)
+                for alert in session.scalars(
+                    select(Alert)
+                    .where(Alert.active.is_(True))
+                    .order_by(Alert.severity, Alert.last_seen_at.desc(), Alert.id)
                 ).all()
-                if provider.endpoint_id is None or provider.endpoint_id in visible_ids
             ]
-            provider_ids = {provider.id for provider in providers}
-            units = (
-                session.scalars(
-                    select(AllocatableUnit)
-                    .where(AllocatableUnit.provider_id.in_(provider_ids))
-                    .order_by(AllocatableUnit.id)
-                ).all()
-                if provider_ids
-                else []
-            )
-            unit_by_id = {unit.id: unit for unit in units}
-            units_by_provider: dict[str, list[AllocatableUnit]] = defaultdict(list)
-            for unit in units:
-                units_by_provider[unit.provider_id].append(unit)
-
-            resource_claim_query = select(ResourceClaimModel).where(
-                ResourceClaimModel.state.in_(("active", "blocked"))
-            )
-            if not actor.is_admin:
-                resource_claim_query = resource_claim_query.where(
-                    or_(
-                        ResourceClaimModel.actor_id == actor.id,
-                        ResourceClaimModel.project_id.in_(actor.project_ids),
-                    )
-                )
-            visible_resource_claims = session.scalars(
-                resource_claim_query.order_by(ResourceClaimModel.created_at.desc())
-            ).all()
-            visible_resource_claim_ids = {claim.id for claim in visible_resource_claims}
-            all_resource_allocations = session.scalars(
-                select(ResourceAllocation).order_by(
-                    ResourceAllocation.created_at.desc(), ResourceAllocation.id.desc()
-                )
-            ).all()
-            allocations_by_claim: dict[str, list[ResourceAllocation]] = defaultdict(list)
-            active_allocations_by_provider: dict[str, list[ResourceAllocation]] = defaultdict(list)
-            for allocation in all_resource_allocations:
-                if allocation.claim_id in visible_resource_claim_ids:
-                    allocations_by_claim[allocation.claim_id].append(allocation)
-                unit = unit_by_id.get(allocation.unit_id)
-                if allocation.state == "active" and unit is not None:
-                    active_allocations_by_provider[unit.provider_id].append(allocation)
-
-            def summed_quantities(values: Iterable[dict[str, Any]]) -> dict[str, Any]:
-                total = {
-                    "cpu_cores": 0.0,
-                    "memory_mib": 0,
-                    "gpu_count": 0,
-                    "nodes": 0,
-                    "scheduler_units": 0,
-                }
-                for value in values:
-                    total["cpu_cores"] += float(value.get("cpu_cores") or 0.0)
-                    total["memory_mib"] += int(value.get("memory_mib") or 0)
-                    total["gpu_count"] += int(value.get("gpu_count") or 0)
-                    total["nodes"] += int(value.get("nodes") or value.get("node_count") or 0)
-                    total["scheduler_units"] += int(value.get("scheduler_units") or 0)
-                total["cpu_cores"] = round(total["cpu_cores"], 1)
-                return total
-
             endpoint_payload_by_id = {item["id"]: item for item in endpoint_payloads}
             direct_commitments_by_endpoint = self._endpoint_commitment_usage(session)
-            resource_provider_payloads: list[dict[str, Any]] = []
-            for provider in providers:
-                payload = self._provider_dict(provider)
-                provider_units = units_by_provider.get(provider.id, [])
-                total = summed_quantities(
-                    {
-                        "cpu_cores": unit.total_cpu_cores,
-                        "memory_mib": unit.total_memory_mib,
-                        "gpu_count": unit.total_gpu_count,
-                    }
-                    for unit in provider_units
-                    if unit.enabled
-                )
-                committed = summed_quantities(
-                    json_load(allocation.quantities_json)
-                    for allocation in active_allocations_by_provider.get(provider.id, [])
-                )
-                available = {
-                    "cpu_cores": max(0.0, total["cpu_cores"] - committed["cpu_cores"]),
-                    "memory_mib": max(0, total["memory_mib"] - committed["memory_mib"]),
-                    "gpu_count": max(0, total["gpu_count"] - committed["gpu_count"]),
-                    "nodes": max(0, total["nodes"] - committed["nodes"]),
-                    "scheduler_units": max(
-                        0, total["scheduler_units"] - committed["scheduler_units"]
-                    ),
-                }
-                endpoint = endpoint_payload_by_id.get(provider.endpoint_id or "")
-                telemetry = host_telemetry_by_endpoint.get(provider.endpoint_id or "")
-                if provider.provider_type == "host-capacity" and endpoint is not None:
-                    direct_cpu, direct_memory = direct_commitments_by_endpoint.get(
-                        provider.endpoint_id or "", (0.0, 0)
-                    )
-                    total.update(
-                        cpu_cores=float(telemetry.cpu_count if telemetry else 0.0),
-                        memory_mib=int(telemetry.memory_total_mib if telemetry else 0),
-                    )
-                    committed.update(
-                        cpu_cores=round(committed["cpu_cores"] + direct_cpu, 1),
-                        memory_mib=committed["memory_mib"] + direct_memory,
-                    )
-                    available.update(
-                        cpu_cores=round(
-                            max(
-                                0.0,
-                                (telemetry.cpu_count - telemetry.load_1m if telemetry else 0.0)
-                                - committed["cpu_cores"],
-                            ),
-                            1,
-                        ),
-                        memory_mib=max(
-                            0,
-                            (telemetry.memory_available_mib if telemetry else 0)
-                            - committed["memory_mib"],
-                        ),
-                    )
-                    payload["state"] = endpoint["monitor"]["status"]
-                    payload["observed_at"] = _iso(telemetry.observed_at) if telemetry else None
-                elif endpoint is not None:
-                    payload["state"] = endpoint["monitor"]["status"]
-                else:
-                    payload["state"] = "PENDING" if provider.enabled else "DISABLED"
-                payload.update(total=total, committed=committed, available=available)
-                resource_provider_payloads.append(payload)
-
             host_capacity_payloads: list[dict[str, Any]] = []
-            host_provider_by_endpoint = {
-                provider.endpoint_id: provider
-                for provider in providers
-                if provider.provider_type == "host-capacity" and provider.endpoint_id is not None
-            }
             for endpoint in visible_endpoints:
                 telemetry = host_telemetry_by_endpoint.get(endpoint.id)
                 endpoint_payload = endpoint_payload_by_id[endpoint.id]
@@ -4415,41 +3931,20 @@ class BrokerService:
                     or now - observed_at
                     > timedelta(seconds=self.inventory.collector.stale_after_seconds)
                 )
-                provider = host_provider_by_endpoint.get(endpoint.id)
-                unit = (
-                    next(
-                        (
-                            candidate
-                            for candidate in units_by_provider.get(provider.id, [])
-                            if candidate.unit_type == "host"
-                        ),
-                        None,
-                    )
-                    if provider is not None
-                    else None
-                )
                 direct_cpu, direct_memory = direct_commitments_by_endpoint.get(
                     endpoint.id, (0.0, 0)
                 )
-                generic = summed_quantities(
-                    json_load(allocation.quantities_json)
-                    for allocation in active_allocations_by_provider.get(
-                        provider.id if provider is not None else "", []
-                    )
-                )
-                generic_cpu = generic["cpu_cores"]
-                generic_memory = generic["memory_mib"]
                 if telemetry is None:
                     available_cpu = None
                     available_memory = None
                 else:
                     available_cpu = max(
                         0.0,
-                        telemetry.cpu_count - telemetry.load_1m - direct_cpu - generic_cpu,
+                        telemetry.cpu_count - telemetry.load_1m - direct_cpu,
                     )
                     available_memory = max(
                         0,
-                        telemetry.memory_available_mib - direct_memory - generic_memory,
+                        telemetry.memory_available_mib - direct_memory,
                     )
                 monitor_reason = {
                     "DRAINING": "endpoint is draining and blocks new claims",
@@ -4475,8 +3970,8 @@ class BrokerService:
                     admission_reason = "no uncommitted CPU or memory capacity"
                 host_capacity_payloads.append(
                     {
-                        "provider": self._provider_dict(provider) if provider is not None else None,
-                        "unit": self._allocatable_unit_dict(unit) if unit is not None else None,
+                        "provider": None,
+                        "unit": None,
                         "endpoint": self._endpoint_dict(endpoint, server_groups=groups),
                         "monitor_status": monitor_status,
                         "admission_state": admission_state,
@@ -4497,182 +3992,13 @@ class BrokerService:
                             if telemetry
                             else None,
                             "available_memory_mib": available_memory,
-                            "committed_cpu_cores": round(direct_cpu + generic_cpu, 1),
-                            "committed_memory_mib": direct_memory + generic_memory,
+                            "committed_cpu_cores": round(direct_cpu, 1),
+                            "committed_memory_mib": direct_memory,
                             "direct_lease_cpu_cores": round(direct_cpu, 1),
                             "direct_lease_memory_mib": direct_memory,
-                            "generic_claim_cpu_cores": round(generic_cpu, 1),
-                            "generic_claim_memory_mib": generic_memory,
                         },
                     }
                 )
-
-            resource_claim_payloads: list[dict[str, Any]] = []
-            for claim in visible_resource_claims:
-                claim_allocations = allocations_by_claim.get(claim.id, [])
-                active_claim_allocations = [
-                    allocation for allocation in claim_allocations if allocation.state == "active"
-                ]
-                native_lease_ids = sorted(
-                    {
-                        allocation.native_lease_id
-                        for allocation in claim_allocations
-                        if allocation.native_lease_id is not None
-                    }
-                )
-                native_request_ids = sorted(
-                    {
-                        lease_by_id[lease_id].request_id
-                        for lease_id in native_lease_ids
-                        if lease_id in lease_by_id
-                    }
-                )
-                allocation_quantities = summed_quantities(
-                    json_load(allocation.quantities_json) for allocation in active_claim_allocations
-                )
-                payload = self._resource_claim_dict(claim)
-                payload.update(
-                    quantities=(
-                        allocation_quantities
-                        if active_claim_allocations
-                        else json_load(claim.requested_quantities_json)
-                    ),
-                    native_lease_ids=native_lease_ids,
-                    native_request_ids=native_request_ids,
-                    runtime_state=(
-                        "RUNNING"
-                        if running_lease_ids.intersection(native_lease_ids)
-                        else "ASSIGNED"
-                        if claim.state == "active"
-                        else "REQUESTED"
-                        if claim.state == "blocked"
-                        else claim.state.upper()
-                    ),
-                    allocations=[
-                        self._resource_allocation_dict(
-                            allocation,
-                            unit=unit_by_id.get(allocation.unit_id),
-                        )
-                        for allocation in claim_allocations
-                    ],
-                )
-                resource_claim_payloads.append(payload)
-
-            evaluation_query = select(ResourcePlanEvaluation)
-            if not actor.is_admin:
-                evaluation_query = evaluation_query.where(
-                    or_(
-                        ResourcePlanEvaluation.actor_id == actor.id,
-                        ResourcePlanEvaluation.project_id.in_(actor.project_ids),
-                    )
-                )
-            evaluations = session.scalars(
-                evaluation_query.order_by(ResourcePlanEvaluation.created_at.desc()).limit(
-                    RESOURCE_SNAPSHOT_HISTORY_LIMIT
-                )
-            ).all()
-            candidates_by_evaluation: dict[str, list[ResourcePlanCandidateModel]] = defaultdict(
-                list
-            )
-            if evaluations:
-                for candidate in session.scalars(
-                    select(ResourcePlanCandidateModel)
-                    .where(
-                        ResourcePlanCandidateModel.evaluation_id.in_(
-                            [evaluation.id for evaluation in evaluations]
-                        )
-                    )
-                    .order_by(
-                        ResourcePlanCandidateModel.evaluation_id,
-                        ResourcePlanCandidateModel.id,
-                    )
-                ).all():
-                    candidates_by_evaluation[candidate.evaluation_id].append(candidate)
-            actual_query = select(ResourceRunActual)
-            if not actor.is_admin:
-                actual_query = actual_query.where(
-                    or_(
-                        ResourceRunActual.actor_id == actor.id,
-                        ResourceRunActual.project_id.in_(actor.project_ids),
-                    )
-                )
-            actuals = session.scalars(
-                actual_query.order_by(ResourceRunActual.created_at.desc()).limit(
-                    RESOURCE_SNAPSHOT_HISTORY_LIMIT
-                )
-            ).all()
-
-            alert_payloads = [
-                self._alert_dict(alert)
-                for alert in session.scalars(
-                    select(Alert)
-                    .where(Alert.active.is_(True))
-                    .order_by(Alert.severity, Alert.last_seen_at.desc(), Alert.id)
-                ).all()
-            ]
-            scheduler_target_payloads = [
-                self._scheduler_target_dict(target)
-                for target in session.scalars(
-                    select(SchedulerTarget)
-                    .where(SchedulerTarget.enabled.is_(True))
-                    .order_by(SchedulerTarget.id)
-                ).all()
-            ]
-            scheduler_jobs = [
-                job
-                for job in session.scalars(
-                    select(SchedulerJob)
-                    .where(SchedulerJob.state.not_in(TERMINAL_SCHEDULER_JOB_STATES))
-                    .order_by(SchedulerJob.created_at.desc())
-                ).all()
-                if self._scheduler_job_visible(actor, job)
-            ]
-            job_events_by_id: dict[str, list[SchedulerJobEvent]] = defaultdict(list)
-            if scheduler_jobs:
-                for event in session.scalars(
-                    select(SchedulerJobEvent)
-                    .where(SchedulerJobEvent.job_id.in_([job.id for job in scheduler_jobs]))
-                    .order_by(SchedulerJobEvent.job_id, SchedulerJobEvent.id)
-                ).all():
-                    job_events_by_id[event.job_id].append(event)
-            scheduler_transfer_payloads = [
-                self._scheduler_transfer_dict(transfer)
-                for transfer in session.scalars(
-                    select(SchedulerTransfer)
-                    .where(SchedulerTransfer.state.not_in(TERMINAL_SCHEDULER_TRANSFER_STATES))
-                    .order_by(SchedulerTransfer.created_at.desc())
-                ).all()
-                if self._scheduler_transfer_visible(actor, transfer)
-            ]
-            profiles = session.scalars(
-                select(WorkloadProfile)
-                .where(WorkloadProfile.enabled.is_(True))
-                .order_by(WorkloadProfile.project_id, WorkloadProfile.id)
-            ).all()
-            grants_by_profile_id: dict[str, list[str]] = defaultdict(list)
-            if profiles:
-                for grant in session.scalars(
-                    select(WorkloadProfileGrant)
-                    .where(
-                        WorkloadProfileGrant.profile_id.in_([profile.id for profile in profiles])
-                    )
-                    .order_by(WorkloadProfileGrant.profile_id, WorkloadProfileGrant.project_id)
-                ).all():
-                    grants_by_profile_id[grant.profile_id].append(grant.project_id)
-            workload_profile_payloads = []
-            for profile in profiles:
-                grants = grants_by_profile_id[profile.id]
-                if actor.is_admin:
-                    profile_visible = True
-                else:
-                    profile_visible = any(
-                        profile.project_id == project_id
-                        or profile.grant_all_projects
-                        or project_id in grants
-                        for project_id in actor.project_ids
-                    )
-                if profile_visible:
-                    workload_profile_payloads.append(self._workload_profile_dict(profile, grants))
 
             visible_lease_payloads = [
                 lease_payloads[lease.id]
@@ -4682,7 +4008,6 @@ class BrokerService:
                     for resource in resources_by_lease[lease.id]
                 )
             ]
-            resource_actual_payloads = [self._resource_actual_dict(actual) for actual in actuals]
             resource_usage_revision = str(self._revision(session))
             active_host_capacity = [
                 card for card in host_capacity_payloads if card["admission_state"] == "available"
@@ -4738,7 +4063,7 @@ class BrokerService:
                         for card in host_capacity_payloads
                     ),
                     "lease_count": len(visible_lease_payloads),
-                    "claim_count": len(resource_claim_payloads),
+                    "claim_count": 0,
                 },
                 "available": {
                     "gpu_count": summary["available_gpus"],
@@ -4784,35 +4109,7 @@ class BrokerService:
                 "reservations": [],
                 "maintenance": [],
                 "alerts": alert_payloads,
-                "resource_providers": resource_provider_payloads,
-                "allocatable_units": [
-                    {
-                        **self._allocatable_unit_dict(unit),
-                        "quantities": {
-                            "cpu_cores": unit.total_cpu_cores or 0.0,
-                            "memory_mib": unit.total_memory_mib or 0,
-                            "gpu_count": unit.total_gpu_count,
-                        },
-                    }
-                    for unit in units
-                ],
                 "host_capacity": host_capacity_payloads,
-                "resource_claims": resource_claim_payloads,
-                "scheduler_targets": scheduler_target_payloads,
-                "scheduler_jobs": [
-                    self._scheduler_job_dict(job, job_events_by_id[job.id])
-                    for job in scheduler_jobs
-                ],
-                "scheduler_transfers": scheduler_transfer_payloads,
-                "workload_profiles": workload_profile_payloads,
-                "resource_plan_evaluations": [
-                    self._resource_plan_evaluation_dict(
-                        evaluation,
-                        candidates_by_evaluation[evaluation.id],
-                    )
-                    for evaluation in evaluations
-                ],
-                "resource_run_actuals": resource_actual_payloads,
                 "resource_usage_revision": resource_usage_revision,
                 "freshness_seconds": self.inventory.collector.stale_after_seconds,
                 "admission_boundary": "ServerPilot 只记录资源分配，不会在服务器上启动或停止任务。",
@@ -4821,26 +4118,9 @@ class BrokerService:
 
         return self._read(operation)
 
-    #: Generic-resource and external-scheduler projections.  They are advanced
-    #: compatibility surfaces rather than part of the observe/allocate path, so a
-    #: caller that never renders them can ask for a state payload without them.
-    ADVANCED_STATE_KEYS = frozenset(
-        {
-            "resource_providers",
-            "allocatable_units",
-            "scheduler_targets",
-            "scheduler_jobs",
-            "scheduler_transfers",
-            "workload_profiles",
-            "resource_plan_evaluations",
-        }
-    )
-
     def control_plane_state(
         self,
         actor: ActorContext,
-        *,
-        include_advanced: bool = True,
     ) -> dict[str, Any]:
         snapshot = self.snapshot(actor)
         data = snapshot["data"]
@@ -4858,27 +4138,9 @@ class BrokerService:
             "reservations",
             "maintenance",
             "alerts",
-            "resource_providers",
-            "allocatable_units",
             "host_capacity",
-            "resource_claims",
-            "scheduler_targets",
-            "scheduler_jobs",
-            "scheduler_transfers",
-            "workload_profiles",
             "admission_boundary",
         )
-        history_keys = (
-            "resource_plan_evaluations",
-            "resource_run_actuals",
-        )
-        if not include_advanced:
-            current_keys = tuple(
-                key for key in current_keys if key not in self.ADVANCED_STATE_KEYS
-            )
-            history_keys = tuple(
-                key for key in history_keys if key not in self.ADVANCED_STATE_KEYS
-            )
         current = {key: data[key] for key in current_keys}
         if not actor.is_admin:
 
@@ -4916,972 +4178,13 @@ class BrokerService:
             "server_time": snapshot["server_time"],
             "data": {
                 "current": current,
-                "history": {key: data[key] for key in history_keys},
+                "history": {},
             },
         }
-
-    def coordination(self, actor: ActorContext) -> dict[str, Any]:
-        """Return an agent-readable shared coordination board from one broker snapshot.
-
-        This is intentionally observational: the broker already owns fair queue
-        ordering and placement. Agents use this board to see current consumers,
-        real process attribution, and remaining capacity without appointing a
-        separate scheduler or inspecting servers themselves.
-        """
-
-        snapshot = self.snapshot(actor, compact=False)
-        data = snapshot["data"]
-        scheduler_targets = self.list_scheduler_targets(actor)["data"]
-        scheduler_jobs = self.list_scheduler_jobs(actor)["data"]
-        active_scheduler_jobs = [
-            job
-            for job in scheduler_jobs
-            if job["state"] not in {"COMPLETED", "FAILED", "CANCELLED", "TIMEOUT"}
-        ]
-        gpus: list[dict[str, Any]] = data["gpus"]
-        gpus_by_id = {gpu["id"]: gpu for gpu in gpus}
-        gpus_by_endpoint: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        for gpu in gpus:
-            gpus_by_endpoint[gpu["endpoint_id"]].append(gpu)
-
-        def average(values: Iterable[int | float | None]) -> float | None:
-            present = [float(value) for value in values if value is not None]
-            return round(sum(present) / len(present), 1) if present else None
-
-        def gpu_state_counts(values: Iterable[dict[str, Any]]) -> dict[str, int]:
-            counts: dict[str, int] = defaultdict(int)
-            for gpu in values:
-                counts[gpu["state"]] += 1
-            return dict(sorted(counts.items()))
-
-        def lease_activity(values: list[dict[str, Any]]) -> str:
-            states = {gpu["state"] for gpu in values}
-            if states.intersection({"CONFLICT", "ORPHANED_BUSY"}):
-                return "needs_attention"
-            if "BUSY_UNMANAGED" in states:
-                return "unattributed_compute"
-            if "RUNNING_MANAGED" in states:
-                return "running"
-            if values and all(gpu["state"] == "LEASED_IDLE" for gpu in values):
-                return "lease_idle"
-            if values and all(gpu["state"] == "HELD" for gpu in values):
-                return "held"
-            return "starting"
-
-        lease_cards: list[dict[str, Any]] = []
-        consumers_by_endpoint: dict[str, list[dict[str, Any]]] = defaultdict(list)
-        agents: dict[str, dict[str, Any]] = {}
-        signals: list[dict[str, Any]] = []
-        for lease in data["leases"]:
-            lease_gpus = [gpus_by_id[gpu_id] for gpu_id in lease["gpu_ids"] if gpu_id in gpus_by_id]
-            endpoint_ids = sorted({gpu["endpoint_id"] for gpu in lease_gpus})
-            activity = lease_activity(lease_gpus)
-            state_counts = gpu_state_counts(lease_gpus)
-            telemetry = [gpu["telemetry"] for gpu in lease_gpus if gpu["telemetry"] is not None]
-            card = {
-                "lease_id": lease["id"],
-                "agent_name": lease["actor_id"],
-                "project_id": lease["project_id"],
-                "task": lease["task_ref"],
-                "state": lease["state"],
-                "activity": activity,
-                "gpu_count": len(lease_gpus),
-                "servers": endpoint_ids,
-                "gpu_states": state_counts,
-                "observed_gpu_utilization_pct": average(
-                    item["gpu_utilization_pct"] for item in telemetry
-                ),
-                "observed_memory_used_mib": sum(item["memory_used_mib"] for item in telemetry),
-                "observed_process_count": sum(len(gpu["processes"]) for gpu in lease_gpus),
-                "workloads": [
-                    {
-                        "run_id": workload["run_id"],
-                        "process_key_count": len(workload["process_keys"]),
-                    }
-                    for workload in lease["workloads"]
-                ],
-                "issued_at": lease["issued_at"],
-                "expires_at": lease["expires_at"],
-            }
-            lease_cards.append(card)
-            for endpoint_id in endpoint_ids:
-                endpoint_gpu_count = sum(gpu["endpoint_id"] == endpoint_id for gpu in lease_gpus)
-                consumers_by_endpoint[endpoint_id].append(
-                    {
-                        "lease_id": card["lease_id"],
-                        "agent_name": card["agent_name"],
-                        "project_id": card["project_id"],
-                        "task": card["task"],
-                        "gpu_count": endpoint_gpu_count,
-                        "activity": card["activity"],
-                    }
-                )
-            agent = agents.setdefault(
-                lease["actor_id"],
-                {
-                    "agent_name": lease["actor_id"],
-                    "active_leases": 0,
-                    "active_workload_leases": 0,
-                    "leased_gpus": 0,
-                    "managed_running_gpus": 0,
-                    "idle_leased_gpus": 0,
-                    "projects": set(),
-                    "servers": set(),
-                },
-            )
-            agent["active_leases"] += 1
-            agent["active_workload_leases"] += 1
-            agent["leased_gpus"] += len(lease_gpus)
-            agent["managed_running_gpus"] += state_counts.get("RUNNING_MANAGED", 0)
-            agent["idle_leased_gpus"] += state_counts.get("LEASED_IDLE", 0)
-            agent["projects"].add(lease["project_id"])
-            agent["servers"].update(endpoint_ids)
-            if activity == "lease_idle":
-                signals.append(
-                    {
-                        "kind": "lease_idle",
-                        "severity": "info",
-                        "lease_id": lease["id"],
-                        "agent_name": lease["actor_id"],
-                        "message": "active lease has no observed compute process yet",
-                    }
-                )
-            elif activity == "unattributed_compute":
-                signals.append(
-                    {
-                        "kind": "unattributed_compute",
-                        "severity": "warning",
-                        "lease_id": lease["id"],
-                        "agent_name": lease["actor_id"],
-                        "message": "compute process is observed but not bound to this lease",
-                    }
-                )
-            elif activity == "needs_attention":
-                signals.append(
-                    {
-                        "kind": "lease_conflict",
-                        "severity": "critical",
-                        "lease_id": lease["id"],
-                        "agent_name": lease["actor_id"],
-                        "message": "lease has a process-attribution or expiry conflict",
-                    }
-                )
-
-        server_cards: list[dict[str, Any]] = []
-        for endpoint in data["endpoints"]:
-            endpoint_gpus = gpus_by_endpoint[endpoint["id"]]
-            endpoint_telemetry = [
-                gpu["telemetry"] for gpu in endpoint_gpus if gpu["telemetry"] is not None
-            ]
-            state_counts = gpu_state_counts(endpoint_gpus)
-            workload_leased_gpu_count = sum(gpu["lease"] is not None for gpu in endpoint_gpus)
-            keepalive_owned_gpu_count = sum(
-                gpu["keepalive"]["lease_id"] is not None for gpu in endpoint_gpus
-            )
-            host = endpoint["host_telemetry"]
-            server_cards.append(
-                {
-                    "server_id": endpoint["id"],
-                    "workspace_path": endpoint["workspace_path"],
-                    "monitor_status": endpoint["monitor"]["status"],
-                    "host_telemetry": host,
-                    "capacity": {
-                        "total_gpus": len(endpoint_gpus),
-                        "available_gpus": sum(
-                            self._gpu_payload_is_publicly_available(gpu) for gpu in endpoint_gpus
-                        ),
-                        # Compatibility: leased_gpus has always meant visible
-                        # workload leases. Internal keepalive ownership is
-                        # intentionally counted separately below.
-                        "leased_gpus": workload_leased_gpu_count,
-                        "workload_leased_gpus": workload_leased_gpu_count,
-                        "keepalive_owned_gpus": keepalive_owned_gpu_count,
-                        "verified_keepalive_gpus": state_counts.get("KEEPALIVE", 0),
-                        "managed_running_gpus": state_counts.get("RUNNING_MANAGED", 0),
-                        "idle_leased_gpus": state_counts.get("LEASED_IDLE", 0),
-                        "unattributed_compute_gpus": state_counts.get("BUSY_UNMANAGED", 0),
-                        "gpu_states": state_counts,
-                        "observed_gpu_utilization_pct": average(
-                            item["gpu_utilization_pct"] for item in endpoint_telemetry
-                        ),
-                        "available_cpu_cores": round(
-                            max(0.0, host["cpu_count"] - host["load_1m"]), 1
-                        )
-                        if host
-                        else None,
-                        "available_memory_mib": host["memory_available_mib"] if host else None,
-                        "total_system_memory_mib": host["memory_total_mib"] if host else None,
-                        "total_vram_mib": sum(gpu["total_vram_mib"] for gpu in endpoint_gpus),
-                        "observed_memory_used_mib": sum(
-                            item["memory_used_mib"] for item in endpoint_telemetry
-                        ),
-                        "observed_memory_free_mib": sum(
-                            item["memory_free_mib"] for item in endpoint_telemetry
-                        ),
-                    },
-                    "consumers": sorted(
-                        consumers_by_endpoint[endpoint["id"]],
-                        key=lambda item: (item["agent_name"], item["lease_id"]),
-                    ),
-                }
-            )
-
-        for request in data["requests"]:
-            signals.append(
-                {
-                    "kind": "queued_request",
-                    "severity": "info",
-                    "request_id": request["id"],
-                    "project_id": request["project_id"],
-                    "task": request["task_ref"],
-                    "gpu_count": request["constraints"]["gpu_count"],
-                    "message": request["blocked_reason"] or "waiting for scheduler placement",
-                }
-            )
-        for job in active_scheduler_jobs:
-            signals.append(
-                {
-                    "kind": "external_scheduler_job",
-                    "severity": (
-                        "warning" if job["state"] in {"UNKNOWN", "ACCESS_REQUIRED"} else "info"
-                    ),
-                    "scheduler_job_id": job["id"],
-                    "target_id": job["target_id"],
-                    "project_id": job["project_id"],
-                    "task": job["task_ref"],
-                    "state": job["state"],
-                    "message": (
-                        job["error_message"]
-                        or "external scheduler owns placement; this is not a raw GPU lease"
-                    ),
-                }
-            )
-
-        agent_cards = [
-            {
-                **agent,
-                "projects": sorted(agent["projects"]),
-                "servers": sorted(agent["servers"]),
-            }
-            for agent in agents.values()
-        ]
-        agent_cards.sort(key=lambda item: item["agent_name"])
-        lease_cards.sort(key=lambda item: (item["agent_name"], item["lease_id"]))
-        signals.sort(key=lambda item: (item["severity"], item.get("agent_name", ""), item["kind"]))
-        total_telemetry = [gpu["telemetry"] for gpu in gpus if gpu["telemetry"] is not None]
-        coordination_summary = {
-            **data["summary"],
-            # Compatibility: active_leases remains the visible workload lease
-            # count. Keepalive ownership is reported by keepalive_owned_gpus.
-            "active_leases": len(lease_cards),
-            "active_workload_leases": len(lease_cards),
-            "active_agents": len(agent_cards),
-            "queued_requests": len(data["requests"]),
-            "queued_gpus": sum(item["constraints"]["gpu_count"] for item in data["requests"]),
-            "external_scheduler_targets": len(scheduler_targets),
-            "external_scheduler_jobs": len(active_scheduler_jobs),
-            "external_scheduler_pending_jobs": sum(
-                job["state"] == "PENDING" for job in active_scheduler_jobs
-            ),
-            "external_scheduler_running_jobs": sum(
-                job["state"] == "RUNNING" for job in active_scheduler_jobs
-            ),
-            "managed_running_gpus": sum(
-                item["gpu_states"].get("RUNNING_MANAGED", 0) for item in lease_cards
-            ),
-            "idle_leased_gpus": sum(
-                item["gpu_states"].get("LEASED_IDLE", 0) for item in lease_cards
-            ),
-            "observed_gpu_utilization_pct": average(
-                item["gpu_utilization_pct"] for item in total_telemetry
-            ),
-        }
-        return {
-            **snapshot,
-            "data": {
-                "summary": coordination_summary,
-                "servers": server_cards,
-                "agents": agent_cards,
-                "leases": lease_cards,
-                "queue": data["requests"],
-                "scheduler_targets": scheduler_targets,
-                "scheduler_jobs": active_scheduler_jobs,
-                "signals": signals,
-                "guidance": (
-                    "这是只读协作面板。active_leases 只统计工作任务租约；"
-                    "keepalive_owned_gpus 统计内部空闲占卡。available_gpus 同时包含空闲 GPU 和"
-                    "已确认的逐卡占卡 GPU；真正分配前会停止选中卡的占卡程序、刷新确认，"
-                    "再进入普通申请路径。任务占用和冲突 GPU 不可用。"
-                ),
-            },
-        }
-
-    def list_resources(self, actor: ActorContext) -> dict[str, Any]:
-        """Return a unified read-only resource board for agents and humans."""
-
-        def operation(session: Session) -> dict[str, Any]:
-            now = utcnow()
-            host_capacity = self._host_capacity_cards(session, now)
-            claims = session.scalars(
-                select(ResourceClaimModel).order_by(ResourceClaimModel.created_at.desc())
-            ).all()
-            allocations = session.execute(
-                select(ResourceAllocation, AllocatableUnit)
-                .join(AllocatableUnit, AllocatableUnit.id == ResourceAllocation.unit_id)
-                .order_by(ResourceAllocation.created_at.desc(), ResourceAllocation.id.desc())
-            ).all()
-            evaluations = session.scalars(
-                select(ResourcePlanEvaluation).order_by(ResourcePlanEvaluation.created_at.desc())
-            ).all()
-            candidates_by_evaluation: dict[str, list[ResourcePlanCandidateModel]] = defaultdict(
-                list
-            )
-            if evaluations:
-                for candidate in session.scalars(
-                    select(ResourcePlanCandidateModel)
-                    .where(
-                        ResourcePlanCandidateModel.evaluation_id.in_(
-                            [evaluation.id for evaluation in evaluations]
-                        )
-                    )
-                    .order_by(
-                        ResourcePlanCandidateModel.evaluation_id, ResourcePlanCandidateModel.id
-                    )
-                ).all():
-                    candidates_by_evaluation[candidate.evaluation_id].append(candidate)
-            active_claims = [claim for claim in claims if claim.state == "active"]
-            active_allocations = [
-                (allocation, unit)
-                for allocation, unit in allocations
-                if allocation.state == "active"
-            ]
-            summary = {
-                "resource_provider_count": session.scalar(
-                    select(func.count()).select_from(ResourceProvider)
-                )
-                or 0,
-                "host_capacity_units": len(host_capacity),
-                "available_host_capacity_units": sum(
-                    card["admission_state"] == "available" for card in host_capacity
-                ),
-                "active_resource_claims": len(active_claims),
-                "active_resource_allocations": len(active_allocations),
-                "available_cpu_cores": round(
-                    sum(
-                        card["capacity"]["available_cpu_cores"] or 0.0
-                        for card in host_capacity
-                        if card["admission_state"] == "available"
-                    ),
-                    1,
-                ),
-                "available_memory_mib": sum(
-                    card["capacity"]["available_memory_mib"] or 0
-                    for card in host_capacity
-                    if card["admission_state"] == "available"
-                ),
-            }
-            return self.envelope(
-                session,
-                {
-                    "summary": summary,
-                    "host_capacity": host_capacity,
-                    "claims": [self._resource_claim_dict(claim) for claim in claims],
-                    "allocations": [
-                        self._resource_allocation_dict(allocation, unit=unit)
-                        for allocation, unit in allocations
-                    ],
-                    "plan_evaluations": [
-                        self._resource_plan_evaluation_dict(
-                            evaluation,
-                            candidates_by_evaluation[evaluation.id],
-                        )
-                        for evaluation in evaluations
-                    ],
-                    "admission_boundary": (
-                        "Generic host-capacity claims coordinate CPU and memory only; they do not "
-                        "authorize workload launch or remote shell execution."
-                    ),
-                },
-            )
-
-        return self._read(operation)
 
     # Public resource contracts are thin projections over the one domain-owned
     # monitor.  Keeping them here avoids a second scheduler state path in the
     # REST/MCP adapters while retaining the compatibility GPU endpoints.
-    def resource_monitor(
-        self, actor: ActorContext, *, project_id: str | None = None
-    ) -> dict[str, Any]:
-        data = self.list_resources(actor)
-        if project_id is None:
-            return data
-        monitor = data["data"]
-        monitor["claims"] = [
-            claim for claim in monitor["claims"] if claim["project_id"] == project_id
-        ]
-        monitor["allocations"] = [
-            allocation
-            for allocation in monitor["allocations"]
-            if allocation["claim_id"] in {claim["id"] for claim in monitor["claims"]}
-        ]
-        monitor["plan_evaluations"] = [
-            evaluation
-            for evaluation in monitor["plan_evaluations"]
-            if evaluation["project_id"] == project_id
-        ]
-        return data
-
-    def list_resource_providers(
-        self,
-        actor: ActorContext,
-        *,
-        provider_type: str | None = None,
-        enabled: bool | None = None,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            providers = session.scalars(
-                select(ResourceProvider).order_by(ResourceProvider.id)
-            ).all()
-            data = [
-                {
-                    "id": provider.id,
-                    "provider_type": provider.provider_type,
-                    "display_name": provider.display_name,
-                    "endpoint_id": provider.endpoint_id,
-                    "scheduler_target_id": provider.scheduler_target_id,
-                    "native_ref": json_load(provider.native_ref_json),
-                    "enabled": provider.enabled,
-                    "created_at": _iso(provider.created_at),
-                    "updated_at": _iso(provider.updated_at),
-                }
-                for provider in providers
-                if (provider_type is None or provider.provider_type == provider_type)
-                and (enabled is None or provider.enabled is enabled)
-            ]
-            return self.envelope(session, data)
-
-        return self._read(operation)
-
-    def list_resource_claims(
-        self,
-        actor: ActorContext,
-        *,
-        project_id: str | None = None,
-        state: str | None = None,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            claims = session.scalars(
-                select(ResourceClaimModel).order_by(ResourceClaimModel.created_at.desc())
-            ).all()
-            data = [
-                self._resource_claim_dict(claim)
-                for claim in claims
-                if (
-                    actor.is_admin
-                    or claim.actor_id == actor.id
-                    or claim.project_id in actor.project_ids
-                )
-                and (project_id is None or claim.project_id == project_id)
-                and (state is None or claim.state == state)
-            ]
-            return self.envelope(session, data)
-
-        return self._read(operation)
-
-    def list_resource_plan_evaluations(
-        self, actor: ActorContext, *, project_id: str | None = None
-    ) -> dict[str, Any]:
-        return self.resource_monitor(actor, project_id=project_id)
-
-    def list_resource_run_actuals(
-        self,
-        actor: ActorContext,
-        *,
-        project_id: str | None = None,
-        task_ref: str | None = None,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            actuals = session.scalars(
-                select(ResourceRunActual).order_by(ResourceRunActual.created_at.desc())
-            ).all()
-            data = [
-                self._resource_actual_dict(actual)
-                for actual in actuals
-                if (
-                    actor.is_admin
-                    or actual.actor_id == actor.id
-                    or actual.project_id in actor.project_ids
-                )
-                and (project_id is None or actual.project_id == project_id)
-                and (task_ref is None or actual.task_ref == task_ref)
-            ]
-            return self.envelope(session, data)
-
-        return self._read(operation)
-
-    def claim_resource(
-        self, actor: ActorContext, claim_data: ResourceClaimInput, *, idempotency_key: str
-    ) -> dict[str, Any]:
-        return self.create_resource_claim(actor, claim_data, idempotency_key=idempotency_key)
-
-    def create_resource_claim(
-        self,
-        actor: ActorContext,
-        claim_data: ResourceClaimInput,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session,
-                actor=actor,
-                action="resource_claim.create",
-                key=idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            project = self._ensure_claim_project(session, claim_data.project_id, now)
-            if not project.enabled:
-                raise BrokerError("project_disabled", "project is disabled", status_code=409)
-            if (
-                claim_data.quantities.gpu_count
-                or claim_data.quantities.nodes
-                or claim_data.quantities.scheduler_units
-            ):
-                raise BrokerError(
-                    "generic_provider_not_implemented",
-                    "generic direct-gpu and scheduler claims are exposed through the existing GPU and Slurm APIs",
-                    status_code=422,
-                )
-            provider_type = claim_data.provider_type or "host-capacity"
-            if provider_type != "host-capacity":
-                raise BrokerError(
-                    "unsupported_resource_provider",
-                    "this service method currently allocates host-capacity claims only",
-                    status_code=422,
-                )
-            revision = self._bump_revision(session, now)
-            selected, candidates = self._select_host_capacity_unit(session, claim_data, now=now)
-            if selected is None:
-                raise BrokerError(
-                    "no_capacity",
-                    "no idle CPU or memory capacity matches this claim",
-                    status_code=409,
-                )
-            claim = ResourceClaimModel(
-                id=secrets.token_hex(16),
-                actor_id=actor.id,
-                project_id=claim_data.project_id,
-                task_ref=claim_data.task_ref,
-                purpose=claim_data.purpose,
-                provider_type="host-capacity",
-                requested_quantities_json=json_dump(
-                    self._resource_quantities_dict(claim_data.quantities)
-                ),
-                forecast_json=(
-                    json_dump(claim_data.forecast.model_dump(mode="json"))
-                    if claim_data.forecast is not None
-                    else None
-                ),
-                state="active",
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(claim)
-            session.flush()
-            allocation = None
-            if selected is not None and selected["unit"] is not None:
-                allocation = ResourceAllocation(
-                    claim_id=claim.id,
-                    unit_id=selected["unit"]["id"],
-                    native_lease_id=None,
-                    native_scheduler_job_id=None,
-                    quantities_json=json_dump(
-                        self._resource_quantities_dict(claim_data.quantities)
-                    ),
-                    state="active",
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(allocation)
-            session.flush()
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action=("resource_claim.allocated"),
-                resource_type="resource_claim",
-                resource_id=claim.id,
-                result="success",
-                after=self._resource_claim_dict(claim),
-                summary={
-                    "project_id": claim.project_id,
-                    "task_ref": claim.task_ref,
-                    "provider_type": claim.provider_type,
-                    "selected_unit_id": selected["unit"]["id"]
-                    if selected and selected["unit"]
-                    else None,
-                    "candidate_count": len(candidates),
-                    "excluded": {
-                        item["endpoint"]["id"]: item["excluded_reason"]
-                        for item in candidates
-                        if item["excluded_reason"]
-                    },
-                },
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "claim": self._resource_claim_dict(claim),
-                "allocation": (
-                    self._resource_allocation_dict(
-                        allocation,
-                        unit=session.get(AllocatableUnit, allocation.unit_id),
-                    )
-                    if allocation is not None
-                    else None
-                ),
-                "candidates": candidates,
-                "authority": (
-                    "Host-capacity allocation coordinates CPU and memory only; workload launch "
-                    "still requires the applicable project/owner authorization."
-                ),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="resource_claim.create",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def release_resource_claim(
-        self,
-        actor: ActorContext,
-        claim_id: str,
-        *,
-        reason: str,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-        if not reason.strip():
-            raise BrokerError(
-                "release_reason_required", "a release reason is required", status_code=422
-            )
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session,
-                actor=actor,
-                action="resource_claim.release",
-                key=idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            claim = session.get(ResourceClaimModel, claim_id)
-            if claim is None:
-                raise BrokerError(
-                    "resource_claim_not_found", "resource claim does not exist", status_code=404
-                )
-            if claim.actor_id != actor.id and not actor.is_admin:
-                raise BrokerError(
-                    "resource_claim_forbidden",
-                    "cannot release another actor's resource claim",
-                    status_code=403,
-                )
-            if claim.state in {"released", "cancelled"}:
-                raise BrokerError(
-                    "resource_claim_already_released",
-                    "resource claim is already terminal",
-                    status_code=409,
-                )
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            before = self._resource_claim_dict(claim)
-            claim.state = "released"
-            claim.updated_at = now
-            rows = session.execute(
-                select(ResourceAllocation, AllocatableUnit)
-                .join(AllocatableUnit, AllocatableUnit.id == ResourceAllocation.unit_id)
-                .where(ResourceAllocation.claim_id == claim.id)
-            ).all()
-            for allocation, _unit in rows:
-                if allocation.state == "active":
-                    allocation.state = "released"
-                    allocation.updated_at = now
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="resource_claim.released",
-                resource_type="resource_claim",
-                resource_id=claim.id,
-                result="success",
-                before=before,
-                after=self._resource_claim_dict(claim),
-                summary={"reason": reason.strip()[:500]},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "claim": self._resource_claim_dict(claim),
-                "allocations": [
-                    self._resource_allocation_dict(allocation, unit=unit)
-                    for allocation, unit in rows
-                ],
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="resource_claim.release",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def evaluate_resource_plan(
-        self,
-        actor: ActorContext,
-        evaluation_data: ResourcePlanEvaluationInput,
-        *,
-        idempotency_key: str,
-        claim_id: str | None = None,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session,
-                actor=actor,
-                action="resource_plan.evaluate",
-                key=idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            project = self._ensure_claim_project(session, evaluation_data.project_id, now)
-            if not project.enabled:
-                raise BrokerError("project_disabled", "project is disabled", status_code=409)
-            planner_candidates = [
-                ResourcePlanCandidate(
-                    id=candidate.candidate_key,
-                    provider_kind=candidate.provider_type or "host-capacity",
-                    predicted_remaining_seconds=candidate.predicted_runtime_seconds,
-                    forecast_basis="agent supplied resource frontier",
-                    cpu_cores=candidate.quantities.cpu_cores,
-                    memory_mib=candidate.quantities.memory_mib,
-                    gpu_count=candidate.quantities.gpu_count,
-                    nodes=candidate.quantities.nodes + candidate.quantities.scheduler_units,
-                )
-                for candidate in evaluation_data.candidates
-            ]
-            selection = select_smallest_useful_plan(
-                planner_candidates,
-                min_saved_fraction=evaluation_data.marginal_min_saved_ratio,
-                min_saved_seconds=evaluation_data.marginal_min_saved_seconds,
-            )
-            selected_key = selection.selected.id
-            revision = self._bump_revision(session, now)
-            evaluation = ResourcePlanEvaluation(
-                id=secrets.token_hex(16),
-                claim_id=claim_id,
-                actor_id=actor.id,
-                project_id=evaluation_data.project_id,
-                task_ref=evaluation_data.task_ref,
-                baseline_runtime_seconds=evaluation_data.baseline_runtime_seconds,
-                marginal_min_saved_seconds=evaluation_data.marginal_min_saved_seconds,
-                marginal_min_saved_ratio=evaluation_data.marginal_min_saved_ratio,
-                selected_candidate_key=selected_key,
-                forecast_json=json_dump(
-                    {
-                        "policy": "smallest-feasible-with-marginal-benefit",
-                        "decision_thresholds": {
-                            "min_saved_ratio": evaluation_data.marginal_min_saved_ratio,
-                            "min_saved_seconds": evaluation_data.marginal_min_saved_seconds,
-                        },
-                    }
-                ),
-                created_at=now,
-            )
-            session.add(evaluation)
-            session.flush()
-            decision_by_key = {decision.candidate_id: decision for decision in selection.decisions}
-            stored_candidates: list[ResourcePlanCandidateModel] = []
-            for input_candidate in evaluation_data.candidates:
-                decision = decision_by_key.get(input_candidate.candidate_key)
-                selected = input_candidate.candidate_key == selected_key
-                predicted_saved_seconds = max(
-                    0,
-                    evaluation_data.baseline_runtime_seconds
-                    - input_candidate.predicted_runtime_seconds,
-                )
-                predicted_saved_ratio = (
-                    predicted_saved_seconds / evaluation_data.baseline_runtime_seconds
-                )
-                satisfies = decision.selected if decision is not None else False
-                rejection_reason = None
-                if not selected:
-                    rejection_reason = (
-                        decision.reason
-                        if decision is not None
-                        else "not-reached-after-marginal-stop"
-                    )
-                candidate = ResourcePlanCandidateModel(
-                    evaluation_id=evaluation.id,
-                    candidate_key=input_candidate.candidate_key,
-                    provider_type=input_candidate.provider_type,
-                    quantities_json=json_dump(input_candidate.quantities.model_dump(mode="json")),
-                    predicted_runtime_seconds=input_candidate.predicted_runtime_seconds,
-                    predicted_saved_seconds=predicted_saved_seconds,
-                    predicted_saved_ratio=predicted_saved_ratio,
-                    satisfies_marginal_threshold=satisfies,
-                    selected=selected,
-                    rejection_reason=rejection_reason,
-                )
-                session.add(candidate)
-                stored_candidates.append(candidate)
-            session.flush()
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="resource_plan.evaluated",
-                resource_type="resource_plan",
-                resource_id=evaluation.id,
-                result="success",
-                after=self._resource_plan_evaluation_dict(evaluation, stored_candidates),
-                summary={
-                    "project_id": evaluation.project_id,
-                    "task_ref": evaluation.task_ref,
-                    "selected_candidate_key": selected_key,
-                    "candidate_count": len(stored_candidates),
-                },
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "evaluation": self._resource_plan_evaluation_dict(evaluation, stored_candidates),
-                "decisions": [
-                    {
-                        "candidate_key": decision.candidate_id,
-                        "selected": decision.selected,
-                        "reason": decision.reason,
-                        "saved_seconds": decision.saved_seconds,
-                        "saved_ratio": decision.saved_fraction,
-                    }
-                    for decision in selection.decisions
-                ],
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="resource_plan.evaluate",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def record_resource_run_actual(
-        self,
-        actor: ActorContext,
-        actual_data: ResourceRunActualInput,
-        *,
-        idempotency_key: str,
-        evaluation_id: str | None = None,
-        claim_id: str | None = None,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session,
-                actor=actor,
-                action="resource_run_actual.record",
-                key=idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            project = self._ensure_claim_project(session, actual_data.project_id, now)
-            if not project.enabled:
-                raise BrokerError("project_disabled", "project is disabled", status_code=409)
-            if (
-                evaluation_id is not None
-                and session.get(ResourcePlanEvaluation, evaluation_id) is None
-            ):
-                raise BrokerError(
-                    "resource_plan_not_found",
-                    "resource plan evaluation does not exist",
-                    status_code=404,
-                )
-            if claim_id is not None and session.get(ResourceClaimModel, claim_id) is None:
-                raise BrokerError(
-                    "resource_claim_not_found",
-                    "resource claim does not exist",
-                    status_code=404,
-                )
-            revision = self._bump_revision(session, now)
-            actual = ResourceRunActual(
-                evaluation_id=evaluation_id,
-                claim_id=claim_id,
-                actor_id=actor.id,
-                project_id=actual_data.project_id,
-                task_ref=actual_data.task_ref,
-                started_at=ensure_utc(actual_data.started_at),
-                completed_at=(
-                    ensure_utc(actual_data.completed_at)
-                    if actual_data.completed_at is not None
-                    else None
-                ),
-                actual_duration_seconds=actual_data.actual_duration_seconds,
-                quantities_json=json_dump(actual_data.quantities.model_dump(mode="json")),
-                outcome=actual_data.outcome,
-                notes_json=json_dump({}),
-                created_at=now,
-            )
-            session.add(actual)
-            session.flush()
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="resource_run_actual.recorded",
-                resource_type="resource_run_actual",
-                resource_id=str(actual.id),
-                result="success",
-                after=self._resource_actual_dict(actual),
-                summary={"project_id": actual.project_id, "task_ref": actual.task_ref},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "actual": self._resource_actual_dict(actual),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="resource_run_actual.record",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
     def list_endpoints(self, actor: ActorContext) -> dict[str, Any]:
         snapshot = self.snapshot(actor)
         return {**snapshot, "data": snapshot["data"]["endpoints"]}
@@ -5904,108 +4207,6 @@ class BrokerService:
         )
         values = snapshot["data"]["gpus"]
         return {**snapshot, "data": values}
-
-    def gpu_history(
-        self,
-        actor: ActorContext,
-        gpu_id: str,
-        *,
-        window_seconds: int = 3600,
-        max_points: int = 120,
-    ) -> dict[str, Any]:
-        """Return a bounded, downsampled series only when a GPU detail view asks for it."""
-
-        if not 300 <= window_seconds <= TELEMETRY_HISTORY_RETENTION_SECONDS:
-            raise BrokerError(
-                "invalid_history_window",
-                "history window must be between 5 minutes and 24 hours",
-                status_code=422,
-            )
-        if not 10 <= max_points <= 120:
-            raise BrokerError(
-                "invalid_history_points",
-                "history points must be between 10 and 120",
-                status_code=422,
-            )
-
-        def operation(session: Session) -> dict[str, Any]:
-            gpu = session.get(GPUDevice, gpu_id)
-            if gpu is None:
-                raise BrokerError(
-                    "gpu_not_found", "GPU is not visible or does not exist", status_code=404
-                )
-            now = utcnow()
-            cutoff = now - timedelta(seconds=window_seconds)
-            samples: list[TelemetryCurrent | TelemetrySnapshot] = list(
-                session.scalars(
-                    select(TelemetrySnapshot)
-                    .where(
-                        TelemetrySnapshot.gpu_id == gpu_id,
-                        TelemetrySnapshot.observed_at >= cutoff,
-                    )
-                    .order_by(TelemetrySnapshot.observed_at, TelemetrySnapshot.id)
-                ).all()
-            )
-            current = session.get(TelemetryCurrent, gpu_id)
-            current_observed_at = _as_utc(current.observed_at) if current is not None else None
-            if (
-                current is not None
-                and current_observed_at is not None
-                and current_observed_at >= cutoff
-                and (not samples or current_observed_at > (_as_utc(samples[-1].observed_at) or now))
-            ):
-                samples.append(current)
-
-            buckets: list[list[TelemetryCurrent | TelemetrySnapshot]]
-            if len(samples) <= max_points:
-                buckets = [[sample] for sample in samples]
-            else:
-                buckets = [
-                    samples[
-                        index * len(samples) // max_points : (index + 1)
-                        * len(samples)
-                        // max_points
-                    ]
-                    for index in range(max_points)
-                ]
-
-            def average(
-                bucket: list[TelemetryCurrent | TelemetrySnapshot], name: str
-            ) -> float | None:
-                values = [getattr(sample, name) for sample in bucket]
-                present = [float(value) for value in values if value is not None]
-                return round(sum(present) / len(present), 2) if present else None
-
-            points = []
-            for bucket in buckets:
-                used = average(bucket, "memory_used_mib")
-                points.append(
-                    {
-                        "observed_at": _iso(bucket[-1].observed_at),
-                        "gpu_utilization_pct": average(bucket, "gpu_utilization_pct"),
-                        "memory_used_pct": (
-                            round((used or 0) * 100 / gpu.total_vram_mib, 2)
-                            if gpu.total_vram_mib
-                            else None
-                        ),
-                        "memory_used_mib": used,
-                        "temperature_c": average(bucket, "temperature_c"),
-                        "power_watts": average(bucket, "power_watts"),
-                    }
-                )
-            return self.envelope(
-                session,
-                {
-                    "gpu_id": gpu.id,
-                    "endpoint_id": gpu.endpoint_id,
-                    "gpu_index": gpu.gpu_index,
-                    "window_seconds": window_seconds,
-                    "point_count": len(points),
-                    "points": points,
-                },
-            )
-
-        return self._read(operation)
 
     def endpoint_history(
         self,
@@ -6432,7 +4633,6 @@ class BrokerService:
                 host_telemetry.memory_limit_mib = observation.host.memory_limit_mib
                 host_telemetry.memory_current_mib = observation.host.memory_current_mib
                 host_telemetry.provider = provider
-            self._ensure_host_capacity_unit(session, endpoint, host_telemetry, now=now)
             gpu_ids = list(observed_gpu_ids)
             existing_gpus = {
                 gpu.id: gpu
@@ -7072,29 +5272,6 @@ class BrokerService:
             )
         return usage
 
-    @staticmethod
-    def _active_generic_host_usage(session: Session) -> dict[str, tuple[float, int]]:
-        usage: dict[str, tuple[float, int]] = {}
-        rows = session.execute(
-            select(ResourceAllocation, AllocatableUnit)
-            .join(AllocatableUnit, AllocatableUnit.id == ResourceAllocation.unit_id)
-            .where(
-                ResourceAllocation.state == "active",
-                AllocatableUnit.unit_type == "host",
-                AllocatableUnit.endpoint_id.is_not(None),
-            )
-        ).all()
-        for allocation, unit in rows:
-            if unit.endpoint_id is None:
-                continue
-            quantities = json_load(allocation.quantities_json)
-            cpu, memory = usage.get(unit.endpoint_id, (0.0, 0))
-            usage[unit.endpoint_id] = (
-                cpu + float(quantities.get("cpu_cores") or 0.0),
-                memory + int(quantities.get("memory_mib") or 0),
-            )
-        return usage
-
     def _endpoint_monitor_status(
         self,
         session: Session,
@@ -7120,91 +5297,17 @@ class BrokerService:
             return "STALE", "collector success is stale"
         return "ONLINE", None
 
-    def _ensure_host_capacity_unit(
-        self,
-        session: Session,
-        endpoint: Endpoint,
-        telemetry: EndpointTelemetryCurrent,
-        *,
-        now: datetime,
-    ) -> AllocatableUnit:
-        provider_id = f"host-capacity:endpoint:{endpoint.id}"
-        provider = session.get(ResourceProvider, provider_id)
-        if provider is None:
-            provider = ResourceProvider(
-                id=provider_id,
-                provider_type="host-capacity",
-                display_name=f"{endpoint.id} host capacity",
-                endpoint_id=endpoint.id,
-                scheduler_target_id=None,
-                native_ref_json=json_dump({"endpoint_id": endpoint.id}),
-                metadata_json=json_dump({}),
-                enabled=True,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(provider)
-        else:
-            provider.display_name = f"{endpoint.id} host capacity"
-            provider.native_ref_json = json_dump({"endpoint_id": endpoint.id})
-            provider.updated_at = now
-
-        unit_id = f"{provider_id}:host"
-        unit = session.get(AllocatableUnit, unit_id)
-        if unit is None:
-            unit = AllocatableUnit(
-                id=unit_id,
-                provider_id=provider_id,
-                unit_key="host",
-                unit_type="host",
-                endpoint_id=endpoint.id,
-                gpu_id=None,
-                scheduler_target_id=None,
-                total_gpu_count=0,
-                total_cpu_cores=float(telemetry.cpu_count),
-                total_memory_mib=telemetry.memory_total_mib,
-                total_vram_mib=None,
-                labels_json=endpoint.labels_json,
-                native_ref_json=json_dump({"endpoint_id": endpoint.id}),
-                state="available",
-                enabled=True,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(unit)
-        else:
-            unit.total_cpu_cores = float(telemetry.cpu_count)
-            unit.total_memory_mib = telemetry.memory_total_mib
-            unit.labels_json = endpoint.labels_json
-            unit.native_ref_json = json_dump({"endpoint_id": endpoint.id})
-            unit.state = "available"
-            unit.updated_at = now
-        session.flush()
-        return unit
-
     def _host_capacity_cards(
         self,
         session: Session,
         now: datetime,
-        *,
-        ensure_units: bool = False,
     ) -> list[dict[str, Any]]:
         direct_usage = self._endpoint_commitment_usage(session)
-        generic_usage = self._active_generic_host_usage(session)
         values: list[dict[str, Any]] = []
         endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
         for endpoint in endpoints:
             telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
             monitor_status, monitor_reason = self._endpoint_monitor_status(session, endpoint, now)
-            unit = None
-            if ensure_units:
-                unit = (
-                    self._ensure_host_capacity_unit(session, endpoint, telemetry, now=now)
-                    if telemetry is not None
-                    else None
-                )
-            elif telemetry is not None:
-                unit = session.get(AllocatableUnit, f"host-capacity:endpoint:{endpoint.id}:host")
             observed_at = _as_utc(telemetry.observed_at) if telemetry is not None else None
             telemetry_stale = (
                 telemetry is None
@@ -7213,16 +5316,15 @@ class BrokerService:
                 > timedelta(seconds=self.inventory.collector.stale_after_seconds)
             )
             direct_cpu, direct_memory = direct_usage.get(endpoint.id, (0.0, 0))
-            generic_cpu, generic_memory = generic_usage.get(endpoint.id, (0.0, 0))
             if telemetry is None:
                 available_cpu = None
                 available_memory = None
             else:
                 observed_available_cpu = max(0.0, telemetry.cpu_count - telemetry.load_1m)
-                available_cpu = max(0.0, observed_available_cpu - direct_cpu - generic_cpu)
+                available_cpu = max(0.0, observed_available_cpu - direct_cpu)
                 available_memory = max(
                     0,
-                    telemetry.memory_available_mib - direct_memory - generic_memory,
+                    telemetry.memory_available_mib - direct_memory,
                 )
             admission_state = "available"
             admission_reason = None
@@ -7235,11 +5337,10 @@ class BrokerService:
             elif available_cpu == 0 and available_memory == 0:
                 admission_state = "blocked"
                 admission_reason = "no uncommitted CPU or memory capacity"
-            provider = session.get(ResourceProvider, unit.provider_id) if unit is not None else None
             values.append(
                 {
-                    "provider": self._provider_dict(provider) if provider is not None else None,
-                    "unit": self._allocatable_unit_dict(unit) if unit is not None else None,
+                    "provider": None,
+                    "unit": None,
                     "endpoint": self._project_endpoint(session, endpoint),
                     "monitor_status": monitor_status,
                     "admission_state": admission_state,
@@ -7260,55 +5361,14 @@ class BrokerService:
                             telemetry.memory_available_mib if telemetry else None
                         ),
                         "available_memory_mib": available_memory,
-                        "committed_cpu_cores": round(direct_cpu + generic_cpu, 1),
-                        "committed_memory_mib": direct_memory + generic_memory,
+                        "committed_cpu_cores": round(direct_cpu, 1),
+                        "committed_memory_mib": direct_memory,
                         "direct_lease_cpu_cores": round(direct_cpu, 1),
                         "direct_lease_memory_mib": direct_memory,
-                        "generic_claim_cpu_cores": round(generic_cpu, 1),
-                        "generic_claim_memory_mib": generic_memory,
                     },
                 }
             )
         return values
-
-    def _select_host_capacity_unit(
-        self,
-        session: Session,
-        claim_data: ResourceClaimInput,
-        *,
-        now: datetime,
-    ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
-        candidates: list[dict[str, Any]] = []
-        for card in self._host_capacity_cards(session, now, ensure_units=True):
-            capacity = card["capacity"]
-            excluded_reason = card["admission_reason"]
-            eligible = card["admission_state"] == "available"
-            if (
-                eligible
-                and claim_data.quantities.cpu_cores
-                and capacity["available_cpu_cores"] < claim_data.quantities.cpu_cores
-            ):
-                eligible = False
-                excluded_reason = "insufficient_cpu"
-            if (
-                eligible
-                and claim_data.quantities.memory_mib
-                and capacity["available_memory_mib"] < claim_data.quantities.memory_mib
-            ):
-                eligible = False
-                excluded_reason = "insufficient_memory"
-            candidates.append({**card, "eligible": eligible, "excluded_reason": excluded_reason})
-        eligible_candidates = [candidate for candidate in candidates if candidate["eligible"]]
-        if not eligible_candidates:
-            return None, candidates
-        eligible_candidates.sort(
-            key=lambda item: (
-                item["capacity"]["available_cpu_cores"] or 0.0,
-                item["capacity"]["available_memory_mib"] or 0,
-                item["endpoint"]["id"],
-            )
-        )
-        return eligible_candidates[0], candidates
 
     def _reservation_blocks_gpu(
         self,
@@ -7340,7 +5400,7 @@ class BrokerService:
         excluded: dict[str, int] = defaultdict(int)
         values: list[GPUDevice] = []
         direct_commitment_usage = self._endpoint_commitment_usage(session)
-        generic_host_usage = self._active_generic_host_usage(session)
+        generic_host_usage: dict[str, tuple[float, int]] = {}
         selected_group_ids = set(constraints.server_group_ids)
         all_gpus = session.scalars(
             select(GPUDevice).order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
@@ -7483,7 +5543,6 @@ class BrokerService:
                 id="keepalive-reclaim-plan",
                 actor_id=SYSTEM_ACTOR_ID,
                 project_id=request_data.project_id,
-                profile_id=None,
                 auto_activate=False,
                 task_ref=request_data.task_ref,
                 purpose=request_data.purpose,
@@ -7978,7 +6037,6 @@ class BrokerService:
         idempotency_action: str,
         activate_if_allocated: bool,
         persistent_lease: bool = False,
-        profile_id: str | None = None,
         idempotency_checked: bool = False,
         plugin_allocation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
@@ -8006,7 +6064,6 @@ class BrokerService:
             id=secrets.token_hex(16),
             actor_id=actor.id,
             project_id=request_data.project_id,
-            profile_id=profile_id,
             auto_activate=activate_if_allocated,
             task_ref=request_data.task_ref,
             purpose=request_data.purpose,
@@ -8024,8 +6081,6 @@ class BrokerService:
         )
         session.add(request)
         summary = {"project_id": request.project_id, "task_ref": request.task_ref}
-        if profile_id is not None:
-            summary["profile_id"] = profile_id
         event = self._audit(
             session,
             actor_id=actor.id,
@@ -9715,59 +7770,6 @@ class BrokerService:
 
         return self._write(operation)
 
-    def acknowledge_alert(
-        self,
-        actor: ActorContext,
-        alert_id: str,
-        acknowledgement: AlertAcknowledge,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, OPERATOR_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="alert.ack", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            alert = session.get(Alert, alert_id)
-            if alert is None:
-                raise BrokerError("alert_not_found", "alert does not exist", status_code=404)
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            before = self._alert_dict(alert)
-            alert.acknowledged_at = now
-            alert.acknowledged_by = actor.id
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="alert.acknowledged",
-                resource_type="alert",
-                resource_id=alert.id,
-                result="success",
-                before=before,
-                after=self._alert_dict(alert),
-                summary={"note": acknowledgement.note} if acknowledgement.note else {},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "alert": self._alert_dict(alert),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="alert.ack",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
     def prune_telemetry(
         self,
         actor: ActorContext,
@@ -9837,1443 +7839,6 @@ class BrokerService:
             return result
 
         return self._write(operation)
-
-    def _validate_workload_profile_endpoints(
-        self,
-        session: Session,
-        *,
-        constraints: ResourceConstraints,
-    ) -> None:
-        missing = [
-            endpoint_id
-            for endpoint_id in constraints.endpoint_ids
-            if session.get(Endpoint, endpoint_id) is None
-        ]
-        if missing:
-            raise BrokerError(
-                "endpoint_not_found",
-                f"workload profile references unknown endpoints: {missing}",
-                status_code=404,
-            )
-
-    @staticmethod
-    def _workload_profile_grants(session: Session, profile_id: str) -> list[str]:
-        return list(
-            session.scalars(
-                select(WorkloadProfileGrant.project_id)
-                .where(WorkloadProfileGrant.profile_id == profile_id)
-                .order_by(WorkloadProfileGrant.project_id)
-            ).all()
-        )
-
-    @classmethod
-    def _profile_allows_project(
-        cls,
-        session: Session,
-        profile: WorkloadProfile,
-        project_id: str,
-    ) -> bool:
-        return (
-            profile.project_id == project_id
-            or profile.grant_all_projects
-            or project_id in cls._workload_profile_grants(session, profile.id)
-        )
-
-    def upsert_workload_profile(
-        self,
-        actor: ActorContext,
-        profile_data: WorkloadProfileUpsert,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Store an admin-approved routine workload contract for one project."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="workload_profile.upsert", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            self._ensure_claim_project(session, profile_data.project_id, now)
-            for project_id in profile_data.grant_project_ids:
-                self._ensure_claim_project(session, project_id, now)
-            if profile_data.runtime_kind == "direct-gpu":
-                self._validate_workload_profile_endpoints(
-                    session,
-                    constraints=profile_data.constraints,
-                )
-            else:
-                target = session.get(SchedulerTarget, profile_data.scheduler_target_id)
-                if target is None:
-                    raise BrokerError(
-                        "scheduler_target_not_found",
-                        "scheduler target does not exist",
-                        status_code=404,
-                    )
-                if not target.enabled:
-                    raise BrokerError(
-                        "scheduler_target_disabled",
-                        "scheduler target is disabled",
-                        status_code=409,
-                    )
-            revision = self._bump_revision(session, now)
-            profile = session.get(WorkloadProfile, profile_data.id)
-            before = (
-                self._workload_profile_dict(
-                    profile,
-                    self._workload_profile_grants(session, profile.id),
-                )
-                if profile
-                else None
-            )
-            if profile is None:
-                profile = WorkloadProfile(
-                    id=profile_data.id,
-                    project_id=profile_data.project_id,
-                    display_name=profile_data.display_name,
-                    purpose=profile_data.purpose,
-                    duration_seconds=profile_data.duration_seconds,
-                    constraints_json=json_dump(profile_data.constraints.model_dump(mode="json")),
-                    runtime_kind=profile_data.runtime_kind,
-                    scheduler_target_id=profile_data.scheduler_target_id,
-                    scheduler_spec_json=(
-                        json_dump(profile_data.scheduler.model_dump(mode="json"))
-                        if profile_data.scheduler is not None
-                        else None
-                    ),
-                    scheduler_script=profile_data.scheduler_script,
-                    grant_all_projects=profile_data.grant_all_projects,
-                    retain_submission_body=profile_data.retain_submission_body,
-                    enabled=profile_data.enabled,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(profile)
-            else:
-                if profile.project_id != profile_data.project_id:
-                    raise BrokerError(
-                        "workload_profile_project_immutable",
-                        "existing workload profile cannot move to another project",
-                        status_code=409,
-                    )
-                profile.display_name = profile_data.display_name
-                profile.purpose = profile_data.purpose
-                profile.duration_seconds = profile_data.duration_seconds
-                profile.constraints_json = json_dump(
-                    profile_data.constraints.model_dump(mode="json")
-                )
-                profile.runtime_kind = profile_data.runtime_kind
-                profile.scheduler_target_id = profile_data.scheduler_target_id
-                profile.scheduler_spec_json = (
-                    json_dump(profile_data.scheduler.model_dump(mode="json"))
-                    if profile_data.scheduler is not None
-                    else None
-                )
-                profile.scheduler_script = profile_data.scheduler_script
-                profile.grant_all_projects = profile_data.grant_all_projects
-                profile.retain_submission_body = profile_data.retain_submission_body
-                profile.enabled = profile_data.enabled
-                profile.updated_at = now
-            session.flush()
-            session.execute(
-                delete(WorkloadProfileGrant).where(WorkloadProfileGrant.profile_id == profile.id)
-            )
-            for project_id in profile_data.grant_project_ids:
-                if project_id != profile.project_id:
-                    session.add(
-                        WorkloadProfileGrant(
-                            profile_id=profile.id,
-                            project_id=project_id,
-                        )
-                    )
-            session.flush()
-            after = self._workload_profile_dict(
-                profile,
-                self._workload_profile_grants(session, profile.id),
-            )
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="workload_profile.upserted",
-                resource_type="workload_profile",
-                resource_id=profile.id,
-                result="success",
-                before=before,
-                after=after,
-                summary={
-                    "project_id": profile.project_id,
-                    "runtime_kind": profile.runtime_kind,
-                },
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "workload_profile": after,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="workload_profile.upsert",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    @staticmethod
-    def _workload_profile_request_data(
-        session: Session,
-        profile_id: str,
-        claim: WorkloadProfileClaim,
-    ) -> tuple[WorkloadProfile, RequestCreate]:
-        """Resolve one direct-GPU profile to its exact claim input."""
-
-        profile = session.get(WorkloadProfile, profile_id)
-        if profile is None:
-            raise BrokerError(
-                "workload_profile_not_found", "workload profile does not exist", status_code=404
-            )
-        if not profile.enabled:
-            raise BrokerError(
-                "workload_profile_disabled", "workload profile is disabled", status_code=409
-            )
-        if profile.runtime_kind != "direct-gpu":
-            raise BrokerError(
-                "scheduler_profile_requires_submit",
-                "external scheduler profiles must use the scheduler submit operation",
-                status_code=409,
-            )
-        request_data = RequestCreate.model_validate(
-            {
-                "project_id": profile.project_id,
-                "task_ref": claim.task_ref,
-                "purpose": profile.purpose,
-                "duration_seconds": profile.duration_seconds,
-                "constraints": json_load(profile.constraints_json),
-            }
-        )
-        return profile, request_data
-
-    def workload_profile_claim_request(
-        self,
-        actor: ActorContext,
-        profile_id: str,
-        claim: WorkloadProfileClaim,
-    ) -> RequestCreate:
-        """Read the direct-GPU request fixed by a workload profile.
-
-        This supports the API's exact keepalive reclaim proof.  It never
-        creates a request or chooses capacity on its own.
-        """
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> RequestCreate:
-            _profile, request_data = self._workload_profile_request_data(session, profile_id, claim)
-            return request_data
-
-        return self._read(operation)
-
-    def claim_workload_profile(
-        self,
-        actor: ActorContext,
-        profile_id: str,
-        claim: WorkloadProfileClaim,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Claim a pre-approved contract without re-supplying its resource fields."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="workload_profile.claim", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            profile, request_data = self._workload_profile_request_data(session, profile_id, claim)
-            return self._create_request_in_session(
-                session,
-                actor,
-                request_data,
-                idempotency_key=idempotency_key,
-                idempotency_action="workload_profile.claim",
-                activate_if_allocated=True,
-                profile_id=profile.id,
-                idempotency_checked=True,
-            )
-
-        return self._write(operation)
-
-    def upsert_scheduler_target(
-        self,
-        actor: ActorContext,
-        target_data: SchedulerTargetUpsert,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Register non-secret metadata for a globally discoverable scheduler."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session,
-                actor=actor,
-                action="scheduler_target.upsert",
-                key=idempotency_key,
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            target = session.get(SchedulerTarget, target_data.id)
-            before = self._scheduler_target_dict(target) if target else None
-            connection = {
-                "transport_profile": target_data.transport_profile,
-                "inspection_profile": target_data.inspection_profile,
-                "upload": (
-                    target_data.upload.model_dump(mode="json")
-                    if target_data.upload is not None
-                    else None
-                ),
-            }
-            if target is None:
-                target = SchedulerTarget(
-                    id=target_data.id,
-                    display_name=target_data.display_name,
-                    adapter=target_data.adapter,
-                    connection_json=json_dump(connection),
-                    credential_refs_json=json_dump(target_data.credential_refs),
-                    capabilities_json=json_dump(target_data.capabilities),
-                    access_hint=target_data.access_hint,
-                    enabled=target_data.enabled,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(target)
-            else:
-                target.display_name = target_data.display_name
-                target.adapter = target_data.adapter
-                target.connection_json = json_dump(connection)
-                target.credential_refs_json = json_dump(target_data.credential_refs)
-                target.capabilities_json = json_dump(target_data.capabilities)
-                target.access_hint = target_data.access_hint
-                target.enabled = target_data.enabled
-                target.updated_at = now
-            revision = self._bump_revision(session, now)
-            after = self._scheduler_target_dict(target)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="scheduler_target.upserted",
-                resource_type="scheduler_target",
-                resource_id=target.id,
-                result="success",
-                before=before,
-                after=after,
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "scheduler_target": after,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="scheduler_target.upsert",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def list_scheduler_targets(self, actor: ActorContext) -> dict[str, Any]:
-        """List scheduler identities globally without treating login nodes as endpoints."""
-
-        def operation(session: Session) -> dict[str, Any]:
-            values = [
-                self._scheduler_target_dict(target)
-                for target in session.scalars(
-                    select(SchedulerTarget).order_by(SchedulerTarget.id)
-                ).all()
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def _scheduler_target_context(
-        self,
-        target_id: str,
-        *,
-        required_capability: str | None = None,
-    ) -> tuple[dict[str, Any], dict[str, Any], int]:
-        def operation(
-            session: Session,
-        ) -> tuple[dict[str, Any], dict[str, Any], int]:
-            target = session.get(SchedulerTarget, target_id)
-            if target is None:
-                raise BrokerError(
-                    "scheduler_target_not_found",
-                    "scheduler target does not exist",
-                    status_code=404,
-                )
-            if not target.enabled:
-                raise BrokerError(
-                    "scheduler_target_disabled",
-                    "scheduler target is disabled",
-                    status_code=409,
-                )
-            capabilities = json_load(target.capabilities_json)
-            if required_capability is not None and required_capability not in capabilities:
-                raise BrokerError(
-                    "scheduler_capability_disabled",
-                    f"scheduler target does not allow {required_capability}",
-                    status_code=409,
-                )
-            connection = json_load(target.connection_json)
-            if not isinstance(connection, dict):
-                raise BrokerError(
-                    "scheduler_target_invalid",
-                    "scheduler target connection metadata is invalid",
-                    status_code=500,
-                )
-            return self._scheduler_target_dict(target), connection, self._revision(session)
-
-        return self._read(operation)
-
-    def _defer_interrupted_scheduler_transfers(self, session: Session, now: datetime) -> None:
-        """Make restart-interrupted staged uploads terminal and non-resumable.
-
-        An upload may have reached the remote stage just as the daemon exits.
-        Retrying it automatically could overwrite intent or duplicate data, so
-        recovery is an explicit fresh, approved transfer instead.
-        """
-
-        transfers = session.scalars(
-            select(SchedulerTransfer).where(SchedulerTransfer.state == "TRANSFERRING")
-        ).all()
-        for transfer in transfers:
-            transfer.state = "DEFERRED"
-            transfer.error_message = (
-                "daemon restart interrupted staged upload; transfer was not resumed automatically"
-            )
-            transfer.updated_at = now
-            transfer.completed_at = now
-            self._audit(
-                session,
-                actor_id=transfer.actor_id,
-                action="scheduler_transfer.deferred",
-                resource_type="scheduler_transfer",
-                resource_id=transfer.id,
-                result="success",
-                after=self._scheduler_transfer_dict(transfer),
-                summary={"reason": "daemon_restart", "requires_new_approved_transfer": True},
-                now=now,
-            )
-
-    def scheduler_access_status(
-        self,
-        actor: ActorContext,
-        target_id: str,
-    ) -> dict[str, Any]:
-        target, connection, revision = self._scheduler_target_context(
-            target_id,
-            required_capability="access-status",
-        )
-        access = self.slurm_provider.access_status(connection)
-        if access.get("status") != "ready":
-            access["access_hint"] = target["access_hint"]
-
-        def record(
-            session: Session,
-        ) -> tuple[dict[str, Any], int]:
-            stored = session.get(SchedulerTarget, target_id)
-            assert stored is not None
-            now = utcnow()
-            stored.access_status = str(access.get("status") or "unavailable")[:40]
-            message = access.get("message")
-            stored.access_message = str(message)[:2000] if message else None
-            stored.access_checked_at = now
-            stored.updated_at = now
-            return self._scheduler_target_dict(stored), self._bump_revision(session, now)
-
-        target, revision = self._write(record)
-        return {
-            "schema_version": SCHEMA_VERSION,
-            "snapshot_revision": revision,
-            "target": target,
-            "access": access,
-        }
-
-    def _perform_scheduler_upload(self, transfer_id: str) -> None:
-        def resolve(
-            session: Session,
-        ) -> tuple[SchedulerTransfer, dict[str, Any]]:
-            transfer = session.get(SchedulerTransfer, transfer_id)
-            if transfer is None:
-                raise BrokerError(
-                    "scheduler_transfer_not_found",
-                    "scheduler transfer does not exist",
-                    status_code=404,
-                )
-            target = session.get(SchedulerTarget, transfer.target_id)
-            if target is None:
-                raise BrokerError(
-                    "scheduler_target_not_found",
-                    "scheduler target does not exist",
-                    status_code=404,
-                )
-            connection = json_load(target.connection_json)
-            assert isinstance(connection, dict)
-            if transfer.state != "TRANSFERRING":
-                raise BrokerError(
-                    "scheduler_transfer_not_runnable",
-                    "only a newly started transfer may run",
-                    status_code=409,
-                )
-            return transfer, connection
-
-        transfer, connection = self._read(resolve)
-        try:
-            remote_staged_path = self.slurm_provider.upload(
-                connection,
-                local_path=Path(transfer.local_source_path),
-                remote_directory=transfer.remote_directory,
-                transfer_id=transfer.id,
-            )
-        except SlurmProviderError as exc:
-            state = (
-                "UNKNOWN"
-                if exc.uncertain
-                else "ACCESS_REQUIRED"
-                if exc.access_required
-                else "FAILED"
-            )
-            message = str(exc)[:2000]
-
-            def record_failure(session: Session) -> None:
-                current = session.get(SchedulerTransfer, transfer_id)
-                if current is None:
-                    return
-                now = utcnow()
-                current.state = state
-                current.error_message = message
-                current.updated_at = now
-                if state == "UNKNOWN":
-                    current.completed_at = now
-                self._audit(
-                    session,
-                    actor_id=current.actor_id,
-                    action="scheduler_transfer.failed",
-                    resource_type="scheduler_transfer",
-                    resource_id=current.id,
-                    result="failure",
-                    after=self._scheduler_transfer_dict(current),
-                    summary={"state": state},
-                    now=now,
-                )
-                self._bump_revision(session, now)
-
-            self._write(record_failure)
-            return
-
-        def record_success(session: Session) -> None:
-            current = session.get(SchedulerTransfer, transfer_id)
-            if current is None:
-                return
-            now = utcnow()
-            current.state = "COMPLETED"
-            current.remote_staged_path = remote_staged_path
-            current.error_message = None
-            current.updated_at = now
-            current.completed_at = now
-            payload = self._scheduler_transfer_dict(current)
-            self._audit(
-                session,
-                actor_id=current.actor_id,
-                action="scheduler_transfer.completed",
-                resource_type="scheduler_transfer",
-                resource_id=current.id,
-                result="success",
-                after=payload,
-                summary={
-                    "target_id": current.target_id,
-                    "project_id": current.project_id,
-                    "remote_staged_path": remote_staged_path,
-                },
-                now=now,
-            )
-            self._bump_revision(session, now)
-
-        self._write(record_success)
-
-    def start_scheduler_upload(
-        self,
-        actor: ActorContext,
-        request: SchedulerUploadRequest,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Start an approved upload into a unique non-overwriting remote stage."""
-
-        self._require_role(actor, MUTATING_ROLES)
-        target, connection, _revision = self._scheduler_target_context(
-            request.target_id,
-            required_capability="data-transfer",
-        )
-        access = self.slurm_provider.access_status(connection)
-        if access.get("status") != "ready":
-            raise BrokerError(
-                "access_required",
-                "scheduler access is not ready; connect the approved VPN and retry",
-                status_code=409,
-                details={
-                    "target_id": request.target_id,
-                    "access": access,
-                    "access_hint": target["access_hint"],
-                },
-            )
-        try:
-            local_path = Path(request.local_path).resolve(strict=True)
-        except OSError as exc:
-            raise BrokerError(
-                "local_source_not_found",
-                "local upload source does not exist",
-                status_code=404,
-            ) from exc
-        if not (local_path.is_file() or local_path.is_dir()):
-            raise BrokerError(
-                "local_source_unsupported",
-                "local upload source must be a regular file or directory",
-                status_code=422,
-            )
-        if not re.fullmatch(r"[A-Za-z0-9._@+-]{1,255}", local_path.name):
-            raise BrokerError(
-                "local_source_name_unsupported",
-                "local source basename contains unsupported characters",
-                status_code=422,
-            )
-
-        def prepare(session: Session) -> tuple[str, bool]:
-            self._idempotent(
-                session,
-                actor=actor,
-                action="scheduler_transfer.start",
-                key=idempotency_key,
-            )
-            existing = session.scalar(
-                select(SchedulerTransfer).where(
-                    SchedulerTransfer.actor_id == actor.id,
-                    SchedulerTransfer.submission_key == idempotency_key,
-                )
-            )
-            if existing is not None:
-                if (
-                    existing.target_id != request.target_id
-                    or existing.project_id != request.project_id
-                    or existing.local_source_path != str(local_path)
-                    or existing.remote_directory != request.remote_directory
-                ):
-                    raise BrokerError(
-                        "idempotency_conflict",
-                        "idempotency key was already used for different upload input",
-                        status_code=409,
-                    )
-                return existing.id, False
-            now = utcnow()
-            self._ensure_claim_project(session, request.project_id, now)
-            transfer = SchedulerTransfer(
-                id=secrets.token_hex(16),
-                target_id=request.target_id,
-                actor_id=actor.id,
-                project_id=request.project_id,
-                submission_key=idempotency_key,
-                approval_ref=request.approval_ref,
-                local_source_path=str(local_path),
-                remote_directory=request.remote_directory,
-                remote_staged_path=None,
-                source_size_bytes=local_path.stat().st_size if local_path.is_file() else None,
-                state="TRANSFERRING",
-                error_message=None,
-                created_at=now,
-                updated_at=now,
-                completed_at=None,
-            )
-            session.add(transfer)
-            revision = self._bump_revision(session, now)
-            self._audit(
-                session,
-                actor_id=actor.id,
-                action="scheduler_transfer.started",
-                resource_type="scheduler_transfer",
-                resource_id=transfer.id,
-                result="success",
-                after=self._scheduler_transfer_dict(transfer),
-                summary={
-                    "target_id": transfer.target_id,
-                    "project_id": transfer.project_id,
-                    "snapshot_revision": revision,
-                },
-                now=now,
-            )
-            return transfer.id, True
-
-        with self._scheduler_transfer_lock:
-            transfer_id, created = self._write(prepare)
-            if created:
-                threading.Thread(
-                    target=self._perform_scheduler_upload,
-                    args=(transfer_id,),
-                    name=f"serverpilot-upload-{transfer_id[:8]}",
-                    daemon=True,
-                ).start()
-
-        return self.scheduler_transfer_status(actor, transfer_id)
-
-    @staticmethod
-    def _scheduler_transfer_visible(
-        actor: ActorContext,
-        transfer: SchedulerTransfer,
-    ) -> bool:
-        return transfer.actor_id == actor.id
-
-    def scheduler_transfer_status(
-        self,
-        actor: ActorContext,
-        transfer_id: str,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            transfer = session.get(SchedulerTransfer, transfer_id)
-            if transfer is None:
-                raise BrokerError(
-                    "scheduler_transfer_not_found",
-                    "scheduler transfer does not exist",
-                    status_code=404,
-                )
-            if not self._scheduler_transfer_visible(actor, transfer):
-                raise BrokerError(
-                    "scheduler_transfer_forbidden",
-                    "scheduler transfer is not visible to this actor",
-                    status_code=403,
-                )
-            return {
-                "schema_version": SCHEMA_VERSION,
-                "snapshot_revision": self._revision(session),
-                "scheduler_transfer": self._scheduler_transfer_dict(transfer),
-            }
-
-        return self._read(operation)
-
-    def list_scheduler_transfers(
-        self,
-        actor: ActorContext,
-        *,
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            transfers = session.scalars(
-                select(SchedulerTransfer).order_by(SchedulerTransfer.created_at.desc())
-            ).all()
-            values = [
-                self._scheduler_transfer_dict(transfer)
-                for transfer in transfers
-                if self._scheduler_transfer_visible(actor, transfer)
-                and (project_id is None or transfer.project_id == project_id)
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def _scheduler_job_payload(
-        self,
-        session: Session,
-        job: SchedulerJob,
-    ) -> dict[str, Any]:
-        events = session.scalars(
-            select(SchedulerJobEvent)
-            .where(SchedulerJobEvent.job_id == job.id)
-            .order_by(SchedulerJobEvent.id)
-        ).all()
-        return self._scheduler_job_dict(job, events)
-
-    @staticmethod
-    def _scheduler_job_visible(actor: ActorContext, job: SchedulerJob) -> bool:
-        return job.actor_id == actor.id
-
-    def _submit_scheduler_job(
-        self,
-        actor: ActorContext,
-        *,
-        target_id: str,
-        project_id: str,
-        profile_id: str | None,
-        task_ref: str,
-        purpose: str,
-        approval_ref: str | None,
-        request: dict[str, Any],
-        script_body: str,
-        retain_submission_body: bool,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-        target, connection, _revision = self._scheduler_target_context(
-            target_id,
-            required_capability="submit",
-        )
-        access = self.slurm_provider.access_status(connection)
-        if access.get("status") != "ready":
-            raise BrokerError(
-                "access_required",
-                "scheduler access is not ready; connect the approved VPN and retry",
-                status_code=409,
-                details={
-                    "target_id": target_id,
-                    "access": access,
-                    "access_hint": target["access_hint"],
-                },
-            )
-
-        def prepare(
-            session: Session,
-        ) -> tuple[str, bool, bool, dict[str, Any] | None]:
-            prior = self._idempotent(
-                session,
-                actor=actor,
-                action="scheduler_job.submit",
-                key=idempotency_key,
-            )
-            if prior is not None:
-                return prior["scheduler_job"]["id"], False, False, prior
-            existing_job = session.scalar(
-                select(SchedulerJob).where(
-                    SchedulerJob.actor_id == actor.id,
-                    SchedulerJob.submission_key == idempotency_key,
-                )
-            )
-            if existing_job is not None:
-                if (
-                    existing_job.target_id != target_id
-                    or existing_job.project_id != project_id
-                    or existing_job.task_ref != task_ref
-                    or existing_job.request_json != json_dump(request)
-                ):
-                    raise BrokerError(
-                        "idempotency_conflict",
-                        "idempotency key was already used for different scheduler input",
-                        status_code=409,
-                    )
-                retryable = existing_job.state in {
-                    "SUBMITTING",
-                    "ACCESS_REQUIRED",
-                    "FAILED",
-                }
-                recover_unknown = existing_job.state == "UNKNOWN"
-                if retryable and existing_job.state != "SUBMITTING":
-                    now = utcnow()
-                    existing_job.state = "SUBMITTING"
-                    existing_job.error_message = None
-                    existing_job.updated_at = now
-                    session.add(
-                        SchedulerJobEvent(
-                            job_id=existing_job.id,
-                            state="SUBMITTING",
-                            raw_state=existing_job.raw_state,
-                            detail_json=json_dump({"retry": True}),
-                            created_at=now,
-                        )
-                    )
-                    self._bump_revision(session, now)
-                return (
-                    existing_job.id,
-                    retryable,
-                    recover_unknown,
-                    None,
-                )
-            now = utcnow()
-            self._ensure_claim_project(session, project_id, now)
-            job = SchedulerJob(
-                id=secrets.token_hex(16),
-                target_id=target_id,
-                actor_id=actor.id,
-                project_id=project_id,
-                profile_id=profile_id,
-                submission_key=idempotency_key,
-                task_ref=task_ref,
-                purpose=purpose,
-                approval_ref=approval_ref,
-                request_json=json_dump(request),
-                script_body=script_body if retain_submission_body else None,
-                retain_submission_body=retain_submission_body,
-                scheduler_job_id=None,
-                state="SUBMITTING",
-                raw_state=None,
-                allocated_tres_json="{}",
-                node_list=None,
-                stdout_path=None,
-                stderr_path=None,
-                exit_code=None,
-                error_message=None,
-                submitted_at=None,
-                started_at=None,
-                completed_at=None,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(job)
-            session.add(
-                SchedulerJobEvent(
-                    job_id=job.id,
-                    state="SUBMITTING",
-                    raw_state=None,
-                    detail_json=json_dump({"target_id": target_id}),
-                    created_at=now,
-                )
-            )
-            self._bump_revision(session, now)
-            return job.id, True, False, None
-
-        job_id, should_submit, recover_unknown, prior_response = self._write(prepare)
-        if prior_response is not None:
-            return prior_response
-        if recover_unknown:
-            try:
-                recovered_submission = self.slurm_provider.find_by_name(
-                    connection,
-                    broker_job_name(job_id),
-                )
-            except SlurmProviderError as exc:
-                raise BrokerError(
-                    "scheduler_recovery_failed",
-                    str(exc),
-                    status_code=409 if exc.access_required else 502,
-                    details={"scheduler_job_id": job_id, "state": "UNKNOWN"},
-                ) from exc
-            if recovered_submission is None:
-
-                def unknown_result(session: Session) -> dict[str, Any]:
-                    job = session.get(SchedulerJob, job_id)
-                    assert job is not None
-                    return {
-                        "snapshot_revision": self._revision(session),
-                        "scheduler_job": self._scheduler_job_payload(session, job),
-                    }
-
-                return self._read(unknown_result)
-            submission = recovered_submission
-            submission_recovered = True
-        if not should_submit:
-
-            def existing_result(session: Session) -> dict[str, Any]:
-                job = session.get(SchedulerJob, job_id)
-                assert job is not None
-                return {
-                    "snapshot_revision": self._revision(session),
-                    "scheduler_job": self._scheduler_job_payload(session, job),
-                }
-
-            if not recover_unknown:
-                return self._read(existing_result)
-
-        if should_submit:
-            try:
-                recovered = self.slurm_provider.find_by_name(
-                    connection,
-                    broker_job_name(job_id),
-                )
-                submission = recovered or self.slurm_provider.submit(
-                    connection,
-                    broker_job_id=job_id,
-                    request=request,
-                    script_body=script_body,
-                )
-                submission_recovered = recovered is not None
-            except SlurmProviderError as exc:
-                failure_state = (
-                    "UNKNOWN"
-                    if exc.uncertain
-                    else "ACCESS_REQUIRED"
-                    if exc.access_required
-                    else "FAILED"
-                )
-                failure_message = str(exc)[:2000]
-
-                def record_failure(session: Session) -> None:
-                    job = session.get(SchedulerJob, job_id)
-                    assert job is not None
-                    now = utcnow()
-                    job.state = failure_state
-                    job.error_message = failure_message
-                    job.updated_at = now
-                    session.add(
-                        SchedulerJobEvent(
-                            job_id=job.id,
-                            state=failure_state,
-                            raw_state=None,
-                            detail_json=json_dump({"message": job.error_message}),
-                            created_at=now,
-                        )
-                    )
-                    self._audit(
-                        session,
-                        actor_id=actor.id,
-                        action="scheduler_job.submit_unknown"
-                        if failure_state == "UNKNOWN"
-                        else "scheduler_job.submit_failed",
-                        resource_type="scheduler_job",
-                        resource_id=job.id,
-                        result="failure",
-                        after=self._scheduler_job_dict(job),
-                        summary={
-                            "state": failure_state,
-                            "resubmission_blocked": failure_state == "UNKNOWN",
-                        },
-                        now=now,
-                    )
-                    self._bump_revision(session, now)
-
-                self._write(record_failure)
-                raise BrokerError(
-                    "scheduler_submission_unknown"
-                    if failure_state == "UNKNOWN"
-                    else "access_required"
-                    if exc.access_required
-                    else "scheduler_submit_failed",
-                    str(exc),
-                    status_code=409 if failure_state in {"UNKNOWN", "ACCESS_REQUIRED"} else 502,
-                    details={"scheduler_job_id": job_id, "state": failure_state},
-                ) from exc
-
-        def complete(session: Session) -> dict[str, Any]:
-            job = session.get(SchedulerJob, job_id)
-            assert job is not None
-            now = utcnow()
-            raw_state = submission.raw_state
-            job.scheduler_job_id = submission.scheduler_job_id
-            job.raw_state = raw_state
-            job.state = "PENDING" if raw_state == "SUBMITTED" else broker_state(raw_state)
-            job.submitted_at = now
-            job.updated_at = now
-            job.error_message = None
-            scheduler = request["scheduler"]
-            job.stdout_path = scheduler["stdout_pattern"].replace("%j", submission.scheduler_job_id)
-            job.stderr_path = scheduler["stderr_pattern"].replace("%j", submission.scheduler_job_id)
-            if not job.retain_submission_body:
-                job.script_body = None
-            session.add(
-                SchedulerJobEvent(
-                    job_id=job.id,
-                    state=job.state,
-                    raw_state=raw_state,
-                    detail_json=json_dump({"scheduler_job_id": submission.scheduler_job_id}),
-                    created_at=now,
-                )
-            )
-            revision = self._bump_revision(session, now)
-            payload = self._scheduler_job_payload(session, job)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="scheduler_job.recovered"
-                if submission_recovered
-                else "scheduler_job.submitted",
-                resource_type="scheduler_job",
-                resource_id=job.id,
-                result="success",
-                after=payload,
-                summary={
-                    "target_id": target_id,
-                    "project_id": project_id,
-                    "scheduler_job_id": submission.scheduler_job_id,
-                    "recovered": submission_recovered,
-                },
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "scheduler_job": payload,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="scheduler_job.submit",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(complete)
-
-    def submit_scheduler_profile(
-        self,
-        actor: ActorContext,
-        profile_id: str,
-        submission: SchedulerProfileSubmit,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        def resolve(
-            session: Session,
-        ) -> tuple[WorkloadProfile, dict[str, Any], dict[str, Any], str]:
-            profile = session.get(WorkloadProfile, profile_id)
-            if profile is None:
-                raise BrokerError(
-                    "workload_profile_not_found",
-                    "workload profile does not exist",
-                    status_code=404,
-                )
-            if not profile.enabled:
-                raise BrokerError(
-                    "workload_profile_disabled",
-                    "workload profile is disabled",
-                    status_code=409,
-                )
-            if profile.runtime_kind != "slurm":
-                raise BrokerError(
-                    "workload_profile_runtime_mismatch",
-                    "workload profile is not an external scheduler profile",
-                    status_code=409,
-                )
-            if not self._profile_allows_project(
-                session,
-                profile,
-                submission.project_id,
-            ):
-                raise BrokerError(
-                    "workload_profile_project_forbidden",
-                    "project is not granted this workload profile",
-                    status_code=403,
-                )
-            assert profile.scheduler_target_id is not None
-            assert profile.scheduler_spec_json is not None
-            assert profile.scheduler_script is not None
-            request = {
-                "duration_seconds": profile.duration_seconds,
-                "constraints": json_load(profile.constraints_json),
-                "scheduler": json_load(profile.scheduler_spec_json),
-            }
-            return (
-                profile,
-                request,
-                self._workload_profile_dict(
-                    profile,
-                    self._workload_profile_grants(session, profile.id),
-                ),
-                profile.scheduler_script,
-            )
-
-        profile, request, _profile_payload, script_body = self._read(resolve)
-        assert profile.scheduler_target_id is not None
-        with self._scheduler_submit_lock:
-            return self._submit_scheduler_job(
-                actor,
-                target_id=profile.scheduler_target_id,
-                project_id=submission.project_id,
-                profile_id=profile.id,
-                task_ref=submission.task_ref,
-                purpose=profile.purpose,
-                approval_ref=f"profile:{profile.id}",
-                request=request,
-                script_body=script_body,
-                retain_submission_body=profile.retain_submission_body,
-                idempotency_key=idempotency_key,
-            )
-
-    def submit_scheduler_one_off(
-        self,
-        actor: ActorContext,
-        submission: SchedulerOneOffSubmit,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        payload = submission.model_dump(mode="json")
-        script_body = payload.pop("script_body")
-        retain_submission_body = payload.pop("retain_submission_body")
-        target_id = payload.pop("target_id")
-        project_id = payload.pop("project_id")
-        task_ref = payload.pop("task_ref")
-        purpose = payload.pop("purpose")
-        approval_ref = payload.pop("approval_ref")
-        with self._scheduler_submit_lock:
-            return self._submit_scheduler_job(
-                actor,
-                target_id=target_id,
-                project_id=project_id,
-                profile_id=None,
-                task_ref=task_ref,
-                purpose=purpose,
-                approval_ref=approval_ref,
-                request=payload,
-                script_body=script_body,
-                retain_submission_body=retain_submission_body,
-                idempotency_key=idempotency_key,
-            )
-
-    def list_scheduler_jobs(
-        self,
-        actor: ActorContext,
-        *,
-        project_id: str | None = None,
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            jobs = session.scalars(
-                select(SchedulerJob).order_by(SchedulerJob.created_at.desc())
-            ).all()
-            values = [
-                self._scheduler_job_payload(session, job)
-                for job in jobs
-                if self._scheduler_job_visible(actor, job)
-                and (project_id is None or job.project_id == project_id)
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def refresh_scheduler_job(
-        self,
-        actor: ActorContext,
-        job_id: str,
-    ) -> dict[str, Any]:
-        def resolve(
-            session: Session,
-        ) -> tuple[SchedulerJob, dict[str, Any], int]:
-            job = session.get(SchedulerJob, job_id)
-            if job is None:
-                raise BrokerError(
-                    "scheduler_job_not_found",
-                    "scheduler job does not exist",
-                    status_code=404,
-                )
-            if not self._scheduler_job_visible(actor, job):
-                raise BrokerError(
-                    "scheduler_job_forbidden",
-                    "scheduler job is not visible to this actor",
-                    status_code=403,
-                )
-            target = session.get(SchedulerTarget, job.target_id)
-            if target is None:
-                raise BrokerError(
-                    "scheduler_target_not_found",
-                    "scheduler target does not exist",
-                    status_code=404,
-                )
-            connection = json_load(target.connection_json)
-            assert isinstance(connection, dict)
-            return job, connection, self._revision(session)
-
-        job, connection, revision = self._read(resolve)
-        if job.scheduler_job_id is None or job.state in {
-            "FAILED",
-            "UNKNOWN",
-            "ACCESS_REQUIRED",
-        }:
-
-            def current(session: Session) -> dict[str, Any]:
-                current_job = session.get(SchedulerJob, job_id)
-                assert current_job is not None
-                return {
-                    "schema_version": SCHEMA_VERSION,
-                    "snapshot_revision": revision,
-                    "scheduler_job": self._scheduler_job_payload(session, current_job),
-                }
-
-            return self._read(current)
-        try:
-            observation = self.slurm_provider.query(
-                connection,
-                job.scheduler_job_id,
-            )
-        except SlurmProviderError as exc:
-            if exc.access_required:
-                raise BrokerError(
-                    "access_required",
-                    str(exc),
-                    status_code=409,
-                    details={"scheduler_job_id": job.id},
-                ) from exc
-            raise BrokerError(
-                "scheduler_status_failed",
-                str(exc),
-                status_code=502,
-                details={"scheduler_job_id": job.id},
-            ) from exc
-
-        def update(session: Session) -> dict[str, Any]:
-            current_job = session.get(SchedulerJob, job_id)
-            assert current_job is not None
-            now = utcnow()
-            previous_state = current_job.state
-            current_job.state = observation["state"]
-            current_job.raw_state = observation["raw_state"]
-            current_job.allocated_tres_json = json_dump(observation.get("allocated_tres") or {})
-            current_job.node_list = observation.get("node_list")
-            current_job.exit_code = observation.get("exit_code")
-            current_job.started_at = (
-                _external_datetime(observation.get("started_at")) or current_job.started_at
-            )
-            current_job.completed_at = (
-                _external_datetime(observation.get("completed_at")) or current_job.completed_at
-            )
-            if (
-                current_job.state
-                in {
-                    "COMPLETED",
-                    "FAILED",
-                    "CANCELLED",
-                    "TIMEOUT",
-                }
-                and current_job.completed_at is None
-            ):
-                current_job.completed_at = now
-            current_job.updated_at = now
-            if current_job.state != previous_state or current_job.raw_state != job.raw_state:
-                session.add(
-                    SchedulerJobEvent(
-                        job_id=current_job.id,
-                        state=current_job.state,
-                        raw_state=current_job.raw_state,
-                        detail_json=json_dump(
-                            {
-                                "allocated_tres": observation.get("allocated_tres") or {},
-                                "node_list": current_job.node_list,
-                            }
-                        ),
-                        created_at=now,
-                    )
-                )
-                revision_value = self._bump_revision(session, now)
-            else:
-                revision_value = self._revision(session)
-            return {
-                "schema_version": SCHEMA_VERSION,
-                "snapshot_revision": revision_value,
-                "scheduler_job": self._scheduler_job_payload(
-                    session,
-                    current_job,
-                ),
-            }
-
-        return self._write(update)
-
-    def cancel_scheduler_job(
-        self,
-        actor: ActorContext,
-        job_id: str,
-        cancellation: SchedulerJobCancel,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-
-        def resolve(
-            session: Session,
-        ) -> tuple[SchedulerJob, dict[str, Any], dict[str, Any] | None]:
-            prior = self._idempotent(
-                session,
-                actor=actor,
-                action="scheduler_job.cancel",
-                key=idempotency_key,
-            )
-            job = session.get(SchedulerJob, job_id)
-            if job is None:
-                raise BrokerError(
-                    "scheduler_job_not_found",
-                    "scheduler job does not exist",
-                    status_code=404,
-                )
-            if job.actor_id != actor.id:
-                raise BrokerError(
-                    "scheduler_job_forbidden",
-                    "only the job owner or an authorized operator may cancel it",
-                    status_code=403,
-                )
-            target = session.get(SchedulerTarget, job.target_id)
-            if target is None:
-                raise BrokerError(
-                    "scheduler_target_not_found",
-                    "scheduler target does not exist",
-                    status_code=404,
-                )
-            connection = json_load(target.connection_json)
-            assert isinstance(connection, dict)
-            return job, connection, prior
-
-        job, connection, prior = self._read(resolve)
-        if prior is not None:
-            return prior
-        if job.scheduler_job_id is None:
-            raise BrokerError(
-                "scheduler_job_not_submitted",
-                "scheduler job has no external Job ID to cancel",
-                status_code=409,
-            )
-        try:
-            self.slurm_provider.cancel(connection, job.scheduler_job_id)
-        except SlurmProviderError as exc:
-            raise BrokerError(
-                "access_required" if exc.access_required else "scheduler_cancel_failed",
-                str(exc),
-                status_code=409 if exc.access_required else 502,
-                details={"scheduler_job_id": job.id},
-            ) from exc
-
-        def complete(session: Session) -> dict[str, Any]:
-            current_job = session.get(SchedulerJob, job_id)
-            assert current_job is not None
-            now = utcnow()
-            current_job.state = "CANCEL_REQUESTED"
-            current_job.raw_state = "CANCEL_REQUESTED"
-            current_job.updated_at = now
-            session.add(
-                SchedulerJobEvent(
-                    job_id=current_job.id,
-                    state=current_job.state,
-                    raw_state=current_job.raw_state,
-                    detail_json=json_dump({"reason": cancellation.reason}),
-                    created_at=now,
-                )
-            )
-            revision_value = self._bump_revision(session, now)
-            payload = self._scheduler_job_payload(session, current_job)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="scheduler_job.cancel_requested",
-                resource_type="scheduler_job",
-                resource_id=current_job.id,
-                result="success",
-                before=self._scheduler_job_dict(job),
-                after=payload,
-                summary={"reason": cancellation.reason},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision_value,
-                "scheduler_job": payload,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="scheduler_job.cancel",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(complete)
 
     @staticmethod
     def _constraints_reference_endpoint(
@@ -11675,9 +8240,9 @@ class BrokerService:
     ) -> dict[str, Any]:
         """Hard-delete one endpoint from the local control plane.
 
-        Active leases and active generic allocations fail closed. Released
-        history that would block SQLite RESTRICT is removed first; telemetry,
-        GPUs and providers then follow the endpoint CASCADE.
+        Active leases fail closed. Released history that would block SQLite
+        RESTRICT is removed first; telemetry and GPUs then follow the endpoint
+        CASCADE.
         """
 
         self._require_role(actor, MUTATING_ROLES)
@@ -11696,12 +8261,6 @@ class BrokerService:
                 raise BrokerError(
                     "endpoint_has_active_leases",
                     "这台服务器上还有进行中的租约，请先释放后再删除。",
-                    status_code=409,
-                )
-            if self._endpoint_has_active_allocations(session, endpoint.id):
-                raise BrokerError(
-                    "endpoint_has_active_allocations",
-                    "这台服务器上还有进行中的资源分配，请先结束后再删除。",
                     status_code=409,
                 )
             now = utcnow()
@@ -11946,31 +8505,6 @@ class BrokerService:
 
         return self._write(operation)
 
-    def list_server_groups(self, actor: ActorContext) -> dict[str, Any]:
-        self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
-
-        def operation(session: Session) -> dict[str, Any]:
-            values = [
-                self._server_group_dict(group)
-                for group in session.scalars(select(ServerGroup).order_by(ServerGroup.id)).all()
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def get_server_group(self, actor: ActorContext, group_id: str) -> dict[str, Any]:
-        self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
-
-        def operation(session: Session) -> dict[str, Any]:
-            group = session.get(ServerGroup, group_id)
-            if group is None:
-                raise BrokerError(
-                    "server_group_not_found", "server group does not exist", status_code=404
-                )
-            return self.envelope(session, self._server_group_dict(group))
-
-        return self._read(operation)
-
     def create_server_group(
         self, actor: ActorContext, group_data: ServerGroupCreate, *, idempotency_key: str
     ) -> dict[str, Any]:
@@ -12163,77 +8697,6 @@ class BrokerService:
 
         return self._write(operation)
 
-    def create_actor(
-        self, actor: ActorContext, actor_data: ActorCreate, *, idempotency_key: str
-    ) -> dict[str, Any]:
-        self._require_role(actor, ADMIN_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="actor.create", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            if actor_data.id == SYSTEM_ACTOR_ID or SYSTEM_PROJECT_ID in actor_data.project_ids:
-                raise BrokerError(
-                    "reserved_system_identity",
-                    "the ServerPilot internal identity cannot be created or assigned by API",
-                    status_code=422,
-                )
-            if session.get(Actor, actor_data.id) is not None:
-                raise BrokerError("actor_exists", "actor id already exists", status_code=409)
-            unknown_projects = [
-                project_id
-                for project_id in actor_data.project_ids
-                if session.get(Project, project_id) is None
-            ]
-            if unknown_projects:
-                raise BrokerError(
-                    "project_not_found",
-                    f"actor references unknown projects: {unknown_projects}",
-                    status_code=404,
-                )
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            created = Actor(
-                id=actor_data.id,
-                display_name=actor_data.display_name,
-                role=actor_data.role,
-                enabled=True,
-                created_at=now,
-                updated_at=now,
-            )
-            session.add(created)
-            for project_id in actor_data.project_ids:
-                session.add(ActorProject(actor_id=created.id, project_id=project_id))
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="actor.created",
-                resource_type="actor",
-                resource_id=created.id,
-                result="success",
-                after=self._actor_dict(created, actor_data.project_ids),
-                summary={"role": created.role},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "actor": self._actor_dict(created, actor_data.project_ids),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="actor.create",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
     # ---- filtered read surfaces ------------------------------------------------
 
     def list_requests(self, actor: ActorContext) -> dict[str, Any]:
@@ -12258,38 +8721,6 @@ class BrokerService:
 
         return self._read(operation)
 
-    def list_processes(self, actor: ActorContext) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            now = utcnow()
-            values = []
-            for process in session.scalars(
-                select(ProcessObservation)
-                .where(ProcessObservation.active.is_(True))
-                .order_by(ProcessObservation.last_seen_at.desc())
-            ).all():
-                values.append(
-                    {
-                        "id": process.id,
-                        "endpoint_id": process.endpoint_id,
-                        "gpu_id": process.gpu_id,
-                        "pid": process.pid,
-                        "boot_id": process.boot_id,
-                        "process_started_at": _iso(process.process_started_at),
-                        "process_key": self._process_key(process),
-                        "username": process.username,
-                        "executable": process.executable,
-                        "used_memory_mib": process.used_memory_mib,
-                        "observations": process.observations,
-                        "first_seen_at": _iso(process.first_seen_at),
-                        "last_seen_at": _iso(process.last_seen_at),
-                        "fresh": (_as_utc(process.last_seen_at) or now)
-                        >= now - timedelta(seconds=self.inventory.collector.stale_after_seconds),
-                    }
-                )
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
     def list_reservations(self, actor: ActorContext) -> dict[str, Any]:
         def operation(session: Session) -> dict[str, Any]:
             values = [
@@ -12299,32 +8730,6 @@ class BrokerService:
                 ).all()
             ]
             return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def list_maintenance(self, actor: ActorContext) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            values = [
-                self._maintenance_dict(window)
-                for window in session.scalars(
-                    select(MaintenanceWindow).order_by(
-                        MaintenanceWindow.start_at, MaintenanceWindow.id
-                    )
-                ).all()
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def list_alerts(self, actor: ActorContext) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            visible = [
-                self._alert_dict(alert)
-                for alert in session.scalars(
-                    select(Alert).order_by(Alert.active.desc(), Alert.last_seen_at.desc())
-                ).all()
-            ]
-            return self.envelope(session, visible)
 
         return self._read(operation)
 
@@ -12356,9 +8761,6 @@ class BrokerService:
                 if not visible and event.resource_type == "request":
                     request = session.get(AllocationRequest, event.resource_id)
                     visible = request is not None and request.project_id in actor.project_ids
-                if not visible and event.resource_type == "workload_profile":
-                    profile = session.get(WorkloadProfile, event.resource_id)
-                    visible = profile is not None and profile.project_id in actor.project_ids
                 if (
                     not visible
                     and event.resource_type == "endpoint"
@@ -12388,98 +8790,6 @@ class BrokerService:
                     }
                 )
             return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def list_projects(self, actor: ActorContext) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            values = [
-                self._project_dict(project)
-                for project in session.scalars(
-                    select(Project).where(Project.id != SYSTEM_PROJECT_ID).order_by(Project.id)
-                ).all()
-            ]
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def list_workload_profiles(
-        self, actor: ActorContext, *, project_id: str | None = None
-    ) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            profiles = session.scalars(
-                select(WorkloadProfile).order_by(WorkloadProfile.project_id, WorkloadProfile.id)
-            ).all()
-            values = []
-            for profile in profiles:
-                grants = self._workload_profile_grants(session, profile.id)
-                if project_id is not None:
-                    visible = (
-                        profile.project_id == project_id
-                        or profile.grant_all_projects
-                        or project_id in grants
-                    )
-                elif actor.is_admin:
-                    visible = True
-                else:
-                    visible = any(
-                        profile.project_id == candidate
-                        or profile.grant_all_projects
-                        or candidate in grants
-                        for candidate in actor.project_ids
-                    )
-                if visible:
-                    values.append(self._workload_profile_dict(profile, grants))
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def list_actors(self, actor: ActorContext) -> dict[str, Any]:
-        self._require_role(actor, ADMIN_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            values = []
-            for item in session.scalars(
-                select(Actor).where(Actor.id != SYSTEM_ACTOR_ID).order_by(Actor.id)
-            ).all():
-                project_ids = session.scalars(
-                    select(ActorProject.project_id).where(ActorProject.actor_id == item.id)
-                ).all()
-                values.append(self._actor_dict(item, project_ids))
-            return self.envelope(session, values)
-
-        return self._read(operation)
-
-    def effective_config(self, actor: ActorContext) -> dict[str, Any]:
-        # Inventory carries no secrets; this view excludes runtime environment values.
-        self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
-
-        def operation(session: Session) -> dict[str, Any]:
-            groups = [
-                self._server_group_dict(group)
-                for group in session.scalars(select(ServerGroup).order_by(ServerGroup.id)).all()
-            ]
-            endpoints = []
-            group_map = self._server_groups_by_id(session)
-            for endpoint in session.scalars(select(Endpoint).order_by(Endpoint.id)).all():
-                endpoints.append(self._endpoint_dict(endpoint, server_groups=group_map))
-            return self.envelope(
-                session,
-                {
-                    "bootstrap_inventory": self.inventory.model_dump(mode="json"),
-                    "database_inventory": {
-                        "server_groups": groups,
-                        "endpoints": endpoints,
-                    },
-                    "scheduler": {
-                        "exclusive_lease": True,
-                        "auto_preemption": False,
-                        "backfill_default": False,
-                        "stale_after_seconds": self.inventory.collector.stale_after_seconds,
-                    },
-                    "runtime": {"backend": "sqlite-wal", "single_writer": True},
-                },
-            )
 
         return self._read(operation)
 

@@ -61,7 +61,6 @@ mkdir -p "${backend_dist_dir}" "${backend_work_dir}" "${backend_spec_dir}"
   --paths "${project_root}/src" \
   --collect-submodules uvicorn \
   --add-data "${project_root}/src/serverpilot/migrations:serverpilot/migrations" \
-  --add-data "${project_root}/src/serverpilot/web:serverpilot/web" \
   --add-data "${project_root}/src/serverpilot/bundled_plugins:serverpilot/bundled_plugins" \
   --distpath "${backend_dist_dir}" \
   --workpath "${backend_work_dir}" \

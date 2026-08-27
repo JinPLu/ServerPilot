@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import threading
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -1452,31 +1451,26 @@ def test_quick_claim_uses_the_same_selected_keeper_handoff(
         headers=_headers("quick-claim-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
-    page = client.get("/ui/requests")
-    csrf = re.search(r'name="csrf" value="([^"]+)"', page.text)
-    assert csrf is not None
-
     claimed = client.post(
-        "/ui/action/quick-claim",
-        data={
+        "/api/v1/claims",
+        json={
             "project_id": "project-a",
             "task_ref": "quick-claim-one-keeper",
-            "gpu_count": "1",
-            "placement": "pack",
-            "endpoint_id": "",
-            "csrf": csrf.group(1),
-            "confirmed": "yes",
+            "purpose": "claim one keeper",
+            "constraints": {"gpu_count": 1, "placement": "pack"},
         },
-        follow_redirects=True,
+        headers=_headers("quick-claim-one-keeper"),
     )
 
     assert claimed.status_code == 200, claimed.text
-    assert "GPU 已申领，待使用" in claimed.text
+    assert claimed.json()["lease"]["gpu_ids"] == [
+        "endpoint-a:GPU-00000000-0000-0000-0000-000000000001"
+    ]
     assert adapter.calls == [
         ("endpoint-a", True, (GPU_UUIDS[0],)),
         ("endpoint-a", False, (GPU_UUIDS[0],)),
     ]
-    workloads = app.state.service.list_leases(app.state.service.local_actor("human"))["data"]
+    workloads = app.state.service.list_leases(app.state.service.local_actor("agent-a"))["data"]
     assert len(workloads) == 1
     assert workloads[0]["gpu_ids"] == ["endpoint-a:GPU-00000000-0000-0000-0000-000000000001"]
 
@@ -1843,9 +1837,9 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
     keeper = next(gpu for gpu in snapshot["gpus"] if gpu["state"] == "KEEPALIVE")
 
     moved = client.patch(
-        f"/api/v1/leases/{lease['id']}/gpus",
+        f"/api/v1/operator/leases/{lease['id']}/gpus",
         json={"gpu_ids": [keeper["id"]]},
-        headers=_headers("reassign-to-keeper"),
+        headers={**_headers("reassign-to-keeper"), "X-ServerPilot-Client": "desktop-app"},
     )
 
     assert moved.status_code == 200, moved.text
@@ -1860,119 +1854,12 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
     assert states_by_id[keeper["id"]] == "HELD"
 
 
-def test_profile_claim_reclaims_only_its_selected_verified_keeper_gpu(
-    build_app, inventory: InventoryConfig
-) -> None:
-    adapter = FakeKeepaliveAdapter()
-    collector = FakeTargetedCollector(adapter, unmanaged_gpu_uuids=(GPU_UUIDS[1],))
-    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
-    client = TestClient(app)
-    service = app.state.service
-
-    enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
-        json={"enabled": True},
-        headers=_headers("profile-keepers-on"),
-    )
-    assert enabled.status_code == 200, enabled.text
-    profile = {
-        "id": "project-a-default-gpu",
-        "project_id": "project-a",
-        "display_name": "Default GPU",
-        "purpose": "default project GPU task",
-        "duration_seconds": 3600,
-        "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-a"]},
-        "enabled": True,
-    }
-    created = client.post(
-        "/api/v1/workload-profiles",
-        json=profile,
-        headers=_headers("profile-upsert"),
-    )
-    assert created.status_code == 200, created.text
-
-    claim_payload = {"task_ref": "profile-claim-one-keeper"}
-    original_profile_claim = service.claim_workload_profile
-    claim_snapshots: list[list[tuple[str, bool, tuple[str, ...]]]] = []
-
-    def observed_profile_claim(*args, **kwargs):  # type: ignore[no-untyped-def]
-        claim_snapshots.append(list(adapter.calls))
-        return original_profile_claim(*args, **kwargs)
-
-    service.claim_workload_profile = observed_profile_claim  # type: ignore[method-assign]
-    claimed = client.post(
-        "/api/v1/workload-profiles/project-a-default-gpu/claim",
-        json=claim_payload,
-        headers=_headers("profile-claim-one-keeper"),
-    )
-
-    assert claimed.status_code == 200, claimed.text
-    assert claimed.json()["request"]["profile_id"] == "project-a-default-gpu"
-    assert adapter.calls[-1] == ("endpoint-a", False, (GPU_UUIDS[0],))
-    assert claim_snapshots == [
-        [("endpoint-a", True, (GPU_UUIDS[0],))],
-        [
-            ("endpoint-a", True, (GPU_UUIDS[0],)),
-            ("endpoint-a", False, (GPU_UUIDS[0],)),
-        ],
-    ]
-
-    repeated = client.post(
-        "/api/v1/workload-profiles/project-a-default-gpu/claim",
-        json=claim_payload,
-        headers=_headers("profile-claim-one-keeper"),
-    )
-    assert repeated.status_code == 200
-    assert repeated.json() == claimed.json()
-    assert adapter.calls == [
-        ("endpoint-a", True, (GPU_UUIDS[0],)),
-        ("endpoint-a", False, (GPU_UUIDS[0],)),
-    ]
-
-
-def test_keepalive_capability_and_mcp_schema_and_delegation(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_keepalive_capability_and_mcp_instructions() -> None:
     assert "endpoint_keepalive" in API_CAPABILITIES
     listed = asyncio.run(mcp.list_tools())
-    tool = next(item for item in listed if item.name == "gpu_set_keepalive")
-    assert set(tool.inputSchema["required"]) == {
-        "agent_name",
-        "server_id",
-        "enabled",
-        "approval_ref",
-        "idempotency_key",
-    }
-
-    calls = []
-
-    class FakeClient:
-        def post(self, path, body=None, *, idempotency_key):  # type: ignore[no-untyped-def]
-            calls.append((path, body, idempotency_key))
-            return {
-                "keepalive": {
-                    "enabled": body["enabled"],
-                    "policy": "idle_keepalive" if body["enabled"] else "disabled",
-                    "active_gpu_count": 1,
-                }
-            }
-
-    monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
-    with pytest.raises(ValueError, match="approval_ref"):
-        tools.gpu_set_keepalive("agent", "endpoint-a", True, "", "stable")
-    with pytest.raises(ValueError, match="idempotency_key"):
-        tools.gpu_set_keepalive("agent", "endpoint-a", True, "approved", "")
-    result = tools.gpu_set_keepalive(
-        "agent", "endpoint-a", False, "approved-task", "stable-key"
-    )
-    assert result["keepalive"]["enabled"] is False
-    assert calls == [
-        (
-            "/api/v1/endpoints/endpoint-a/keepalive",
-            {"enabled": False},
-            "stable-key",
-        )
-    ]
+    assert all(item.name != "gpu_set_keepalive" for item in listed)
     instructions = mcp_server.MCP_INSTRUCTIONS.lower()
-    assert "three tools cover routine gpu work" in instructions
+    assert "five tools cover gpu work" in instructions
     assert "serverpilot's own hold" in instructions
     assert "stopped before allocation" in instructions
     assert "workspace.path (workspace_path)=the cwd to enter" in instructions

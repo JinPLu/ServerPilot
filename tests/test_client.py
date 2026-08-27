@@ -151,17 +151,7 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
         "leases": [{"id": "lease-a", "project_id": "project-a"}],
         "requests": [{"id": "req-a", "state": "QUEUED"}, {"id": "req-b", "state": "LEASED"}],
         "reservations": [],
-        "resource_providers": [{"id": "provider-a", "provider_type": "host-capacity", "enabled": True}],
         "host_capacity": [{"endpoint": {"id": "server-a"}, "admission_state": "available"}],
-        "resource_claims": [
-            {
-                "id": "claim-a",
-                "project_id": "project-a",
-                "state": "active",
-                "allocations": [{"id": "allocation-a", "claim_id": "claim-a"}],
-            }
-        ],
-        "resource_run_actuals": [{"id": "actual-a", "project_id": "project-a", "task_ref": "task"}],
     }
     calls = []
 
@@ -183,15 +173,6 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
             return httpx.Response(200, json={**envelope, "data": current["endpoints"]})
         if url.endswith("/api/v1/requests"):
             return httpx.Response(200, json={**envelope, "data": [current["requests"][0]]})
-        if url.endswith("/api/v1/resource-providers"):
-            return httpx.Response(200, json={**envelope, "data": current["resource_providers"]})
-        if url.endswith("/api/v1/resource-claims"):
-            return httpx.Response(200, json={**envelope, "data": current["resource_claims"]})
-        if url.endswith("/api/v1/resource-monitor"):
-            return httpx.Response(200, json={**envelope, "data": {
-                "host_capacity": current["host_capacity"],
-                "allocations": current["resource_claims"][0]["allocations"],
-            }})
         raise AssertionError(url)
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
@@ -202,10 +183,5 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
         {"id": "gpu-a", "endpoint_id": "server-a", "state": "AVAILABLE"}
     ]
     assert client.requests(queued_only=True)["data"] == [{"id": "req-a", "state": "QUEUED"}]
-    assert client.resource_providers(provider_type="host-capacity", enabled=True)["data"][0]["id"] == "provider-a"
-    assert client.resource_claims(project_id="project-a", state="ACTIVE")["data"][0]["id"] == "claim-a"
-    monitor = client.resource_monitor(project_id="project-a")["data"]
-    assert monitor["host_capacity"][0]["endpoint"]["id"] == "server-a"
-    assert monitor["allocations"] == [{"id": "allocation-a", "claim_id": "claim-a"}]
     assert calls.count(("GET", "http://127.0.0.1:8787/api/v1/gpus")) == 1
     assert all(not url.endswith("/api/v1/state") for _method, url in calls)

@@ -40,7 +40,6 @@ LEGACY_DAEMON_LABEL = "local.gpu-broker.daemon"
 # stable across installs and cannot be spoofed by an unchanged semver.
 EXPECTED_CAPABILITIES = frozenset(
     {
-        "coordination_board",
         "endpoint_conflict_cleanup",
         "endpoint_delete",
         "operator_lease_release",

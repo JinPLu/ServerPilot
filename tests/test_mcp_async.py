@@ -7,20 +7,8 @@ import pytest
 
 from serverpilot import mcp_server
 from serverpilot.client import BrokerClientError
-from serverpilot.mcp_server import mcp, routine_mcp
+from serverpilot.mcp_server import mcp
 from tests.helpers import tools
-
-
-def _schema_object(schema: dict[str, object], root: dict[str, object]) -> dict[str, object]:
-    ref = schema.get("$ref")
-    if isinstance(ref, str):
-        name = ref.rsplit("/", 1)[-1]
-        defs = root.get("$defs") or root.get("definitions") or {}
-        assert isinstance(defs, dict)
-        resolved = defs[name]
-        assert isinstance(resolved, dict)
-        return resolved
-    return schema
 
 
 def test_lifespan_ensures_the_daemon_off_the_event_loop_and_closes_the_client(
@@ -107,7 +95,7 @@ def test_in_flight_tool_calls_overlap_on_the_event_loop(
 
 
 def test_routine_tool_parameter_names_are_unchanged() -> None:
-    tools = asyncio.run(routine_mcp.list_tools())
+    tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
 
     status_schema = by_name["gpu_status"].inputSchema
@@ -132,35 +120,7 @@ def test_routine_tool_parameter_names_are_unchanged() -> None:
 
 def test_object_parameters_publish_nested_schemas() -> None:
     tools = asyncio.run(mcp.list_tools())
-    by_name = {tool.name: tool for tool in tools}
-
-    submit_schema = by_name["gpu_scheduler_submit_once"].inputSchema
-    assert set(submit_schema["properties"]) >= {"agent_name", "request", "idempotency_key"}
-    request_schema = _schema_object(submit_schema["properties"]["request"], submit_schema)
-    assert {
-        "target_id",
-        "project_id",
-        "task_ref",
-        "purpose",
-        "approval_ref",
-        "duration_seconds",
-        "constraints",
-        "scheduler",
-        "script_body",
-    }.issubset(request_schema["properties"])
-
-    evaluation_schema = _schema_object(
-        by_name["resource_evaluate_plan"].inputSchema["properties"]["evaluation"],
-        by_name["resource_evaluate_plan"].inputSchema,
-    )
-    assert {"project_id", "task_ref", "baseline_runtime_seconds", "candidates"}.issubset(
-        evaluation_schema["properties"]
-    )
-
-    claim_schema = _schema_object(
-        by_name["resource_claim"].inputSchema["properties"]["claim"],
-        by_name["resource_claim"].inputSchema,
-    )
-    assert {"project_id", "task_ref", "purpose", "quantities", "forecast"}.issubset(
-        claim_schema["properties"]
-    )
+    names = {tool.name for tool in tools}
+    assert "gpu_scheduler_submit_once" not in names
+    assert "resource_evaluate_plan" not in names
+    assert "resource_claim" not in names
