@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -9,6 +10,11 @@ import pytest
 from serverpilot import daemon
 from serverpilot.daemon import DaemonConfig, DaemonError, MacOSDaemonManager
 from tests.test_macos_daemon import _config
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="reclaiming the daemon port needs os.getuid",
+)
 
 
 @pytest.fixture

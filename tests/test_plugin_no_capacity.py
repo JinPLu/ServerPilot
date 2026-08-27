@@ -7,6 +7,7 @@ failure the caller has to see, not an empty cluster it should wait out.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 import pytest
@@ -15,6 +16,11 @@ from serverpilot.plugins import (
     PLUGIN_NO_CAPACITY_EXIT_CODE,
     PluginError,
     invoke_plugin,
+)
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="a plugin is a POSIX executable found by its shebang and executable bit",
 )
 
 

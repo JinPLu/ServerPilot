@@ -36,7 +36,7 @@ def test_resolve_mcp_command_uses_packaged_sibling(
 ) -> None:
     python = tmp_path / "ServerPilot"
     python.write_bytes(b"")
-    sibling = tmp_path / "serverpilot-mcp"
+    sibling = tmp_path / mcp_entry.mcp_executable_name()
     sibling.write_bytes(b"")
     monkeypatch.setattr(mcp_entry.shutil, "which", lambda name: None)
     monkeypatch.setattr(mcp_entry.sys, "executable", str(python))
@@ -61,13 +61,13 @@ def test_resolve_mcp_command_looks_beside_the_unresolved_interpreter(
     venv = tmp_path / "tools" / "serverpilot" / "bin"
     venv.mkdir(parents=True)
     (venv / "python").symlink_to(interpreter)
-    sibling = venv / "serverpilot-mcp"
+    sibling = venv / mcp_entry.mcp_executable_name()
     sibling.write_bytes(b"")
     monkeypatch.setattr(mcp_entry.shutil, "which", lambda name: None)
     monkeypatch.setattr(mcp_entry.sys, "executable", str(venv / "python"))
 
     assert resolve_mcp_command() == str(sibling)
-    assert not (base / "serverpilot-mcp").exists()
+    assert not (base / mcp_entry.mcp_executable_name()).exists()
 
 
 def test_mcp_executable_name_uses_exe_suffix_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -218,7 +218,7 @@ def test_mcp_entry_endpoint_uses_packaged_sibling(
 ) -> None:
     python = tmp_path / "ServerPilot"
     python.write_bytes(b"")
-    sibling = tmp_path / "serverpilot-mcp"
+    sibling = tmp_path / mcp_entry.mcp_executable_name()
     sibling.write_bytes(b"")
     monkeypatch.setattr(mcp_entry.shutil, "which", lambda name: None)
     monkeypatch.setattr(mcp_entry.sys, "executable", str(python))

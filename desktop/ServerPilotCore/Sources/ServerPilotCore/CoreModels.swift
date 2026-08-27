@@ -1506,6 +1506,13 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         guard let id = raw.string("id"), let actorID = raw.string("actor_id"), let projectID = raw.string("project_id") else {
             return nil
         }
+        // A keepalive lease is ServerPilot's own hold on an idle card, never a
+        // user's task. The broker already withholds it; dropping it here too
+        // keeps a server-side regression from surfacing an internal lease as
+        // somebody's work. Per-card keepalive state travels on the GPU row.
+        guard (raw.string("kind") ?? "workload").lowercased() != "keepalive" else {
+            return nil
+        }
         self.id = id
         self.requestID = raw.string("request_id")
         self.actorID = actorID

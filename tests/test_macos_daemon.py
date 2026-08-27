@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import plistlib
 import re
 import sqlite3
@@ -20,6 +21,11 @@ from serverpilot.daemon import (
     probe_ready,
     render_launch_agent,
     resolve_daemon_config,
+)
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="the managed daemon is a macOS LaunchAgent and needs os.getuid and fcntl locks",
 )
 
 

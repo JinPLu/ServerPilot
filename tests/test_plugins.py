@@ -26,6 +26,11 @@ from serverpilot.plugins import (
 )
 from serverpilot.timeutil import utcnow
 
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="a plugin is a POSIX executable found by its shebang and executable bit",
+)
+
 
 def _write_plugin(directory: Path, plugin_id: str, script: str) -> Path:
     path = directory / plugin_id

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import stat
 from pathlib import Path
 
@@ -298,6 +299,10 @@ def test_install_refuses_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert (codex_home / "AGENTS.md").is_symlink()
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Windows has no POSIX mode bits for chmod to preserve",
+)
 def test_install_preserves_existing_file_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -317,6 +322,9 @@ def test_install_all_labels_results_and_explains_cursor(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
+    # Path.home() reads USERPROFILE on Windows, so HOME alone would let the
+    # installer write into the real home directory.
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
 
     assert main(["all", "--install"]) == 0

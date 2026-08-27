@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select
@@ -8,6 +10,11 @@ from serverpilot.config import InventoryConfig
 from serverpilot.models import Endpoint, GPUDevice
 from tests.helpers import observation
 from tests.test_service import _backdate_idle_since, _make_persistent, request_data
+
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="a plugin is a POSIX executable found by its shebang and executable bit",
+)
 
 PLUGIN_OVERLAY = {
     "plugin_id": "slurm-immediate",

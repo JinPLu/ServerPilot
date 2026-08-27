@@ -648,7 +648,7 @@ final class BrokerStoreTests: XCTestCase {
         StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: ["snapshot_revision": 102])
         defer { StateRouteURLProtocol.reset() }
         store.connectForTesting(
-            snapshotClient: ScriptedClient(results: [.success(snapshot), .success(snapshot), .success(snapshot), .success(snapshot)]),
+            snapshotClient: RepeatingClient(snapshot),
             serviceInfo: serviceInfo,
             baseURL: URL(string: "http://broker.test/")!
         )
@@ -738,7 +738,7 @@ final class BrokerStoreTests: XCTestCase {
         )
         defer { StateRouteURLProtocol.reset() }
         store.connectForTesting(
-            snapshotClient: ScriptedClient(results: [.success(snapshot), .success(snapshot)]),
+            snapshotClient: RepeatingClient(snapshot),
             serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: []),
             baseURL: URL(string: "http://broker.test/")!
         )
@@ -1550,6 +1550,24 @@ private actor CancellationIgnoringClient: BrokerSnapshotClient {
     }
 
     func metrics() -> Int { callCount }
+}
+
+/// Answers every refresh with the same snapshot.
+///
+/// A test that walks several mutations cannot use a finite script: the store
+/// reloads after each one, and with `refreshIntervalSeconds: 0` the poller
+/// drains the script, after which failing refreshes disconnect the store and
+/// the next mutation is refused before it ever reaches the network.
+private actor RepeatingClient: BrokerSnapshotClient {
+    private let stored: BrokerSnapshot
+
+    init(_ stored: BrokerSnapshot) {
+        self.stored = stored
+    }
+
+    func snapshot(actorID: String) async throws -> BrokerSnapshot {
+        stored
+    }
 }
 
 private actor ScriptedClient: BrokerSnapshotClient {

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import os
 import shutil
 import sqlite3
@@ -82,24 +83,36 @@ class Database:
         os.close(descriptor)
         temporary = Path(temporary_name)
         try:
+            # A sqlite3 connection used as a context manager ends the transaction
+            # but stays open. Windows refuses to replace or unlink a file that
+            # still has a handle, so every connection is closed explicitly.
             with (
-                sqlite3.connect(f"file:{source}?mode=ro", uri=True) as source_db,
-                sqlite3.connect(temporary) as destination_db,
+                contextlib.closing(
+                    sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+                ) as source_db,
+                contextlib.closing(sqlite3.connect(temporary)) as destination_db,
+                source_db,
+                destination_db,
             ):
                 source_db.backup(destination_db)
                 destination_db.execute("PRAGMA wal_checkpoint(TRUNCATE)")
-            with sqlite3.connect(f"file:{temporary}?mode=ro", uri=True) as copied_db:
+            with contextlib.closing(
+                sqlite3.connect(f"file:{temporary}?mode=ro", uri=True)
+            ) as copied_db:
                 integrity = copied_db.execute("PRAGMA integrity_check").fetchone()
             if integrity is None or integrity[0] != "ok":
                 raise ValueError("backup integrity check failed")
             with temporary.open("rb") as handle:
                 os.fsync(handle.fileno())
             os.replace(temporary, destination)
-            directory_descriptor = os.open(destination.parent, os.O_RDONLY)
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
+            # Only POSIX can open a directory to fsync the rename itself; on
+            # Windows os.replace is the durability boundary available.
+            if os.name == "posix":
+                directory_descriptor = os.open(destination.parent, os.O_RDONLY)
+                try:
+                    os.fsync(directory_descriptor)
+                finally:
+                    os.close(directory_descriptor)
         finally:
             temporary.unlink(missing_ok=True)
         return destination
@@ -118,7 +131,9 @@ class Database:
             raise ValueError(f"backup does not exist: {source}")
         if destination.exists():
             raise ValueError(f"refusing to overwrite restore target: {destination}")
-        with sqlite3.connect(f"file:{source}?mode=ro", uri=True) as connection:
+        with contextlib.closing(
+            sqlite3.connect(f"file:{source}?mode=ro", uri=True)
+        ) as connection:
             integrity = connection.execute("PRAGMA integrity_check").fetchone()
         if integrity is None or integrity[0] != "ok":
             raise ValueError("backup integrity check failed")

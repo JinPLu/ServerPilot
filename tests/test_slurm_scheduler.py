@@ -22,6 +22,11 @@ from serverpilot.slurm import (
     _scheduler_submit_script,
 )
 
+pytestmark = pytest.mark.skipif(
+    os.name != "posix",
+    reason="the submit script is POSIX shell and runs under /bin/bash",
+)
+
 
 @pytest.fixture(autouse=True)
 def approved_scheduler_helper(monkeypatch: pytest.MonkeyPatch) -> None:

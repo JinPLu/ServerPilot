@@ -22,7 +22,9 @@ def resolved_command(monkeypatch: pytest.MonkeyPatch) -> str:
 def test_cursor_registration_targets_the_client_config_file(resolved_command: str) -> None:
     registration = cli._mcp_registration("cursor", resolved_command)
 
-    assert registration["target"].endswith(".cursor/mcp.json")
+    target = Path(registration["target"])
+    assert target.name == "mcp.json"
+    assert target.parent.name == ".cursor"
     assert registration["config"]["mcpServers"]["serverpilot"]["command"] == resolved_command
 
 
