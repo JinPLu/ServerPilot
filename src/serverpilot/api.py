@@ -62,6 +62,8 @@ from serverpilot.schemas import (
     SchedulerProfileSubmit,
     SchedulerTargetUpsert,
     SchedulerUploadRequest,
+    ServerGroupCreate,
+    ServerGroupUpdate,
     SSHCommandCommit,
     SSHCommandRequest,
     SSHCommandsCommit,
@@ -204,6 +206,12 @@ def _public_error_message(exc: BrokerError) -> str:
         "endpoint_not_found": "这台服务器已经不在本机资源池中。",
         "endpoint_has_active_leases": "这台服务器上还有进行中的租约，请先释放后再删除。",
         "endpoint_has_active_allocations": "这台服务器上还有进行中的资源分配，请先结束后再删除。",
+        "group_selection_required": "请先选择服务器分组后再申请 GPU。",
+        "ungrouped_endpoint_required": "未分组申请请选择一台未分组服务器。",
+        "server_group_not_found": "找不到这个服务器分组。",
+        "server_group_exists": "这个服务器分组编号已经存在。",
+        "server_group_has_members": "这个分组下还有服务器，请先解绑后再删除。",
+        "endpoint_workspace_required": "服务器需要工作目录，或加入带默认工作目录的分组。",
     }
     if exc.code in messages:
         return messages[exc.code]
@@ -1210,6 +1218,30 @@ def create_app(
         id_collision = id_owner if id_owner is not None and id_owner is not same_address else None
         return same_address, id_collision
 
+    def ssh_endpoint_upsert(
+        parsed: ParsedSSHCommand,
+        commit: SSHCommandCommit | SSHCommandsCommit,
+        *,
+        endpoint_id: str,
+        project_ids: list[str],
+    ) -> EndpointUpsert:
+        payload: dict[str, Any] = {
+            "id": endpoint_id,
+            "host": parsed.host,
+            "port": parsed.port,
+            "ssh_user": parsed.user,
+            "workspace_path": commit.stored_workspace_override(),
+            "labels": ["gpu", "direct-ssh"],
+            "storage_group": None,
+            "expected_gpu_count": None,
+            "expected_gpu_total_vram_mib": None,
+            "project_ids": project_ids,
+            "enabled": True,
+        }
+        if "server_group_id" in commit.model_fields_set:
+            payload["server_group_id"] = commit.server_group_id
+        return EndpointUpsert.model_validate(payload)
+
     def service_contract(method_name: str):  # type: ignore[no-untyped-def]
         method = getattr(service, method_name, None)
         if not callable(method):
@@ -1291,6 +1323,14 @@ def create_app(
     @app.get("/api/v1/endpoints")
     def endpoints(actor: ApiActor) -> dict[str, Any]:
         return service.list_endpoints(actor)
+
+    @app.get("/api/v1/server-groups")
+    def server_groups(actor: ApiActor) -> dict[str, Any]:
+        return service.list_server_groups(actor)
+
+    @app.get("/api/v1/server-groups/{group_id}")
+    def server_group(group_id: str, actor: ApiActor) -> dict[str, Any]:
+        return service.get_server_group(actor, group_id)
 
     @app.get("/api/v1/endpoints/{endpoint_id}/history")
     def endpoint_history(
@@ -1582,6 +1622,13 @@ def create_app(
     ) -> dict[str, Any]:
         """Create a persistent routine GPU claim through the shared handoff."""
 
+        if not request_data.constraints.same_host:
+            payload = request_data.model_dump(mode="json")
+            payload["constraints"]["same_host"] = True
+            try:
+                request_data = RequestCreate.model_validate(payload)
+            except ValidationError as exc:
+                raise RequestValidationError(exc.errors()) from exc
         return await claim_request_now(
             actor,
             request_data,
@@ -1978,6 +2025,44 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
+    @app.post("/api/v1/server-groups")
+    def create_server_group(
+        group_data: ServerGroupCreate,
+        actor: ApiActor,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> dict[str, Any]:
+        return service.create_server_group(
+            actor,
+            group_data,
+            idempotency_key=_idempotency_key(idempotency_key),
+        )
+
+    @app.patch("/api/v1/server-groups/{group_id}")
+    def update_server_group(
+        group_id: str,
+        group_data: ServerGroupUpdate,
+        actor: ApiActor,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> dict[str, Any]:
+        return service.update_server_group(
+            actor,
+            group_id,
+            group_data,
+            idempotency_key=_idempotency_key(idempotency_key),
+        )
+
+    @app.delete("/api/v1/server-groups/{group_id}")
+    def delete_server_group(
+        group_id: str,
+        actor: ApiActor,
+        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
+    ) -> dict[str, Any]:
+        return service.delete_server_group(
+            actor,
+            group_id,
+            idempotency_key=_idempotency_key(idempotency_key),
+        )
+
     @app.patch("/api/v1/endpoints/{endpoint_id}")
     def update_endpoint(
         endpoint_id: str,
@@ -2122,18 +2207,8 @@ def create_app(
 
         result = service.upsert_endpoint(
             actor,
-            EndpointUpsert(
-                id=endpoint_id,
-                host=parsed.host,
-                port=parsed.port,
-                ssh_user=parsed.user,
-                workspace_path=commit.workspace_path,
-                labels=["gpu", "direct-ssh"],
-                storage_group=None,
-                expected_gpu_count=None,
-                expected_gpu_total_vram_mib=None,
-                project_ids=project_ids,
-                enabled=True,
+            ssh_endpoint_upsert(
+                parsed, commit, endpoint_id=endpoint_id, project_ids=project_ids
             ),
             idempotency_key=secrets.token_hex(16),
         )
@@ -2276,18 +2351,8 @@ def create_app(
             try:
                 result = service.upsert_endpoint(
                     actor,
-                    EndpointUpsert(
-                        id=endpoint_id,
-                        host=parsed.host,
-                        port=parsed.port,
-                        ssh_user=parsed.user,
-                        workspace_path=commit.workspace_path,
-                        labels=["gpu", "direct-ssh"],
-                        storage_group=None,
-                        expected_gpu_count=None,
-                        expected_gpu_total_vram_mib=None,
-                        project_ids=project_ids,
-                        enabled=True,
+                    ssh_endpoint_upsert(
+                        parsed, commit, endpoint_id=endpoint_id, project_ids=project_ids
                     ),
                     idempotency_key=secrets.token_hex(16),
                 )
@@ -2413,6 +2478,9 @@ def create_app(
         endpoint_ids = constraints.get("endpoint_ids") or []
         if endpoint_ids:
             parts.append(f"服务器：{'、'.join(endpoint_ids)}")
+        group_ids = constraints.get("server_group_ids") or []
+        if group_ids:
+            parts.append(f"服务器组：{'、'.join(group_ids)}")
         return " · ".join(parts)
 
     def ui_reference_data(actor: ActorContext) -> dict[str, Any]:
@@ -2427,6 +2495,7 @@ def create_app(
         return {
             "endpoints": snapshot["endpoints"],
             "gpus": snapshot["gpus"],
+            "server_groups": snapshot.get("server_groups") or [],
             "workload_profiles": workload_profiles,
             "claimable_workload_profiles": [
                 profile for profile in workload_profiles if profile["enabled"]
@@ -2589,7 +2658,7 @@ def create_app(
     def _csv_values(value: str | None) -> list[str]:
         return [item.strip() for item in (value or "").split(",") if item.strip()]
 
-    def ui_form_payload(action: str, form: Any) -> dict[str, Any]:
+    def ui_form_payload(action: str, form: Any, actor: ActorContext) -> dict[str, Any]:
         """Translate click-first HTML forms into the unchanged domain payloads.
 
         Adding a human UI action only needs a form plus this explicit mapping;
@@ -2606,8 +2675,55 @@ def create_app(
             min_total_gib = _form_int(form, "min_total_vram_gib", minimum=1)
             min_free_gib = _form_int(form, "min_free_vram_gib", minimum=0)
             endpoint_id = _form_value(form, "endpoint_id")
+            server_group_id = _form_value(form, "server_group_id")
             gpu_ids = _form_list(form, "gpu_ids")
             task_ref = _form_value(form, "task_ref", required=True)
+            server_group_ids: list[str] = []
+            endpoint_ids: list[str] = []
+            same_host = False
+            formal_groups = bool(service.list_server_groups(actor)["data"])
+            if action == "quick-claim" and formal_groups:
+                if not server_group_id:
+                    raise BrokerError(
+                        "group_selection_required",
+                        "请先选择服务器分组后再申请 GPU。",
+                        status_code=422,
+                    )
+                if server_group_id == "__ungrouped__":
+                    if not endpoint_id:
+                        raise BrokerError(
+                            "ungrouped_endpoint_required",
+                            "未分组申请请选择一台未分组服务器。",
+                            status_code=422,
+                        )
+                    selected = next(
+                        (
+                            item
+                            for item in service.list_endpoints(actor)["data"]
+                            if item["id"] == endpoint_id
+                        ),
+                        None,
+                    )
+                    if selected is None or selected.get("server_group_id"):
+                        raise BrokerError(
+                            "ungrouped_endpoint_required",
+                            "未分组申请请选择一台未分组服务器。",
+                            status_code=422,
+                        )
+                    endpoint_ids = [endpoint_id]
+                    same_host = True
+                else:
+                    server_group_ids = [server_group_id]
+                    same_host = True
+            elif server_group_id == "__ungrouped__":
+                if endpoint_id:
+                    endpoint_ids = [endpoint_id]
+                    same_host = True
+            elif server_group_id:
+                server_group_ids = [server_group_id]
+                same_host = True
+            elif endpoint_id:
+                endpoint_ids = [endpoint_id]
             return {
                 "project_id": _form_value(form, "project_id", required=True),
                 "task_ref": task_ref,
@@ -2622,7 +2738,9 @@ def create_app(
                 "min_total_vram_mib": min_total_gib * 1024 if min_total_gib is not None else None,
                 "min_free_vram_mib": min_free_gib * 1024 if min_free_gib is not None else None,
                 "placement": "exact" if gpu_ids else (_form_value(form, "placement") or "pack"),
-                "endpoint_ids": [endpoint_id] if endpoint_id else [],
+                "endpoint_ids": endpoint_ids,
+                "server_group_ids": server_group_ids,
+                "same_host": same_host,
                 "gpu_ids": gpu_ids,
             }
         if action in {"activate-lease", "renew-lease"}:
@@ -2657,27 +2775,31 @@ def create_app(
             min_total_gib = _form_int(form, "min_total_vram_gib", minimum=1)
             min_free_gib = _form_int(form, "min_free_vram_gib", minimum=0)
             assert duration_hours is not None and gpu_count is not None
+            server_group_id = _form_value(form, "server_group_id")
+            constraints: dict[str, Any] = {
+                "gpu_count": gpu_count,
+                "min_available_cpu_cores": _form_float(
+                    form, "min_available_cpu_cores", minimum=0
+                ),
+                "min_available_memory_mib": min_available_memory_gib * 1024
+                if min_available_memory_gib is not None
+                else None,
+                "min_total_vram_mib": min_total_gib * 1024
+                if min_total_gib is not None
+                else None,
+                "min_free_vram_mib": min_free_gib * 1024 if min_free_gib is not None else None,
+                "placement": "pack",
+                "endpoint_ids": _form_list(form, "endpoint_ids"),
+            }
+            if server_group_id:
+                constraints["server_group_ids"] = [server_group_id]
             return {
                 "id": _form_value(form, "id", required=True),
                 "project_id": _form_value(form, "project_id", required=True),
                 "display_name": _form_value(form, "display_name", required=True),
                 "purpose": _form_value(form, "purpose", required=True),
                 "duration_seconds": duration_hours * 3600,
-                "constraints": {
-                    "gpu_count": gpu_count,
-                    "min_available_cpu_cores": _form_float(
-                        form, "min_available_cpu_cores", minimum=0
-                    ),
-                    "min_available_memory_mib": min_available_memory_gib * 1024
-                    if min_available_memory_gib is not None
-                    else None,
-                    "min_total_vram_mib": min_total_gib * 1024
-                    if min_total_gib is not None
-                    else None,
-                    "min_free_vram_mib": min_free_gib * 1024 if min_free_gib is not None else None,
-                    "placement": "pack",
-                    "endpoint_ids": _form_list(form, "endpoint_ids"),
-                },
+                "constraints": constraints,
                 "enabled": _form_boolean(form, "enabled"),
             }
         if action == "actor":
@@ -2698,12 +2820,13 @@ def create_app(
             ).strip("-")
             if requested_id and not requested_id[0].isalpha():
                 requested_id = f"server-{requested_id}"
-            return {
+            server_group_id = _form_value(form, "server_group_id")
+            workspace_path = _form_value(form, "workspace_path")
+            payload: dict[str, Any] = {
                 "id": requested_id or generated_id,
                 "host": host,
                 "port": port,
                 "ssh_user": _form_value(form, "ssh_user", required=True),
-                "workspace_path": _form_value(form, "workspace_path", required=True),
                 "labels": _csv_values(_form_value(form, "labels")),
                 "storage_group": _form_value(form, "storage_group"),
                 "expected_gpu_count": _form_int(form, "expected_gpu_count", minimum=1),
@@ -2716,6 +2839,18 @@ def create_app(
                 "project_ids": [owner_project_id],
                 "enabled": _form_boolean(form, "enabled"),
             }
+            if server_group_id:
+                payload["server_group_id"] = server_group_id
+                payload["workspace_path_override"] = workspace_path
+            elif not workspace_path:
+                raise BrokerError(
+                    "form_field_required",
+                    "请填写远端工作区绝对路径",
+                    status_code=422,
+                )
+            else:
+                payload["workspace_path"] = workspace_path
+            return payload
         if action == "reconcile":
             return {}
         if action == "prune-telemetry":
@@ -2765,7 +2900,7 @@ def create_app(
                         "invalid_json", "高级模式的 JSON payload 无效", status_code=422
                     ) from exc
             else:
-                data = ui_form_payload(action, await request.form())
+                data = ui_form_payload(action, await request.form(), actor)
             key = secrets.token_hex(16)
             if action == "request":
                 result = service.create_request(

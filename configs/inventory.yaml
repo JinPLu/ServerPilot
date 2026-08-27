@@ -10,4 +10,5 @@ projects:
     weight: 1
     quota_gpus: null
     concurrency_limit: null
+server_groups: []
 endpoints: []

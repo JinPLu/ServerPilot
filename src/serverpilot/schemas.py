@@ -7,9 +7,55 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
-from serverpilot.config import KeepaliveAdapterId, KeepalivePolicy
+from serverpilot.config import (
+    KeepaliveAdapterId,
+    KeepalivePolicy,
+    absolute_single_line_path,
+    plain_text,
+)
 
 DEFAULT_LEASE_WINDOW_SECONDS = 8 * 60 * 60
+
+
+def optional_absolute_workspace_path(value: str | None) -> str | None:
+    if value is None:
+        return None
+    stripped = value.strip()
+    if not stripped:
+        return None
+    return absolute_single_line_path(stripped)
+
+
+def resolve_stored_workspace_override(
+    *,
+    server_group_id: str | None,
+    workspace_path: str | None,
+    workspace_path_override: str | None,
+    fields_set: set[str],
+    require_ungrouped_path: bool,
+) -> str | None:
+    """Resolve the stored per-endpoint workspace override.
+
+    Explicit ``workspace_path_override`` wins (null means inherit). Grouped
+    callers that omit it may still pass a legacy ``workspace_path``. Ungrouped
+    endpoints need a non-null stored override. Conflicting non-equal values fail.
+    """
+
+    override_explicit = "workspace_path_override" in fields_set
+    legacy_explicit = "workspace_path" in fields_set
+    override_value = workspace_path_override if override_explicit else None
+    legacy_value = workspace_path if legacy_explicit else None
+    if override_explicit and legacy_explicit and override_value != legacy_value:
+        raise ValueError("workspace_path and workspace_path_override conflict")
+    if override_explicit:
+        stored = override_value
+    elif legacy_explicit:
+        stored = legacy_value
+    else:
+        stored = None
+    if require_ungrouped_path and server_group_id is None and stored is None:
+        raise ValueError("workspace_path or workspace_path_override is required when ungrouped")
+    return stored
 
 
 class StrictModel(BaseModel):
@@ -49,6 +95,7 @@ class ResourceConstraints(StrictModel):
     gpu_ids: list[str] = Field(default_factory=list)
     deny_endpoint_ids: list[str] = Field(default_factory=list)
     deny_gpu_ids: list[str] = Field(default_factory=list)
+    server_group_ids: list[str] = Field(default_factory=list)
     allow_conservative_backfill: bool = False
 
     @field_validator(
@@ -58,6 +105,7 @@ class ResourceConstraints(StrictModel):
         "gpu_ids",
         "deny_endpoint_ids",
         "deny_gpu_ids",
+        "server_group_ids",
     )
     @classmethod
     def unique_values(cls, values: list[str]) -> list[str]:
@@ -279,6 +327,7 @@ class RequestCreateFlat(StrictModel):
     gpu_ids: list[str] = Field(default_factory=list)
     deny_endpoint_ids: list[str] = Field(default_factory=list)
     deny_gpu_ids: list[str] = Field(default_factory=list)
+    server_group_ids: list[str] = Field(default_factory=list)
     allow_conservative_backfill: bool = False
 
     def canonical(self) -> RequestCreate:
@@ -546,6 +595,51 @@ class SchedulerUploadRequest(StrictModel):
         return value
 
 
+class ServerGroupCreate(StrictModel):
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,127}$")
+    display_name: str = Field(min_length=1, max_length=120)
+    workspace_path: str = Field(min_length=1, max_length=2000)
+    environment_notes: str | None = Field(default=None, max_length=8000)
+    description: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("workspace_path")
+    @classmethod
+    def valid_workspace_path(cls, value: str) -> str:
+        return absolute_single_line_path(value)
+
+    @field_validator("environment_notes", "description")
+    @classmethod
+    def plain_text_fields(cls, value: str | None) -> str | None:
+        return plain_text(value)
+
+
+class ServerGroupUpdate(StrictModel):
+    display_name: str | None = Field(default=None, min_length=1, max_length=120)
+    workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    environment_notes: str | None = Field(default=None, max_length=8000)
+    description: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("workspace_path")
+    @classmethod
+    def valid_workspace_path(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return absolute_single_line_path(value)
+
+    @field_validator("environment_notes", "description")
+    @classmethod
+    def plain_text_fields(cls, value: str | None) -> str | None:
+        return plain_text(value)
+
+    @model_validator(mode="after")
+    def has_update(self) -> ServerGroupUpdate:
+        if not self.model_fields_set:
+            raise ValueError("server group update must include at least one mutable field")
+        if "workspace_path" in self.model_fields_set and self.workspace_path is None:
+            raise ValueError("workspace_path cannot be cleared")
+        return self
+
+
 class EndpointCreate(StrictModel):
     """Immutable endpoint identity plus its initial safe monitoring metadata."""
 
@@ -554,12 +648,14 @@ class EndpointCreate(StrictModel):
     port: int = Field(ge=1, le=65535)
     ssh_user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
-    workspace_path: str = Field(min_length=1, max_length=2000)
+    workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    workspace_path_override: str | None = Field(default=None, min_length=1, max_length=2000)
     observation_profile: str = Field(default="server-script-v1", min_length=1, max_length=40)
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     keepalive_policy: KeepalivePolicy = "disabled"
     labels: list[str] = Field(default_factory=list)
     storage_group: str | None = Field(default=None, max_length=120)
+    server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
     expected_gpu_count: int | None = Field(default=None, ge=1, le=1024)
     expected_gpu_total_vram_mib: int | None = Field(default=None, ge=1)
     owner_project_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -576,12 +672,10 @@ class EndpointCreate(StrictModel):
             raise ValueError("endpoint list values must not be empty")
         return values
 
-    @field_validator("workspace_path")
+    @field_validator("workspace_path", "workspace_path_override")
     @classmethod
-    def valid_workspace_path(cls, value: str) -> str:
-        if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
-            raise ValueError("workspace_path must be an absolute single-line path")
-        return value
+    def valid_workspace_path(cls, value: str | None) -> str | None:
+        return optional_absolute_workspace_path(value)
 
     @field_validator("observation_profile")
     @classmethod
@@ -592,8 +686,18 @@ class EndpointCreate(StrictModel):
             raise ValueError(f"unknown observation profile: {value}")
         return value
 
+    def stored_workspace_override(self) -> str | None:
+        return resolve_stored_workspace_override(
+            server_group_id=self.server_group_id,
+            workspace_path=self.workspace_path,
+            workspace_path_override=self.workspace_path_override,
+            fields_set=self.model_fields_set,
+            require_ungrouped_path=True,
+        )
+
     @model_validator(mode="after")
     def resolve_owner(self) -> EndpointCreate:
+        self.stored_workspace_override()
         if self.owner_project_id and self.project_ids and self.project_ids != [self.owner_project_id]:
             raise ValueError("project_ids may only repeat owner_project_id for legacy imports")
         if self.owner_project_id is None and len(self.project_ids) == 1:
@@ -609,10 +713,12 @@ class EndpointUpdate(StrictModel):
     ssh_user: str | None = Field(default=None, pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
     workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    workspace_path_override: str | None = Field(default=None, min_length=1, max_length=2000)
     observation_profile: str | None = Field(default=None, min_length=1, max_length=40)
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     labels: list[str] | None = None
     storage_group: str | None = Field(default=None, max_length=120)
+    server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
     expected_gpu_count: int | None = Field(default=None, ge=1, le=1024)
     expected_gpu_total_vram_mib: int | None = Field(default=None, ge=1)
     owner_project_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -624,14 +730,10 @@ class EndpointUpdate(StrictModel):
             raise ValueError("endpoint labels must contain unique non-empty values")
         return values
 
-    @field_validator("workspace_path")
+    @field_validator("workspace_path", "workspace_path_override")
     @classmethod
     def valid_workspace_path(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
-            raise ValueError("workspace_path must be an absolute single-line path")
-        return value
+        return optional_absolute_workspace_path(value)
 
     @field_validator("observation_profile")
     @classmethod
@@ -642,12 +744,23 @@ class EndpointUpdate(StrictModel):
             raise ValueError(f"unknown observation profile: {value}")
         return value
 
+    def workspace_override_specified(self) -> bool:
+        return bool({"workspace_path", "workspace_path_override"} & self.model_fields_set)
+
+    def stored_workspace_override(self) -> str | None:
+        return resolve_stored_workspace_override(
+            server_group_id=self.server_group_id,
+            workspace_path=self.workspace_path,
+            workspace_path_override=self.workspace_path_override,
+            fields_set=self.model_fields_set,
+            require_ungrouped_path=False,
+        )
+
     @model_validator(mode="after")
     def has_update(self) -> EndpointUpdate:
         if not self.model_fields_set:
             raise ValueError("endpoint update must include at least one mutable field")
-        if "workspace_path" in self.model_fields_set and self.workspace_path is None:
-            raise ValueError("workspace_path cannot be cleared")
+        self.stored_workspace_override()
         return self
 
 
@@ -677,7 +790,9 @@ class SSHCommandRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     command: str = Field(min_length=1, max_length=512)
-    workspace_path: str = Field(min_length=1, max_length=2000)
+    workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    workspace_path_override: str | None = Field(default=None, min_length=1, max_length=2000)
+    server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
     project_ids: list[str] | None = Field(default=None, min_length=1)
     csrf: str = Field(min_length=1, max_length=256)
 
@@ -688,12 +803,24 @@ class SSHCommandRequest(BaseModel):
             raise ValueError("project_ids must contain unique non-empty values")
         return values
 
-    @field_validator("workspace_path")
+    @field_validator("workspace_path", "workspace_path_override")
     @classmethod
-    def valid_workspace_path(cls, value: str) -> str:
-        if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
-            raise ValueError("workspace_path must be an absolute single-line path")
-        return value
+    def valid_workspace_path(cls, value: str | None) -> str | None:
+        return optional_absolute_workspace_path(value)
+
+    def stored_workspace_override(self) -> str | None:
+        return resolve_stored_workspace_override(
+            server_group_id=self.server_group_id,
+            workspace_path=self.workspace_path,
+            workspace_path_override=self.workspace_path_override,
+            fields_set=self.model_fields_set,
+            require_ungrouped_path=True,
+        )
+
+    @model_validator(mode="after")
+    def resolve_workspace(self) -> SSHCommandRequest:
+        self.stored_workspace_override()
+        return self
 
 
 class SSHCommandCommit(SSHCommandRequest):
@@ -704,7 +831,9 @@ class SSHCommandsRequest(StrictModel):
     """Line-oriented SSH commands pasted from the GUI; each line is parsed independently."""
 
     commands: list[str] = Field(min_length=1, max_length=100)
-    workspace_path: str = Field(min_length=1, max_length=2000)
+    workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
+    workspace_path_override: str | None = Field(default=None, min_length=1, max_length=2000)
+    server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
     project_ids: list[str] | None = Field(default=None, min_length=1)
     csrf: str = Field(min_length=1, max_length=256)
 
@@ -715,12 +844,10 @@ class SSHCommandsRequest(StrictModel):
             raise ValueError("each SSH command must be between 1 and 512 characters")
         return values
 
-    @field_validator("workspace_path")
+    @field_validator("workspace_path", "workspace_path_override")
     @classmethod
-    def valid_workspace_path(cls, value: str) -> str:
-        if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
-            raise ValueError("workspace_path must be an absolute single-line path")
-        return value
+    def valid_workspace_path(cls, value: str | None) -> str | None:
+        return optional_absolute_workspace_path(value)
 
     @field_validator("project_ids")
     @classmethod
@@ -728,6 +855,20 @@ class SSHCommandsRequest(StrictModel):
         if values is not None and (len(values) != len(set(values)) or any(not value for value in values)):
             raise ValueError("project_ids must contain unique non-empty values")
         return values
+
+    def stored_workspace_override(self) -> str | None:
+        return resolve_stored_workspace_override(
+            server_group_id=self.server_group_id,
+            workspace_path=self.workspace_path,
+            workspace_path_override=self.workspace_path_override,
+            fields_set=self.model_fields_set,
+            require_ungrouped_path=True,
+        )
+
+    @model_validator(mode="after")
+    def resolve_workspace(self) -> SSHCommandsRequest:
+        self.stored_workspace_override()
+        return self
 
 
 class SSHCommandsCommit(SSHCommandsRequest):

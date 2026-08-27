@@ -235,6 +235,10 @@ public final class BrokerStore: ObservableObject {
         serviceInfo?.supportsMcpEntry == true
     }
 
+    public var supportsServerGroupCRUD: Bool {
+        serviceInfo?.supportsServerGroupCRUD == true
+    }
+
     public var canUpdateCollectorSettings: Bool {
         supportsCollectorSettings && baseURL != nil && allowsMutations
     }
@@ -525,32 +529,13 @@ public final class BrokerStore: ObservableObject {
             completion(nil, "请完整填写项目、任务、用途和 GPU 数量。")
             return
         }
-        var constraints: [String: Any] = [
-            "gpu_count": draft.gpuCount,
-            "placement": "pack"
-        ]
-        if !draft.endpointID.isEmpty {
-            constraints["endpoint_ids"] = [draft.endpointID]
-        }
-        if let minimumCPUCores = draft.minimumCPUCores {
-            constraints["min_available_cpu_cores"] = minimumCPUCores
-        }
-        if let minimumMemoryMiB = draft.minimumMemoryMiB {
-            constraints["min_available_memory_mib"] = minimumMemoryMiB
-        }
-        if let minimumTotalVRAMMiB = draft.minimumTotalVRAMMiB {
-            constraints["min_total_vram_mib"] = minimumTotalVRAMMiB
-        }
-        if let minimumFreeVRAMMiB = draft.minimumFreeVRAMMiB {
-            constraints["min_free_vram_mib"] = minimumFreeVRAMMiB
-        }
         performMutationWithPayload(
             path: "api/v1/claims",
             payload: [
                 "project_id": project,
                 "task_ref": task,
                 "purpose": purpose,
-                "constraints": constraints
+                "constraints": Self.claimConstraints(for: draft)
             ]
         ) { [weak self] payload, error in
             guard let self else { return }
@@ -584,24 +569,9 @@ public final class BrokerStore: ObservableObject {
             completion(false, message)
             return
         }
-        var payload: [String: Any] = [
-            "id": draft.id,
-            "host": draft.host,
-            "port": draft.port,
-            "ssh_user": draft.sshUser,
-            "workspace_path": draft.workspacePath,
-            "observation_profile": draft.observationProfile,
-            "labels": ["desktop-app"],
-        ]
-        if draft.observationProfile == "server-script-v1" {
-            // The helper is a sealed ServerPilot capability, not a user-supplied
-            // command or profile.  New GUI servers should be ready for the
-            // explicit Start occupancy action without a second setup screen.
-            payload["keepalive_adapter_id"] = "server-script-v1"
-        }
         performMutation(
             path: "api/v1/endpoints",
-            payload: payload,
+            payload: Self.endpointCreatePayload(draft),
             successMessage: "已添加服务器 \(draft.id)，正在确认状态。",
             completion: completion
         )
@@ -684,11 +654,7 @@ public final class BrokerStore: ObservableObject {
             endpoint,
             path: "api/v1/endpoints/\(endpoint.id)",
             method: "PATCH",
-            payload: [
-                "ssh_user": draft.sshUser,
-                "workspace_path": draft.workspacePath,
-                "observation_profile": draft.observationProfile,
-            ],
+            payload: Self.endpointUpdatePayload(draft),
             successMessage: "已更新服务器设置，正在确认状态。",
             completion: completion
         )
@@ -715,6 +681,158 @@ public final class BrokerStore: ObservableObject {
                 : "已关闭 \(endpoint.displayName) 的空闲自动占卡策略。",
             completion: completion
         )
+    }
+
+    public func createServerGroup(
+        _ draft: ServerGroupDraft,
+        completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
+    ) {
+        guard supportsServerGroupCRUD else {
+            let message = endpointCompatibilityMessage("创建服务器分组", capability: "server_group_crud")
+            errorMessage = message
+            completion(false, message)
+            return
+        }
+        performMutation(
+            path: "api/v1/server-groups",
+            payload: [
+                "id": draft.id,
+                "display_name": draft.displayName,
+                "workspace_path": draft.workspacePath,
+                "environment_notes": draft.environmentNotes,
+                "description": draft.description,
+            ],
+            successMessage: "已创建分组 \(draft.displayName)。",
+            completion: completion
+        )
+    }
+
+    public func updateServerGroup(
+        _ group: ServerGroupRecord,
+        draft: ServerGroupUpdateDraft,
+        completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
+    ) {
+        guard supportsServerGroupCRUD else {
+            let message = endpointCompatibilityMessage("更新服务器分组", capability: "server_group_crud")
+            errorMessage = message
+            completion(false, message)
+            return
+        }
+        performMutationWithPayload(
+            path: "api/v1/server-groups/\(group.id)",
+            method: "PATCH",
+            payload: [
+                "display_name": draft.displayName,
+                "workspace_path": draft.workspacePath,
+                "environment_notes": draft.environmentNotes,
+                "description": draft.description,
+            ]
+        ) { [weak self] _, error in
+            guard let self else { return }
+            if let error {
+                completion(false, error)
+                return
+            }
+            self.notice = "已更新分组 \(draft.displayName)。"
+            self.errorMessage = nil
+            self.reload()
+            completion(true, nil)
+        }
+    }
+
+    public func deleteServerGroup(
+        _ group: ServerGroupRecord,
+        completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
+    ) {
+        guard supportsServerGroupCRUD else {
+            let message = endpointCompatibilityMessage("删除服务器分组", capability: "server_group_crud")
+            errorMessage = message
+            completion(false, message)
+            return
+        }
+        performMutationWithPayload(
+            path: "api/v1/server-groups/\(group.id)",
+            method: "DELETE",
+            payload: [:]
+        ) { [weak self] _, error in
+            guard let self else { return }
+            if let error {
+                completion(false, error)
+                return
+            }
+            self.notice = "已删除分组 \(group.displayName)。"
+            self.errorMessage = nil
+            self.reload()
+            completion(true, nil)
+        }
+    }
+
+    static func endpointCreatePayload(_ draft: EndpointDraft) -> [String: Any] {
+        var payload: [String: Any] = [
+            "id": draft.id,
+            "host": draft.host,
+            "port": draft.port,
+            "ssh_user": draft.sshUser,
+            "observation_profile": draft.observationProfile,
+            "labels": ["desktop-app"],
+        ]
+        if let serverGroupID = draft.serverGroupID {
+            payload["server_group_id"] = serverGroupID
+            payload["workspace_path_override"] = draft.workspacePathOverride ?? NSNull()
+        } else {
+            payload["workspace_path"] = draft.workspacePath
+        }
+        if draft.observationProfile == "server-script-v1" {
+            // The helper is a sealed ServerPilot capability, not a user-supplied
+            // command or profile.  New GUI servers should be ready for the
+            // explicit Start occupancy action without a second setup screen.
+            payload["keepalive_adapter_id"] = "server-script-v1"
+        }
+        return payload
+    }
+
+    static func endpointUpdatePayload(_ draft: EndpointUpdateDraft) -> [String: Any] {
+        var payload: [String: Any] = [
+            "ssh_user": draft.sshUser,
+            "observation_profile": draft.observationProfile,
+        ]
+        if let serverGroupID = draft.serverGroupID {
+            payload["server_group_id"] = serverGroupID
+            payload["workspace_path_override"] = draft.workspacePathOverride ?? NSNull()
+        } else {
+            payload["workspace_path"] = draft.workspacePath
+            if draft.includesGroupAssignment {
+                payload["server_group_id"] = NSNull()
+            }
+        }
+        return payload
+    }
+
+    static func claimConstraints(for draft: ClaimDraft) -> [String: Any] {
+        var constraints: [String: Any] = [
+            "gpu_count": draft.gpuCount,
+            "placement": "pack",
+            "same_host": true,
+        ]
+        let groupID = draft.serverGroupID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        if let groupID, !groupID.isEmpty {
+            constraints["server_group_ids"] = [groupID]
+        } else if !draft.endpointID.isEmpty {
+            constraints["endpoint_ids"] = [draft.endpointID]
+        }
+        if let minimumCPUCores = draft.minimumCPUCores {
+            constraints["min_available_cpu_cores"] = minimumCPUCores
+        }
+        if let minimumMemoryMiB = draft.minimumMemoryMiB {
+            constraints["min_available_memory_mib"] = minimumMemoryMiB
+        }
+        if let minimumTotalVRAMMiB = draft.minimumTotalVRAMMiB {
+            constraints["min_total_vram_mib"] = minimumTotalVRAMMiB
+        }
+        if let minimumFreeVRAMMiB = draft.minimumFreeVRAMMiB {
+            constraints["min_free_vram_mib"] = minimumFreeVRAMMiB
+        }
+        return constraints
     }
 
     private func performEndpointMutation(
@@ -1371,6 +1489,10 @@ public final class BrokerStore: ObservableObject {
             return "这台服务器上还有进行中的租约，请先释放后再删除。"
         case "endpoint_has_active_allocations":
             return "这台服务器上还有进行中的资源分配，请先结束后再删除。"
+        case "server_group_not_found":
+            return "找不到这个服务器分组。"
+        case "server_group_has_members":
+            return "这个分组下还有服务器，请先移出后再删除。"
         case "idempotency_key_required":
             return "本次操作缺少防重复标识，请重试。"
         case "validation_error":

@@ -29,4 +29,5 @@ API_CAPABILITIES = (
     "collector_settings",
     "observation_profiles",
     "mcp_entry",
+    "server_group_crud",
 )

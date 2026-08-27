@@ -24,6 +24,7 @@
       <header class="page-header">
         <div><h1>服务器</h1><p id="updated-at">正在读取资源状态</p></div>
         <div class="header-actions">
+          <button class="button secondary" id="open-groups" type="button">管理分组</button>
           <button class="button secondary" id="open-add-server" type="button">＋ 添加服务器</button>
           <button class="button primary" id="open-claim" type="button">⚿ 申请 GPU</button>
           <button class="icon-button" id="refresh" type="button" aria-label="刷新资源" title="刷新资源">↻</button>
@@ -100,10 +101,11 @@
         <label>任务<input name="task" required maxlength="255" placeholder="例如：模型训练"></label>
         <label>用途<input name="purpose" required maxlength="1000" placeholder="例如：训练实验"></label>
         <label>GPU 数量<input name="gpuCount" type="number" value="1" min="1" required></label>
-        <label>服务器（可选）<select name="endpoint" id="claim-endpoint"><option value="">自动选择</option></select></label>
+        <label id="claim-group-wrap">服务器组<select name="serverGroup" id="claim-group"><option value="">选择服务器组</option></select></label>
+        <label id="claim-endpoint-wrap" hidden>未分组服务器（按单机申请）<select name="endpoint" id="claim-endpoint"><option value="">自动选择未分组服务器</option></select></label>
         <label>最小可用显存 GiB（可选）<input name="minimumFreeVRAM" type="number" min="0" step="1" placeholder="例如：60"></label>
       </div>
-      <p class="dialog-help">容量不足时会返回 no_capacity，不会进入排队。获得租约前请勿启动任务。</p>
+      <p class="dialog-help" id="claim-help">分组申请由后端在组内 best-fit，不指定单机。未分组服务器与外部调度器仍按单机申请。容量不足时返回 no_capacity，不会进入排队。</p>
       <div class="dialog-actions"><button class="button secondary" type="button" value="cancel">取消</button><button class="button primary" id="submit-claim" value="default">申请 GPU</button></div>
     </form>
   </dialog>
@@ -116,12 +118,44 @@
         <label>主机或 IP<input name="host" required placeholder="例如：10.20.0.10"></label>
         <label>SSH 端口<input name="port" type="number" min="1" max="65535" value="22" required></label>
         <label>SSH 用户<input name="sshUser" required value="root"></label>
-        <label class="span-2">远端工作区路径<input name="workspace" required value="/srv/serverpilot-workspace"></label>
+        <label>服务器组<select name="serverGroup" id="add-server-group"><option value="">未分组</option></select></label>
+        <label class="span-2">远端工作区路径<input name="workspace" id="add-workspace" placeholder="例如：/srv/workspace"><span class="field-hint" id="add-workspace-hint">未分组时必须填写绝对路径。加入组后可留空以继承组默认工作区，填写则为覆盖。</span></label>
         <label class="span-2">采集方式<select id="observation-profile" name="observationProfile"></select></label>
         <label class="span-2">归属项目（可选）<input name="ownerProject" maxlength="64" placeholder="例如：research"></label>
       </div>
       <p class="dialog-help">首次完整的只读采集会识别 GPU、纯 CPU 或尚未确认的服务器；未确认的服务器不能参与 GPU 分配。</p>
       <div class="dialog-actions"><button class="button secondary" type="button" value="cancel">取消</button><button class="button primary" id="submit-add" value="default">添加服务器</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="edit-dialog" class="form-dialog">
+    <form id="edit-form" method="dialog">
+      <div class="dialog-header"><div><h2>编辑服务器</h2><p>可改组、工作区覆盖和监控设置；主机与端口保持不变。</p></div><button class="icon-button close" type="button" value="cancel" aria-label="关闭">×</button></div>
+      <input type="hidden" name="endpointId" id="edit-endpoint-id">
+      <div class="form-grid">
+        <label class="span-2">SSH 指令<input id="edit-ssh" readonly></label>
+        <label>SSH 用户<input name="sshUser" id="edit-ssh-user" required></label>
+        <label>服务器组<select name="serverGroup" id="edit-server-group"><option value="">未分组</option></select></label>
+        <label class="span-2">远端工作区路径<input name="workspace" id="edit-workspace"><span class="field-hint" id="edit-workspace-hint">留空则继承组默认工作区；填写则为这台服务器的覆盖路径。</span></label>
+        <label class="span-2">采集方式<select id="edit-observation-profile" name="observationProfile"></select></label>
+      </div>
+      <div class="dialog-actions"><button class="button secondary" type="button" value="cancel">取消</button><button class="button primary" id="submit-edit" value="default">保存</button></div>
+    </form>
+  </dialog>
+
+  <dialog id="groups-dialog" class="form-dialog">
+    <form id="group-form" method="dialog">
+      <div class="dialog-header"><div><h2>服务器组</h2><p>组默认工作区可被成员覆盖。环境说明只给人看，不会传入采集、插件或进程环境。</p></div><button class="icon-button close" type="button" value="cancel" aria-label="关闭">×</button></div>
+      <div id="group-list" class="group-list"></div>
+      <div class="form-grid">
+        <input type="hidden" name="originalId" id="group-original-id">
+        <label>组标识<input name="id" id="group-id" required pattern="[a-z][a-z0-9-]{1,127}" placeholder="例如：training-a"></label>
+        <label>显示名称<input name="displayName" id="group-display-name" required maxlength="120" placeholder="例如：训练 A 区"></label>
+        <label class="span-2">默认工作区路径<input name="workspace" id="group-workspace" required placeholder="/srv/shared-workspace"></label>
+        <label class="span-2">说明<input name="description" id="group-description" maxlength="1000" placeholder="可选"></label>
+        <label class="span-2">环境说明<textarea name="environmentNotes" id="group-environment-notes" rows="3" maxlength="8000" placeholder="例如：共享权重目录、需加载的模块。不会写入进程环境。"></textarea></label>
+      </div>
+      <div class="dialog-actions"><button class="button secondary" type="button" id="reset-group-form">新建</button><button class="button secondary" type="button" value="cancel">关闭</button><button class="button primary" id="submit-group" value="default">保存分组</button></div>
     </form>
   </dialog>
 

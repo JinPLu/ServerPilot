@@ -47,6 +47,25 @@ class RuntimeSetting(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
+class ServerGroup(Base):
+    """A first-class scheduling and workspace boundary for one or more endpoints.
+
+    ``storage_group`` on endpoints remains untouched legacy metadata and is
+    never treated as a ServerGroup.
+    """
+
+    __tablename__ = "server_groups"
+
+    id: Mapped[str] = mapped_column(String(128), primary_key=True)
+    display_name: Mapped[str] = mapped_column(String(120), nullable=False)
+    workspace_path: Mapped[str] = mapped_column(String(2000), nullable=False)
+    # Plain text only. Never passed to collector, plugins, keepalive, or env.
+    environment_notes: Mapped[str | None] = mapped_column(Text)
+    description: Mapped[str | None] = mapped_column(String(1000))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class Endpoint(Base):
     __tablename__ = "endpoints"
     __table_args__ = (
@@ -85,6 +104,9 @@ class Endpoint(Base):
     )
     labels_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     storage_group: Mapped[str | None] = mapped_column(String(120))
+    # Membership is enforced in the service. The ORM column is unscoped so the
+    # initial revision can create endpoints before server_groups exists.
+    server_group_id: Mapped[str | None] = mapped_column(String(128), index=True)
     expected_gpu_count: Mapped[int | None] = mapped_column(Integer)
     expected_gpu_total_vram_mib: Mapped[int | None] = mapped_column(Integer)
     # Collector-owned hardware classification. It is never supplied by a

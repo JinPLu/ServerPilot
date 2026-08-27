@@ -1124,7 +1124,7 @@ def test_mcp_exposes_required_tools() -> None:
         assert retired_routine_tool not in names
     apply_schema = by_name["gpu_apply"].inputSchema
     assert "required" not in apply_schema
-    assert {"server_id", "gpu_count", "task"} == set(apply_schema["properties"])
+    assert {"server_group_id", "server_id", "gpu_count", "task"} == set(apply_schema["properties"])
     assert apply_schema["properties"]["gpu_count"]["default"] == 1
     assert "project_id" not in apply_schema["properties"]
     assert "idempotency_key" not in apply_schema["properties"]
@@ -1140,9 +1140,9 @@ def test_mcp_exposes_required_tools() -> None:
     assert status_schema["properties"]["lease_id"]["default"] is None
     assert "required" not in status_schema
     assert by_name["gpu_status"].description == (
-        "List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, "
-        "and scheduler clusters you can request on demand; pass lease_id for "
-        "per-card telemetry on cards you hold."
+        "List grouped allocatable GPU capacity, busy_gpus and who holds them, "
+        "CPU-only servers, and scheduler clusters you can request on demand; "
+        "pass lease_id for per-card telemetry on cards you hold."
     )
     for name in (
         "gpu_add_server",
@@ -1165,9 +1165,9 @@ def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
     assert not any(name.startswith("gpu_scheduler_") for name in names)
     assert names == {"gpu_status", "gpu_apply", "gpu_release"}
     assert by_name["gpu_status"].description == (
-        "List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, "
-        "and scheduler clusters you can request on demand; pass lease_id for "
-        "per-card telemetry on cards you hold."
+        "List grouped allocatable GPU capacity, busy_gpus and who holds them, "
+        "CPU-only servers, and scheduler clusters you can request on demand; "
+        "pass lease_id for per-card telemetry on cards you hold."
     )
 
 
@@ -1489,7 +1489,7 @@ def test_routine_projects_registered_ssh_connection_without_a_shell_command() ->
         lease_id=None,
     )
     # Connection and workspace belong to the server, not to each GPU.
-    assert status["servers"] == [
+    assert status["ungrouped_servers"] == [
         {
             "server_id": "server-a",
             "workspace_path": "/srv/server-a",
@@ -1500,12 +1500,20 @@ def test_routine_projects_registered_ssh_connection_without_a_shell_command() ->
                 "code_location": "not_provided",
             },
             "ssh": {"host": "gpu.example.test", "port": 2201, "user": "gpu"},
+            "gpus": [
+                {
+                    "name": "A800",
+                    "vram_mib": 80_000,
+                    "total_count": 1,
+                    "available_count": 1,
+                }
+            ],
         }
     ]
-    assert status["gpus"][0]["server_id"] == "server-a"
+    assert "gpus" not in status
     for duplicated in ("ssh", "workspace", "workspace_path"):
-        assert duplicated not in status["gpus"][0]
-    assert "ssh_command" not in status["servers"][0]
+        assert duplicated not in status["ungrouped_servers"][0]["gpus"][0]
+    assert "ssh_command" not in status["ungrouped_servers"][0]
 
     allocation = mcp_server._routine_gpu_allocation(
         {
@@ -1650,25 +1658,23 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
             "use_as_cwd": True,
             "code_location": "not_provided",
         },
+        "gpus": [
+            {
+                "name": "A",
+                "vram_mib": 80_000,
+                "total_count": 2,
+                "available_count": 1,
+            }
+        ],
     }
 
     status = tools.gpu_status()
-    # An allocatable card answers one question — can it be claimed — so it is
-    # published as capacity.  The load observed on it is ServerPilot's own
+    # Allocatable capacity is a per-server SKU summary, never one free row per
+    # card.  The load observed on an unclaimed card is ServerPilot's own
     # keepalive hold, and publishing that would turn a free card into a card
     # that reads as full.
     assert status == {
-        "servers": [server_projection],
-        "gpus": [
-            {
-                "server_id": "server-a",
-                "gpu_id": "GPU-a",
-                "index": 0,
-                "name": "A",
-                "vram_mib": 80_000,
-                "status": "available",
-            }
-        ],
+        "ungrouped_servers": [server_projection],
         "busy_gpus": [
             {
                 "server_id": "server-a",
@@ -1679,6 +1685,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
             }
         ],
     }
+    assert "gpus" not in status
     assert "64000" not in json.dumps(status)
 
     # The caller's own lease is the one place occupancy provably belongs to the
@@ -1729,8 +1736,8 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
             },
         }
     ]
-    # A free card stays capacity-only even when the caller names a lease.
-    assert mine["gpus"] == status["gpus"]
+    # Free capacity stays aggregated even when the caller names a lease.
+    assert mine["ungrouped_servers"] == status["ungrouped_servers"]
 
     unknown = tools.gpu_status(lease_id="lease-gone")
     assert "leased_gpus" not in unknown
@@ -1951,19 +1958,25 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
     )
 
     status = tools.gpu_status()
-    assert len(status["gpus"]) == 2
-    assert {item["gpu_id"] for item in status["gpus"]} == {
-        "GPU-endpoint-a-0",
-        "GPU-endpoint-a-1",
-    }
-    assert all("available" not in item for item in status["gpus"])
+    assert "gpus" not in status
+    assert len(status["ungrouped_servers"]) == 1
+    assert status["ungrouped_servers"][0]["gpus"] == [
+        {
+            "name": "Test GPU",
+            "vram_mib": 100_000,
+            "total_count": 2,
+            "available_count": 2,
+        }
+    ]
+    sku = status["ungrouped_servers"][0]["gpus"][0]
+    assert set(sku) == {"name", "vram_mib", "total_count", "available_count"}
     # One card is held by a running keepalive helper and the other is not, but
     # that is ServerPilot's own bookkeeping.  A routine caller can act only on
     # whether the card can be claimed, and both can, so the mechanism stays
     # inside: no keepalive field, no telemetry carrying its hold.
-    assert {item["status"] for item in status["gpus"]} == {"available"}
-    for item in status["gpus"]:
-        assert set(item) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
+    rendered = json.dumps(status)
+    assert "keepalive" not in rendered
+    assert "GPU-endpoint-a-0" not in rendered
     # The GUI still sees the distinction on its own path.
     detail = rest.get("/api/v1/snapshot", headers=headers).json()
     assert {gpu["public_status"] for gpu in detail["data"]["gpus"]} == {
@@ -2431,19 +2444,25 @@ def test_routine_projections_do_not_repeat_server_facts_per_gpu() -> None:
 
     status = mcp_server._routine_gpu_status(_routine_status_fixture(8), lease_id=None)
 
-    assert len(status["servers"]) == 1
-    assert len(status["gpus"]) == 8
-    for row in status["gpus"]:
-        for server_fact in ("ssh", "workspace", "workspace_path"):
-            assert server_fact not in row
-        assert set(row) == {"server_id", "gpu_id", "index", "name", "vram_mib", "status"}
-        assert row["status"] == "available"
-    assert "telemetry_window" not in status["servers"][0]
+    assert "gpus" not in status
+    assert len(status["ungrouped_servers"]) == 1
+    server = status["ungrouped_servers"][0]
+    assert server["gpus"] == [
+        {
+            "name": "NVIDIA H100 80GB HBM3",
+            "vram_mib": 97_887,
+            "total_count": 8,
+            "available_count": 8,
+        }
+    ]
+    for server_fact in ("ssh", "workspace", "workspace_path"):
+        assert server_fact not in server["gpus"][0]
+    assert "telemetry_window" not in server
     # The fixture's cards each read as 78,411 MiB used at 68% — every byte of
     # it ServerPilot's own keepalive hold, released before allocation.  None of
     # it may reach a caller deciding whether to claim them.
     rendered = json.dumps(status, ensure_ascii=False)
-    for held in ("78411", "18840", "80.1", "62.7", "keepalive"):
+    for held in ("78411", "18840", "80.1", "62.7", "keepalive", "gpu_id"):
         assert held not in rendered
     status_size = len(rendered)
     assert status_size < 2_000, status_size

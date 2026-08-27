@@ -147,6 +147,85 @@
     };
   }
 
+  function listedServerGroups() {
+    return Array.isArray(view.current?.server_groups) ? view.current.server_groups : [];
+  }
+
+  function groupById(groupID) {
+    if (!groupID) return null;
+    return listedServerGroups().find((group) => group.id === groupID) || null;
+  }
+
+  function endpointGroupID(endpoint) {
+    return typeof endpoint.server_group_id === "string" && endpoint.server_group_id
+      ? endpoint.server_group_id
+      : null;
+  }
+
+  function effectiveWorkspace(endpoint) {
+    if (typeof endpoint.workspace_path === "string" && endpoint.workspace_path) return endpoint.workspace_path;
+    if (typeof endpoint.workspace_path_override === "string" && endpoint.workspace_path_override) {
+      return endpoint.workspace_path_override;
+    }
+    return groupById(endpointGroupID(endpoint))?.workspace_path || null;
+  }
+
+  function workspaceOverride(endpoint) {
+    if (typeof endpoint.workspace_path_override === "string" && endpoint.workspace_path_override) {
+      return endpoint.workspace_path_override;
+    }
+    const group = groupById(endpointGroupID(endpoint));
+    if (group && endpoint.workspace_path && endpoint.workspace_path !== group.workspace_path) {
+      return endpoint.workspace_path;
+    }
+    return "";
+  }
+
+  function ungroupedEndpoints() {
+    return (view.current?.endpoints || []).filter((endpoint) => !endpointGroupID(endpoint));
+  }
+
+  function hasFormalGroups() {
+    return listedServerGroups().length > 0 || (view.current?.endpoints || []).some(endpointGroupID);
+  }
+
+  function groupedSections(details) {
+    const groups = listedServerGroups();
+    if (!hasFormalGroups()) return [{ group: null, ungrouped: false, items: details }];
+    const buckets = new Map(groups.map((group) => [group.id, []]));
+    const extra = new Map();
+    const ungrouped = [];
+    details.forEach((item) => {
+      const groupID = endpointGroupID(item.endpoint);
+      if (!groupID) {
+        ungrouped.push(item);
+        return;
+      }
+      if (buckets.has(groupID)) {
+        buckets.get(groupID).push(item);
+        return;
+      }
+      if (!extra.has(groupID)) extra.set(groupID, []);
+      extra.get(groupID).push(item);
+    });
+    const sections = [];
+    groups.forEach((group) => {
+      const items = buckets.get(group.id) || [];
+      if (items.length) sections.push({ group, ungrouped: false, items });
+    });
+    extra.forEach((items, groupID) => {
+      sections.push({ group: { id: groupID, display_name: groupID }, ungrouped: false, items });
+    });
+    if (ungrouped.length) sections.push({ group: null, ungrouped: true, items: ungrouped });
+    return sections;
+  }
+
+  function groupCapacity(items) {
+    const total = items.reduce((sum, item) => sum + item.gpus.length, 0);
+    const free = items.reduce((sum, item) => sum + item.free, 0);
+    return `${items.length} 台 · ${total ? `${free}/${total} 空闲` : "无 GPU"}`;
+  }
+
   function metricTone(value) {
     if (value === null || value === undefined) return "";
     if (value >= 80) return "high";
@@ -160,7 +239,17 @@
 
   function filterDetails(details) {
     const query = byID("search").value.trim().toLowerCase();
-    const content = [endpointSsh(details.endpoint), details.project, details.task, ...details.gpus.map((gpu) => gpu.name)].join(" ").toLowerCase();
+    const group = groupById(endpointGroupID(details.endpoint));
+    const content = [
+      endpointSsh(details.endpoint),
+      details.project,
+      details.task,
+      effectiveWorkspace(details.endpoint),
+      group?.display_name,
+      group?.id,
+      group?.description,
+      ...details.gpus.map((gpu) => gpu.name),
+    ].join(" ").toLowerCase();
     if (query && !content.includes(query)) return false;
     if (view.filter === "available") return details.free > 0;
     if (view.filter === "busy") return details.gpus.some((gpu) => !isAvailable(gpu) && !isKeepalive(gpu) && !isErrorGPU(gpu));
@@ -203,20 +292,32 @@
     if (!view.current) { rows.innerHTML = `<div class="empty-state">正在读取本机资源状态。</div>`; return; }
     const details = sortDetails((view.current.endpoints || []).map(endpointDetails).filter(filterDetails));
     if (!details.length) { rows.innerHTML = `<div class="empty-state">没有符合当前筛选条件的服务器。</div>`; return; }
-    rows.innerHTML = details.map((item) => {
-      const gpu = item.gpus[0];
-      const model = gpu ? gpu.name : "无 GPU";
-      const config = gpu ? `${plural(item.gpus.length, "张")} · ${Math.round((gpu.total_vram_mib || 0) / 1024)} GB/卡` : "CPU 节点";
-      const selected = item.endpoint.id === view.selectedEndpointID ? "selected" : "";
-      return `<div class="server-row ${selected}" data-endpoint-id="${escapeHTML(item.endpoint.id)}" role="row">
-        <div class="endpoint-cell"><div class="primary-line"><i class="status-dot ${item.status.className}"></i>${escapeHTML(endpointSsh(item.endpoint))}</div><div class="secondary-line">${escapeHTML(item.status.label)} · ${escapeHTML(item.endpoint.workspace_path || "未设置工作区")}</div></div>
+    rows.innerHTML = groupedSections(details).map((section) => {
+      const header = section.group || section.ungrouped
+        ? `<div class="group-header${section.ungrouped ? " ungrouped" : ""}" role="rowheader"><strong>${escapeHTML(section.ungrouped ? "未分组" : (section.group.display_name || section.group.id))}</strong><span>${escapeHTML(groupCapacity(section.items))}</span></div>`
+        : "";
+      return header + section.items.map(serverRow).join("");
+    }).join("");
+  }
+
+  function serverRow(item) {
+    const gpu = item.gpus[0];
+    const model = gpu ? gpu.name : "无 GPU";
+    const config = gpu ? `${plural(item.gpus.length, "张")} · ${Math.round((gpu.total_vram_mib || 0) / 1024)} GB/卡` : "CPU 节点";
+    const selected = item.endpoint.id === view.selectedEndpointID ? "selected" : "";
+    const workspace = effectiveWorkspace(item.endpoint) || "未设置工作区";
+    const group = groupById(endpointGroupID(item.endpoint));
+    const statusLine = group
+      ? `${item.status.label} · ${group.display_name || group.id}`
+      : `${item.status.label} · ${workspace}`;
+    return `<div class="server-row ${selected}" data-endpoint-id="${escapeHTML(item.endpoint.id)}" role="row">
+        <div class="endpoint-cell"><div class="primary-line"><i class="status-dot ${item.status.className}"></i>${escapeHTML(endpointSsh(item.endpoint))}</div><div class="secondary-line">${escapeHTML(statusLine)}</div></div>
         <div class="task-cell"><div class="primary-line">${escapeHTML(item.project)}</div><div class="secondary-line">${escapeHTML(item.task)}</div></div>
         <div class="gpu-cell"><div class="primary-line">${escapeHTML(model)}</div><div class="secondary-line">${escapeHTML(config)}</div></div>
         <div class="free-count">${item.gpus.length ? `${item.free}/${item.gpus.length}` : "—"}</div>
         ${metric(item.gpuUtil)}${metric(item.memory)}${metric(item.cpu)}${metric(item.systemMemory)}
         <button class="detail-open" type="button" data-open-detail="${escapeHTML(item.endpoint.id)}" aria-label="查看 ${escapeHTML(item.endpoint.id)} 详情">›</button>
       </div>`;
-    }).join("");
   }
 
   function usageRecords() {
@@ -298,6 +399,70 @@
     select.value = view.observationProfiles.some((profile) => profile.id === current)
       ? current
       : (view.observationProfiles[0] && view.observationProfiles[0].id) || "server-script-v1";
+    fillProfileSelect(byID("edit-observation-profile"), current);
+  }
+
+  function fillProfileSelect(select, current) {
+    if (!select) return;
+    const selected = select.value || current || "server-script-v1";
+    select.innerHTML = view.observationProfiles.map((profile) => (
+      `<option value="${escapeHTML(profile.id)}">${escapeHTML(profile.display_name || profile.id)}</option>`
+    )).join("");
+    select.value = view.observationProfiles.some((profile) => profile.id === selected)
+      ? selected
+      : (view.observationProfiles[0] && view.observationProfiles[0].id) || "server-script-v1";
+  }
+
+  function fillGroupSelect(select, { includeUngrouped = false, includeEmpty = false, selected = "" } = {}) {
+    if (!select) return;
+    const groups = listedServerGroups();
+    const options = [];
+    if (includeEmpty) options.push(`<option value="">${hasFormalGroups() ? "选择服务器组" : "自动选择"}</option>`);
+    if (includeUngrouped) {
+      options.push(`<option value="__ungrouped__">未分组（按单机申请）</option>`);
+    }
+    groups.forEach((group) => {
+      options.push(`<option value="${escapeHTML(group.id)}">${escapeHTML(group.display_name || group.id)}</option>`);
+    });
+    if (!includeEmpty && !includeUngrouped) {
+      options.unshift(`<option value="">未分组</option>`);
+    }
+    select.innerHTML = options.join("");
+    if (selected && [...select.options].some((option) => option.value === selected)) select.value = selected;
+  }
+
+  function syncWorkspaceField(groupSelect, workspaceInput, hint, requiredWhenUngrouped) {
+    const group = groupById(groupSelect.value);
+    const inherit = Boolean(group);
+    workspaceInput.required = requiredWhenUngrouped && !inherit;
+    workspaceInput.placeholder = inherit
+      ? `继承 ${group.workspace_path || "组默认工作区"}`
+      : "例如：/srv/workspace";
+    if (hint) {
+      hint.textContent = inherit
+        ? `留空则继承 ${group.workspace_path || "组默认工作区"}；填写则为这台服务器的覆盖路径。`
+        : "未分组时必须填写绝对路径。";
+    }
+  }
+
+  function endpointWritePayload({ id, host, port, sshUser, groupID, workspace, profile, ownerProject, isUpdate = false }) {
+    const payload = {
+      ssh_user: sshUser,
+      observation_profile: profile,
+    };
+    if (id) payload.id = id;
+    if (host) payload.host = host;
+    if (port) payload.port = Number(port);
+    if (ownerProject !== undefined) payload.owner_project_id = ownerProject || null;
+    const trimmed = (workspace || "").trim();
+    if (groupID) {
+      payload.server_group_id = groupID;
+      payload.workspace_path_override = trimmed || null;
+    } else {
+      if (isUpdate) payload.server_group_id = null;
+      payload.workspace_path = trimmed;
+    }
+    return payload;
   }
 
   function memoryColor(value) { return value === null ? "#9aa1aa" : value >= 80 ? "#ef4d57" : value >= 60 ? "#e8ad00" : "#39b967"; }
@@ -353,9 +518,20 @@
   function renderDetail(endpointID, history = null, range = 3600) {
     const endpoint = (view.current?.endpoints || []).find((item) => item.id === endpointID); if (!endpoint) return;
     const gpus = endpointGPUs(endpointID); const keepalive = endpoint.keepalive?.policy === "idle_keepalive";
-    byID("detail-content").innerHTML = `<div class="detail-sheet"><header class="detail-heading"><div class="detail-title"><span class="server-glyph">▤</span><div><h2>服务器详情</h2><p>${escapeHTML(endpointSsh(endpoint))}</p></div></div><div class="detail-actions"><button class="button primary" type="button" id="detail-claim">申请 GPU</button><button class="button secondary" type="button" id="detail-keepalive">${keepalive ? "结束占卡" : "开始占卡"}</button><button class="icon-button close" type="button" id="close-detail" aria-label="关闭">×</button></div></header><div class="workspace-path">▣ 远端工作区：${escapeHTML(endpoint.workspace_path || "未设置")}</div><section class="gpu-status-panel"><div class="section-heading"><h3>GPU 显存状态</h3><p>当前显存 · ${gpus.length} 张 GPU</p></div><div class="status-counts">${statusCounts(gpus)}</div><div class="gpu-cards">${gpus.length ? gpus.sort((left, right) => (left.gpu_index || 0) - (right.gpu_index || 0)).map(gpuCard).join("") : `<div class="chart-empty">此服务器没有 GPU。</div>`}</div></section><section class="history-section"><div class="history-header"><h3>历史</h3><div class="range-switch">${[[3600, "1h"], [21600, "6h"], [86400, "24h"]].map(([seconds, label]) => `<button type="button" class="${range === seconds ? "active" : ""}" data-history-range="${seconds}">${label}</button>`).join("")}</div></div><div class="chart-grid">${charts(history)}</div></section></div>`;
+    const group = groupById(endpointGroupID(endpoint));
+    const workspace = effectiveWorkspace(endpoint);
+    const inherited = Boolean(group && !workspaceOverride(endpoint));
+    const groupLine = group
+      ? `<div class="workspace-path">分组：${escapeHTML(group.display_name || group.id)}${group.description ? ` · ${escapeHTML(group.description)}` : ""}</div>`
+      : `<div class="workspace-path">未分组 · 按单机申请</div>`;
+    const workspaceLine = `<div class="workspace-path">▣ 远端工作区：${escapeHTML(workspace || "未设置")}${group ? (inherited ? "（继承组默认）" : "（覆盖组默认）") : ""}</div>`;
+    const notesLine = group && group.environment_notes
+      ? `<div class="workspace-path">环境说明：${escapeHTML(group.environment_notes)}</div>`
+      : "";
+    byID("detail-content").innerHTML = `<div class="detail-sheet"><header class="detail-heading"><div class="detail-title"><span class="server-glyph">▤</span><div><h2>服务器详情</h2><p>${escapeHTML(endpointSsh(endpoint))}</p></div></div><div class="detail-actions"><button class="button primary" type="button" id="detail-claim">申请 GPU</button><button class="button secondary" type="button" id="detail-edit">编辑</button><button class="button secondary" type="button" id="detail-keepalive">${keepalive ? "结束占卡" : "开始占卡"}</button><button class="icon-button close" type="button" id="close-detail" aria-label="关闭">×</button></div></header>${groupLine}${workspaceLine}${notesLine}<section class="gpu-status-panel"><div class="section-heading"><h3>GPU 显存状态</h3><p>当前显存 · ${gpus.length} 张 GPU</p></div><div class="status-counts">${statusCounts(gpus)}</div><div class="gpu-cards">${gpus.length ? gpus.sort((left, right) => (left.gpu_index || 0) - (right.gpu_index || 0)).map(gpuCard).join("") : `<div class="chart-empty">此服务器没有 GPU。</div>`}</div></section><section class="history-section"><div class="history-header"><h3>历史</h3><div class="range-switch">${[[3600, "1h"], [21600, "6h"], [86400, "24h"]].map(([seconds, label]) => `<button type="button" class="${range === seconds ? "active" : ""}" data-history-range="${seconds}">${label}</button>`).join("")}</div></div><div class="chart-grid">${charts(history)}</div></section></div>`;
     byID("close-detail").addEventListener("click", () => byID("detail-dialog").close());
     byID("detail-claim").addEventListener("click", () => openClaim(endpointID));
+    byID("detail-edit").addEventListener("click", () => openEdit(endpointID));
     byID("detail-keepalive").addEventListener("click", async () => {
       const enabled = !keepalive;
       if (!window.confirm(enabled ? "开始只对这台服务器的空闲 GPU 执行占卡？不会启动或停止已有任务。" : "结束这台服务器的空闲 GPU 占卡？不会停止正在运行的任务。")) return;
@@ -381,10 +557,92 @@
   }
 
   function openClaim(endpointID = "") {
-    const select = byID("claim-endpoint");
-    select.innerHTML = `<option value="">自动选择</option>${(view.current?.endpoints || []).map((endpoint) => `<option value="${escapeHTML(endpoint.id)}">${escapeHTML(endpointSsh(endpoint))}</option>`).join("")}`;
-    select.value = endpointID;
+    const endpoint = (view.current?.endpoints || []).find((item) => item.id === endpointID);
+    const grouped = hasFormalGroups();
+    const groupWrap = byID("claim-group-wrap");
+    const endpointWrap = byID("claim-endpoint-wrap");
+    const groupSelect = byID("claim-group");
+    const endpointSelect = byID("claim-endpoint");
+    const schedulerNote = (view.current?.scheduler_targets || []).length
+      ? "外部调度器仍按目标单机提交，不走分组 best-fit。"
+      : "";
+    fillGroupSelect(groupSelect, { includeUngrouped: true, includeEmpty: true });
+    const ungrouped = ungroupedEndpoints();
+    endpointSelect.innerHTML = `<option value="">选择未分组服务器</option>${ungrouped.map((item) => `<option value="${escapeHTML(item.id)}">${escapeHTML(endpointSsh(item))}</option>`).join("")}`;
+    if (grouped) {
+      groupWrap.hidden = false;
+      const groupID = endpoint ? (endpointGroupID(endpoint) || "__ungrouped__") : "";
+      groupSelect.value = groupID;
+      endpointWrap.hidden = groupSelect.value !== "__ungrouped__";
+      if (endpoint && !endpointGroupID(endpoint)) endpointSelect.value = endpoint.id;
+    } else {
+      groupWrap.hidden = true;
+      endpointWrap.hidden = false;
+      endpointSelect.innerHTML = `<option value="">自动选择</option>${(view.current?.endpoints || []).map((item) => `<option value="${escapeHTML(item.id)}">${escapeHTML(endpointSsh(item))}</option>`).join("")}`;
+      endpointSelect.value = endpointID;
+    }
+    byID("claim-help").textContent = grouped
+      ? `分组申请由后端在组内 best-fit，不指定单机。未分组服务器仍按单机申请。${schedulerNote}容量不足时返回 no_capacity，不会进入排队。`
+      : `可选择一台服务器，或由后端自动选择。${schedulerNote}容量不足时返回 no_capacity，不会进入排队。`;
     if (!byID("claim-dialog").open) byID("claim-dialog").showModal();
+  }
+
+  function openAddServer() {
+    fillGroupSelect(byID("add-server-group"));
+    syncWorkspaceField(byID("add-server-group"), byID("add-workspace"), byID("add-workspace-hint"), true);
+    if (!byID("add-dialog").open) byID("add-dialog").showModal();
+  }
+
+  function openEdit(endpointID) {
+    const endpoint = (view.current?.endpoints || []).find((item) => item.id === endpointID);
+    if (!endpoint) return;
+    byID("edit-endpoint-id").value = endpoint.id;
+    byID("edit-ssh").value = endpointSsh(endpoint);
+    byID("edit-ssh-user").value = endpoint.ssh_user || "root";
+    fillGroupSelect(byID("edit-server-group"), { selected: endpointGroupID(endpoint) || "" });
+    fillProfileSelect(byID("edit-observation-profile"), endpoint.observation_profile || "server-script-v1");
+    byID("edit-workspace").value = workspaceOverride(endpoint);
+    syncWorkspaceField(byID("edit-server-group"), byID("edit-workspace"), byID("edit-workspace-hint"), true);
+    if (!byID("edit-dialog").open) byID("edit-dialog").showModal();
+  }
+
+  function resetGroupForm() {
+    byID("group-original-id").value = "";
+    byID("group-id").value = "";
+    byID("group-id").readOnly = false;
+    byID("group-display-name").value = "";
+    byID("group-workspace").value = "";
+    byID("group-description").value = "";
+    byID("group-environment-notes").value = "";
+  }
+
+  function renderGroupList() {
+    const groups = listedServerGroups();
+    const list = byID("group-list");
+    if (!groups.length) {
+      list.innerHTML = `<p class="field-hint">还没有服务器组。创建后即可在添加/编辑服务器时绑定，并按组申请 GPU。</p>`;
+      return;
+    }
+    list.innerHTML = groups.map((group) => {
+      const members = (view.current?.endpoints || []).filter((endpoint) => endpointGroupID(endpoint) === group.id);
+      return `<article class="group-item"><div><strong>${escapeHTML(group.display_name || group.id)}</strong><small>${escapeHTML(group.workspace_path || "未设置工作区")} · ${members.length} 台</small></div><div class="group-item-actions"><button class="button secondary" type="button" data-edit-group="${escapeHTML(group.id)}">编辑</button><button class="button secondary" type="button" data-delete-group="${escapeHTML(group.id)}">删除</button></div></article>`;
+    }).join("");
+  }
+
+  function fillGroupForm(group) {
+    byID("group-original-id").value = group.id;
+    byID("group-id").value = group.id;
+    byID("group-id").readOnly = true;
+    byID("group-display-name").value = group.display_name || "";
+    byID("group-workspace").value = group.workspace_path || "";
+    byID("group-description").value = group.description || "";
+    byID("group-environment-notes").value = group.environment_notes || "";
+  }
+
+  function openGroups() {
+    renderGroupList();
+    resetGroupForm();
+    if (!byID("groups-dialog").open) byID("groups-dialog").showModal();
   }
 
   async function loadSettings() {
@@ -429,14 +687,36 @@
     $$(".table-head button").forEach((button) => button.addEventListener("click", () => { const key = button.dataset.sort; view.sort = { key, direction: view.sort.key === key && view.sort.direction === "desc" ? "asc" : "desc" }; renderRows(); $$(".table-head button").forEach((item) => item.classList.toggle("active", item === button)); }));
     byID("server-rows").addEventListener("click", (event) => { const target = event.target.closest("[data-open-detail]"); if (target) openDetail(target.dataset.openDetail); });
     byID("open-claim").addEventListener("click", () => openClaim());
-    byID("open-add-server").addEventListener("click", () => byID("add-dialog").showModal());
+    byID("open-add-server").addEventListener("click", () => openAddServer());
+    byID("open-groups").addEventListener("click", () => openGroups());
     $$('[data-page]').forEach((button) => button.addEventListener("click", () => setPage(button.dataset.page)));
     byID("usage-claim").addEventListener("click", () => openClaim());
+    byID("add-server-group").addEventListener("change", () => {
+      syncWorkspaceField(byID("add-server-group"), byID("add-workspace"), byID("add-workspace-hint"), true);
+    });
+    byID("edit-server-group").addEventListener("change", () => {
+      syncWorkspaceField(byID("edit-server-group"), byID("edit-workspace"), byID("edit-workspace-hint"), true);
+    });
+    byID("claim-group").addEventListener("change", () => {
+      byID("claim-endpoint-wrap").hidden = byID("claim-group").value !== "__ungrouped__";
+    });
 
     byID("claim-form").addEventListener("submit", async (event) => {
-      event.preventDefault(); const form = new FormData(event.currentTarget); const endpoint = form.get("endpoint");
-      const constraints = { gpu_count: Number(form.get("gpuCount")), placement: "pack" };
-      if (endpoint) constraints.endpoint_ids = [endpoint];
+      event.preventDefault(); const form = new FormData(event.currentTarget);
+      const constraints = { gpu_count: Number(form.get("gpuCount")), placement: "pack", same_host: true };
+      const groupID = form.get("serverGroup");
+      const endpoint = form.get("endpoint");
+      if (hasFormalGroups()) {
+        if (!groupID) { showNotice("请选择服务器组，或使用未分组单机申请。", true); return; }
+        if (groupID === "__ungrouped__") {
+          if (!endpoint) { showNotice("未分组申请必须选择一台未分组服务器。", true); return; }
+          constraints.endpoint_ids = [endpoint];
+        } else {
+          constraints.server_group_ids = [groupID];
+        }
+      } else if (endpoint) {
+        constraints.endpoint_ids = [endpoint];
+      }
       const memory = form.get("minimumFreeVRAM"); if (memory) constraints.min_free_vram_mib = Number(memory) * 1024;
       const result = await call("claim", { project_id: form.get("project"), task_ref: form.get("task"), purpose: form.get("purpose"), constraints });
       if (!result.ok) { failure(result); return; }
@@ -446,11 +726,83 @@
     byID("add-form").addEventListener("submit", async (event) => {
       event.preventDefault(); const form = new FormData(event.currentTarget);
       const profile = form.get("observationProfile") || "server-script-v1";
-      const payload = { id: form.get("id"), host: form.get("host"), port: Number(form.get("port")), ssh_user: form.get("sshUser"), workspace_path: form.get("workspace"), observation_profile: profile, labels: ["desktop-windows"], owner_project_id: form.get("ownerProject") || null };
+      const groupID = form.get("serverGroup") || "";
+      const workspace = form.get("workspace");
+      if (!groupID && !(workspace || "").trim()) {
+        showNotice("未分组服务器必须填写绝对远端工作区路径。", true); return;
+      }
+      const payload = endpointWritePayload({
+        id: form.get("id"),
+        host: form.get("host"),
+        port: form.get("port"),
+        sshUser: form.get("sshUser"),
+        groupID,
+        workspace,
+        profile,
+        ownerProject: form.get("ownerProject") || null,
+      });
+      payload.labels = ["desktop-windows"];
       if (profile === "server-script-v1") payload.keepalive_adapter_id = "server-script-v1";
       const result = await call("create_endpoint", payload);
       if (!result.ok) { failure(result); return; }
       byID("add-dialog").close(); showNotice("已添加服务器，正在等待首次只读采集确认状态。"); await refresh({ quiet: true });
+    });
+
+    byID("edit-form").addEventListener("submit", async (event) => {
+      event.preventDefault(); const form = new FormData(event.currentTarget);
+      const endpointID = form.get("endpointId");
+      const profile = form.get("observationProfile") || "server-script-v1";
+      const groupID = form.get("serverGroup") || "";
+      const workspace = form.get("workspace");
+      if (!groupID && !(workspace || "").trim()) {
+        showNotice("未分组服务器必须填写绝对远端工作区路径。", true); return;
+      }
+      const payload = endpointWritePayload({
+        sshUser: form.get("sshUser"),
+        groupID,
+        workspace,
+        profile,
+        isUpdate: true,
+      });
+      const result = await call("update_endpoint", endpointID, payload);
+      if (!result.ok) { failure(result); return; }
+      byID("edit-dialog").close(); showNotice("已更新服务器设置，正在确认状态。"); await refresh({ quiet: true });
+    });
+
+    byID("reset-group-form").addEventListener("click", () => resetGroupForm());
+    byID("group-list").addEventListener("click", async (event) => {
+      const edit = event.target.closest("[data-edit-group]");
+      if (edit) {
+        const group = groupById(edit.dataset.editGroup);
+        if (group) fillGroupForm(group);
+        return;
+      }
+      const remove = event.target.closest("[data-delete-group]");
+      if (!remove) return;
+      if (!window.confirm("删除这个服务器组？仍有成员时后端会拒绝删除。")) return;
+      const result = await call("delete_server_group", remove.dataset.deleteGroup);
+      if (!result.ok) { failure(result); return; }
+      showNotice("已删除服务器组。"); await refresh({ quiet: true }); renderGroupList(); resetGroupForm();
+    });
+    byID("group-form").addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const form = new FormData(event.currentTarget);
+      const originalID = form.get("originalId");
+      const payload = {
+        id: form.get("id"),
+        display_name: form.get("displayName"),
+        workspace_path: form.get("workspace"),
+        description: form.get("description") || "",
+        environment_notes: form.get("environmentNotes") || "",
+      };
+      const result = originalID
+        ? await call("update_server_group", originalID, payload)
+        : await call("create_server_group", payload);
+      if (!result.ok) { failure(result); return; }
+      showNotice(originalID ? "已更新服务器组。" : "已创建服务器组。");
+      await refresh({ quiet: true });
+      renderGroupList();
+      resetGroupForm();
     });
 
     byID("settings-form").addEventListener("submit", async (event) => {

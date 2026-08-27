@@ -23,7 +23,7 @@ public struct ServiceInfo: Equatable, Sendable {
     public static let fixture = ServiceInfo(
         schemaVersion: "v1",
         version: "fixture",
-        capabilities: ["instant_claims", "endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup", "operator_lease_release", "operator_lease_reassignment", "collector_settings", "telemetry_recent_averages", "observation_profiles"]
+        capabilities: ["instant_claims", "endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup", "operator_lease_release", "operator_lease_reassignment", "collector_settings", "telemetry_recent_averages", "observation_profiles", "server_group_crud"]
     )
 
     public var supportsEndpointUpdate: Bool {
@@ -64,6 +64,12 @@ public struct ServiceInfo: Equatable, Sendable {
 
     public var supportsMcpEntry: Bool {
         supports("mcp_entry")
+    }
+
+    public var supportsServerGroupCRUD: Bool {
+        // Canonical advertised name is `server_group_crud`. Presence of
+        // snapshot `server_groups` is not a capability signal.
+        supports("server_group_crud")
     }
 
     /// Services predating capability advertisement are allowed to make the
@@ -579,13 +585,58 @@ public struct HostTelemetryRecentAverage: Equatable, Sendable {
     }
 }
 
+public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let workspacePath: String
+    public let environmentNotes: String
+    public let description: String
+
+    public init?(raw: [String: Any]) {
+        guard let id = raw.string("id"), !id.isEmpty else { return nil }
+        if raw["environment_notes"] is [String: Any] || raw["environment"] is [String: Any] {
+            return nil
+        }
+        guard
+            raw["command"] == nil,
+            raw["keepalive_adapter_id"] == nil,
+            raw["observation_profile"] == nil
+        else {
+            return nil
+        }
+        let workspacePath = raw.string("workspace_path") ?? ""
+        guard CoreFieldValidation.isAbsoluteWorkspacePath(workspacePath) else { return nil }
+        self.id = id
+        self.displayName = raw.string("display_name") ?? id
+        self.workspacePath = workspacePath
+        self.environmentNotes = raw.string("environment_notes") ?? ""
+        self.description = raw.string("description") ?? ""
+    }
+
+    public init(
+        id: String,
+        displayName: String,
+        workspacePath: String,
+        environmentNotes: String = "",
+        description: String = ""
+    ) {
+        self.id = id
+        self.displayName = displayName
+        self.workspacePath = workspacePath
+        self.environmentNotes = environmentNotes
+        self.description = description
+    }
+}
+
 public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let id: String
     public let host: String
     public let port: Int
     public let sshUser: String
     public let sshAlias: String?
+    public let serverGroupID: String?
     public let workspacePath: String?
+    public let workspacePathOverride: String?
     public let observationProfile: String
     public let keepaliveAdapterID: String?
     public let keepalive: EndpointKeepaliveSummary
@@ -613,7 +664,11 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.port = raw.int("port", default: 22)
         self.sshUser = sshUser
         self.sshAlias = raw.string("ssh_alias")
+        let groupID = raw.string("server_group_id")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.serverGroupID = (groupID?.isEmpty == false) ? groupID : nil
         self.workspacePath = raw.string("workspace_path")
+        let pathOverride = raw.string("workspace_path_override")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.workspacePathOverride = (pathOverride?.isEmpty == false) ? pathOverride : nil
         self.observationProfile = raw.string("observation_profile") ?? "linux-nvidia"
         self.keepaliveAdapterID = raw.string("keepalive_adapter_id")
         guard let keepalive = EndpointKeepaliveSummary(
@@ -648,6 +703,12 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
 
     public var displayName: String {
         sshAlias ?? "\(sshUser)@\(host):\(port)"
+    }
+
+    /// Effective `workspacePath` comes from the broker. An override is present
+    /// only when this endpoint does not inherit its group's default path.
+    public var inheritsGroupWorkspacePath: Bool {
+        serverGroupID != nil && workspacePathOverride == nil
     }
 
     public var monitorLabel: String {
@@ -1024,6 +1085,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
     public var serverTime: String?
     public var summary: ResourceSummary
     public var endpoints: [EndpointRecord]
+    public var serverGroups: [ServerGroupRecord]
     public var gpus: [GPURecord]
     public var leases: [LeaseRecord]
     public var requests: [AllocationRequestRecord]
@@ -1047,6 +1109,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
         serverTime: nil,
         summary: ResourceSummary(),
         endpoints: [],
+        serverGroups: [],
         gpus: [],
         leases: [],
         requests: [],
@@ -1101,6 +1164,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
         self.history = history
         summary = ResourceSummary(raw: payload["summary"] as? [String: Any] ?? [:])
         endpoints = (payload["endpoints"] as? [[String: Any]] ?? []).compactMap(EndpointRecord.init)
+        serverGroups = (payload["server_groups"] as? [[String: Any]] ?? []).compactMap(ServerGroupRecord.init)
         gpus = (payload["gpus"] as? [[String: Any]] ?? []).compactMap(GPURecord.init)
         let operationalEndpointIDs = Set(endpoints.map(\.id))
         let endpointAttention = endpoints.filter {
@@ -1142,6 +1206,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
         serverTime: String? = nil,
         summary: ResourceSummary,
         endpoints: [EndpointRecord],
+        serverGroups: [ServerGroupRecord] = [],
         gpus: [GPURecord],
         leases: [LeaseRecord],
         requests: [AllocationRequestRecord],
@@ -1164,6 +1229,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
         self.serverTime = serverTime
         self.summary = summary
         self.endpoints = endpoints
+        self.serverGroups = serverGroups
         self.gpus = gpus
         self.leases = leases
         self.requests = requests
@@ -1190,6 +1256,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
             && snapshotRevision == other.snapshotRevision
             && summary == other.summary
             && endpoints == other.endpoints
+            && serverGroups == other.serverGroups
             && gpus == other.gpus
             && leases == other.leases
             && requests == other.requests
@@ -1269,6 +1336,23 @@ public struct BrokerSnapshot: Equatable, Sendable {
 
     public func endpoint(id: String) -> EndpointRecord? {
         endpoints.first { $0.id == id }
+    }
+
+    public func serverGroup(id: String) -> ServerGroupRecord? {
+        serverGroups.first { $0.id == id }
+    }
+
+    public func serverGroup(for endpoint: EndpointRecord) -> ServerGroupRecord? {
+        guard let groupID = endpoint.serverGroupID else { return nil }
+        return serverGroup(id: groupID)
+    }
+
+    public func endpoints(inGroup groupID: String) -> [EndpointRecord] {
+        endpoints.filter { $0.serverGroupID == groupID }
+    }
+
+    public var ungroupedEndpoints: [EndpointRecord] {
+        endpoints.filter { $0.serverGroupID == nil }
     }
 
     public func gpu(id: String) -> GPURecord? {
@@ -1599,6 +1683,7 @@ public struct ClaimDraft: Equatable, Sendable {
     public var purpose: String
     public var gpuCount: Int
     public var endpointID: String
+    public var serverGroupID: String?
     public var minimumCPUCores: Double?
     public var minimumMemoryMiB: Int?
     public var minimumTotalVRAMMiB: Int?
@@ -1610,6 +1695,7 @@ public struct ClaimDraft: Equatable, Sendable {
         purpose: String,
         gpuCount: Int,
         endpointID: String,
+        serverGroupID: String? = nil,
         minimumCPUCores: Double? = nil,
         minimumMemoryMiB: Int? = nil,
         minimumTotalVRAMMiB: Int? = nil,
@@ -1620,6 +1706,7 @@ public struct ClaimDraft: Equatable, Sendable {
         self.purpose = purpose
         self.gpuCount = gpuCount
         self.endpointID = endpointID
+        self.serverGroupID = serverGroupID
         self.minimumCPUCores = minimumCPUCores
         self.minimumMemoryMiB = minimumMemoryMiB
         self.minimumTotalVRAMMiB = minimumTotalVRAMMiB
@@ -1634,6 +1721,8 @@ public struct EndpointDraft: Equatable, Sendable {
     public let sshUser: String
     public let workspacePath: String
     public let observationProfile: String
+    public let serverGroupID: String?
+    public let workspacePathOverride: String?
 
     public init(
         host: String,
@@ -1641,18 +1730,28 @@ public struct EndpointDraft: Equatable, Sendable {
         sshUser: String,
         workspacePath: String,
         observationProfile: String,
-        suppliedID: String
+        suppliedID: String,
+        serverGroupID: String? = nil,
+        workspacePathOverride: String? = nil
     ) throws {
         let cleanedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedUser = sshUser.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedWorkspacePath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedID = suppliedID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedGroupID = serverGroupID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedGroupID = (cleanedGroupID?.isEmpty == false) ? cleanedGroupID : nil
+        let cleanedOverride = workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedOverride = (cleanedOverride?.isEmpty == false) ? cleanedOverride : nil
+        let inheritedWorkspace = resolvedGroupID != nil && cleanedWorkspacePath.isEmpty
         guard
             !cleanedHost.isEmpty,
             (1...65535).contains(port),
             Self.isValidUser(cleanedUser),
-            Self.isValidWorkspacePath(cleanedWorkspacePath),
-            Self.isValidID(cleanedID.isEmpty ? Self.defaultID(host: cleanedHost, port: port) : cleanedID)
+            inheritedWorkspace || CoreFieldValidation.isAbsoluteWorkspacePath(cleanedWorkspacePath),
+            CoreFieldValidation.isSlugID(cleanedID.isEmpty ? Self.defaultID(host: cleanedHost, port: port) : cleanedID),
+            resolvedGroupID == nil || CoreFieldValidation.isSlugID(resolvedGroupID ?? ""),
+            resolvedOverride == nil || CoreFieldValidation.isAbsoluteWorkspacePath(resolvedOverride ?? ""),
+            resolvedOverride == nil || resolvedGroupID != nil
         else {
             throw EndpointDraftError.invalidEndpointFields
         }
@@ -1662,6 +1761,8 @@ public struct EndpointDraft: Equatable, Sendable {
         self.sshUser = cleanedUser
         self.workspacePath = cleanedWorkspacePath
         self.observationProfile = observationProfile
+        self.serverGroupID = resolvedGroupID
+        self.workspacePathOverride = resolvedOverride
     }
 
     private static func defaultID(host: String, port: Int) -> String {
@@ -1675,24 +1776,12 @@ public struct EndpointDraft: Equatable, Sendable {
         return String("\(base)-p\(port)".prefix(120))
     }
 
-    private static func isValidID(_ value: String) -> Bool {
-        guard (1...128).contains(value.count), let first = value.unicodeScalars.first else { return false }
-        guard CharacterSet.lowercaseLetters.contains(first) else { return false }
-        return value.unicodeScalars.allSatisfy {
-            CharacterSet.lowercaseLetters.union(.decimalDigits).union(CharacterSet(charactersIn: "-")).contains($0)
-        }
-    }
-
     private static func isValidUser(_ value: String) -> Bool {
         guard let first = value.unicodeScalars.first else { return false }
         guard CharacterSet.letters.union(CharacterSet(charactersIn: "_")).contains(first) else { return false }
         return value.unicodeScalars.allSatisfy {
             CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "_-" )).contains($0)
         }
-    }
-
-    private static func isValidWorkspacePath(_ value: String) -> Bool {
-        value.hasPrefix("/") && !value.contains("\0") && !value.contains("\n") && !value.contains("\r")
     }
 }
 
@@ -1763,11 +1852,17 @@ public struct EndpointUpdateDraft: Equatable, Sendable {
     public let sshUser: String
     public let workspacePath: String
     public let observationProfile: String
+    public let serverGroupID: String?
+    public let workspacePathOverride: String?
+    public let includesGroupAssignment: Bool
 
     public init(endpoint: EndpointRecord) {
         sshUser = endpoint.sshUser
         workspacePath = endpoint.workspacePath ?? ""
         observationProfile = endpoint.observationProfile
+        serverGroupID = endpoint.serverGroupID
+        workspacePathOverride = endpoint.workspacePathOverride
+        includesGroupAssignment = endpoint.serverGroupID != nil || endpoint.workspacePathOverride != nil
     }
 
     public init(
@@ -1775,18 +1870,181 @@ public struct EndpointUpdateDraft: Equatable, Sendable {
         workspacePath: String,
         observationProfile: String
     ) throws {
+        try self.init(
+            sshUser: sshUser,
+            workspacePath: workspacePath,
+            observationProfile: observationProfile,
+            serverGroupID: nil,
+            workspacePathOverride: nil,
+            includesGroupAssignment: false
+        )
+    }
+
+    public init(
+        sshUser: String,
+        workspacePath: String,
+        observationProfile: String,
+        serverGroupID: String?,
+        workspacePathOverride: String?
+    ) throws {
+        try self.init(
+            sshUser: sshUser,
+            workspacePath: workspacePath,
+            observationProfile: observationProfile,
+            serverGroupID: serverGroupID,
+            workspacePathOverride: workspacePathOverride,
+            includesGroupAssignment: true
+        )
+    }
+
+    private init(
+        sshUser: String,
+        workspacePath: String,
+        observationProfile: String,
+        serverGroupID: String?,
+        workspacePathOverride: String?,
+        includesGroupAssignment: Bool
+    ) throws {
         let cleanedUser = sshUser.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanedWorkspacePath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedGroupID = serverGroupID?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedGroupID = (cleanedGroupID?.isEmpty == false) ? cleanedGroupID : nil
+        let cleanedOverride = workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines)
+        let resolvedOverride = (cleanedOverride?.isEmpty == false) ? cleanedOverride : nil
+        let inheritedWorkspace = resolvedGroupID != nil && cleanedWorkspacePath.isEmpty
         guard
             !cleanedUser.isEmpty,
-            cleanedWorkspacePath.hasPrefix("/"),
-            !cleanedWorkspacePath.contains("\0"),
-            !cleanedWorkspacePath.contains("\n"),
-            !cleanedWorkspacePath.contains("\r")
+            inheritedWorkspace || CoreFieldValidation.isAbsoluteWorkspacePath(cleanedWorkspacePath),
+            resolvedGroupID == nil || CoreFieldValidation.isSlugID(resolvedGroupID ?? ""),
+            resolvedOverride == nil || CoreFieldValidation.isAbsoluteWorkspacePath(resolvedOverride ?? ""),
+            resolvedOverride == nil || resolvedGroupID != nil
         else { throw EndpointDraftError.invalidEndpointFields }
         self.sshUser = cleanedUser
         self.workspacePath = cleanedWorkspacePath
         self.observationProfile = observationProfile
+        self.serverGroupID = resolvedGroupID
+        self.workspacePathOverride = resolvedOverride
+        self.includesGroupAssignment = includesGroupAssignment
+    }
+}
+
+public struct ServerGroupDraft: Equatable, Sendable {
+    public let id: String
+    public let displayName: String
+    public let workspacePath: String
+    public let environmentNotes: String
+    public let description: String
+
+    public init(
+        id: String,
+        displayName: String,
+        workspacePath: String,
+        environmentNotes: String = "",
+        description: String = ""
+    ) throws {
+        let cleanedID = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedPath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedNotes = environmentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            CoreFieldValidation.isSlugID(cleanedID),
+            CoreFieldValidation.isPlainDisplayName(cleanedName),
+            CoreFieldValidation.isAbsoluteWorkspacePath(cleanedPath),
+            CoreFieldValidation.isPlainEnvironmentNotes(cleanedNotes),
+            CoreFieldValidation.isPlainDescription(cleanedDescription)
+        else {
+            throw ServerGroupDraftError.invalidGroupFields
+        }
+        self.id = cleanedID
+        self.displayName = cleanedName
+        self.workspacePath = cleanedPath
+        self.environmentNotes = cleanedNotes
+        self.description = cleanedDescription
+    }
+}
+
+public struct ServerGroupUpdateDraft: Equatable, Sendable {
+    public let displayName: String
+    public let workspacePath: String
+    public let environmentNotes: String
+    public let description: String
+
+    public init(
+        displayName: String,
+        workspacePath: String,
+        environmentNotes: String = "",
+        description: String = ""
+    ) throws {
+        let cleanedName = displayName.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedPath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedNotes = environmentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedDescription = description.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard
+            CoreFieldValidation.isPlainDisplayName(cleanedName),
+            CoreFieldValidation.isAbsoluteWorkspacePath(cleanedPath),
+            CoreFieldValidation.isPlainEnvironmentNotes(cleanedNotes),
+            CoreFieldValidation.isPlainDescription(cleanedDescription)
+        else {
+            throw ServerGroupDraftError.invalidGroupFields
+        }
+        self.displayName = cleanedName
+        self.workspacePath = cleanedPath
+        self.environmentNotes = cleanedNotes
+        self.description = cleanedDescription
+    }
+
+    public init(group: ServerGroupRecord) throws {
+        try self.init(
+            displayName: group.displayName,
+            workspacePath: group.workspacePath,
+            environmentNotes: group.environmentNotes,
+            description: group.description
+        )
+    }
+}
+
+public enum ServerGroupDraftError: LocalizedError, Equatable, Sendable {
+    case invalidGroupFields
+
+    public var errorDescription: String? {
+        "请填写有效的分组标识、显示名称、绝对工作路径和纯文本说明。"
+    }
+}
+
+enum CoreFieldValidation {
+    private static let asciiLower = CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyz")
+    private static let asciiSlugRest = asciiLower.union(CharacterSet(charactersIn: "0123456789-"))
+
+    /// Backend id pattern: `^[a-z][a-z0-9-]{1,127}$` (2...128 ASCII characters).
+    static func isSlugID(_ value: String) -> Bool {
+        guard (2...128).contains(value.count), let first = value.unicodeScalars.first else { return false }
+        guard asciiLower.contains(first) else { return false }
+        return value.unicodeScalars.dropFirst().allSatisfy { asciiSlugRest.contains($0) }
+    }
+
+    static func isAbsoluteWorkspacePath(_ value: String) -> Bool {
+        value.hasPrefix("/") && !value.contains("\0") && !value.contains("\n") && !value.contains("\r")
+    }
+
+    static func isPlainDisplayName(_ value: String) -> Bool {
+        guard (1...120).contains(value.count) else { return false }
+        return value.unicodeScalars.allSatisfy { scalar in
+            scalar != "\0" && scalar != "\n" && scalar != "\r" && scalar != "\t"
+        }
+    }
+
+    static func isPlainEnvironmentNotes(_ value: String) -> Bool {
+        isPlainText(value, maxLength: 8_000)
+    }
+
+    static func isPlainDescription(_ value: String) -> Bool {
+        isPlainText(value, maxLength: 1_000)
+    }
+
+    static func isPlainText(_ value: String, maxLength: Int) -> Bool {
+        guard value.count <= maxLength else { return false }
+        return !value.contains("\0")
     }
 }
 

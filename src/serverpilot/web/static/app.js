@@ -84,53 +84,90 @@
     return payload.data;
   };
 
-  const requestSshPreview = async (command, workspacePath, projectIds, csrf) => {
+  const sshMutationBody = ({
+    command,
+    commands,
+    workspacePath,
+    projectIds,
+    csrf,
+    serverGroupId,
+    workspacePathOverride,
+    endpointId,
+  }) => {
+    const body = { csrf };
+    if (command) body.command = command;
+    if (commands) body.commands = commands;
+    if (projectIds?.length) body.project_ids = projectIds;
+    if (endpointId) body.endpoint_id = endpointId;
+    if (serverGroupId) {
+      body.server_group_id = serverGroupId;
+      body.workspace_path_override = workspacePathOverride ?? null;
+    } else if (workspacePath) {
+      body.workspace_path = workspacePath;
+    }
+    return body;
+  };
+
+  const requestSshPreview = async ({ command, workspacePath, projectIds, csrf, serverGroupId, workspacePathOverride }) => {
     const response = await fetch("/ui/endpoints/ssh/preview", {
       method: "POST",
       credentials: "same-origin",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ command, workspace_path: workspacePath, project_ids: projectIds, csrf }),
+      body: JSON.stringify(sshMutationBody({
+        command, workspacePath, projectIds, csrf, serverGroupId, workspacePathOverride,
+      })),
     });
     return parseJsonResponse(response);
   };
 
-  const requestSshBatchPreview = async (commands, workspacePath, projectIds, csrf) => {
+  const requestSshBatchPreview = async ({ commands, workspacePath, projectIds, csrf, serverGroupId, workspacePathOverride }) => {
     const response = await fetch("/ui/endpoints/ssh/batch/preview", {
       method: "POST",
       credentials: "same-origin",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ commands, workspace_path: workspacePath, project_ids: projectIds, csrf }),
+      body: JSON.stringify(sshMutationBody({
+        commands, workspacePath, projectIds, csrf, serverGroupId, workspacePathOverride,
+      })),
     });
     return parseJsonResponse(response);
   };
 
-  const commitSshEndpoint = async ({ command, endpointId, workspacePath, projectIds, csrf }) => {
-    const body = { command, workspace_path: workspacePath, csrf };
-    if (endpointId) body.endpoint_id = endpointId;
-    if (projectIds?.length) body.project_ids = projectIds;
+  const commitSshEndpoint = async (fields) => {
     const response = await fetch("/ui/endpoints/ssh/commit", {
       method: "POST",
       credentials: "same-origin",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify(body),
+      body: JSON.stringify(sshMutationBody(fields)),
     });
     return parseJsonResponse(response);
   };
 
-  const commitSshBatch = async ({ commands, workspacePath, projectIds, csrf }) => {
+  const commitSshBatch = async (fields) => {
     const response = await fetch("/ui/endpoints/ssh/batch/commit", {
       method: "POST",
       credentials: "same-origin",
       headers: { Accept: "application/json", "Content-Type": "application/json" },
-      body: JSON.stringify({ commands, workspace_path: workspacePath, project_ids: projectIds, csrf }),
+      body: JSON.stringify(sshMutationBody(fields)),
     });
     return parseJsonResponse(response);
   };
+
+  let liveServerGroups = [];
+  try {
+    if (dashboardNode) {
+      const initial = JSON.parse(dashboardNode.textContent);
+      liveServerGroups = Array.isArray(initial.server_groups) ? initial.server_groups : [];
+    }
+  } catch (_error) {
+    liveServerGroups = [];
+  }
 
   const sshForm = document.getElementById("ssh-preview-form");
   if (sshForm) {
     const commandInput = document.getElementById("ssh-command");
     const workspaceInput = document.getElementById("ssh-workspace-path");
+    const groupSelect = document.getElementById("ssh-server-group");
+    const workspaceHint = document.getElementById("ssh-workspace-hint");
     const projectInput = document.getElementById("ssh-project-id");
     const previewSection = document.getElementById("ssh-preview");
     const previewFields = document.getElementById("ssh-preview-fields");
@@ -142,10 +179,26 @@
     const pasteButton = document.getElementById("paste-ssh-command");
     const clipboardStatus = document.getElementById("ssh-clipboard-status");
     const clipboardBridge = window.webkit?.messageHandlers?.serverPilotClipboard;
+    const selectedSshGroup = () => liveServerGroups.find((group) => group.id === groupSelect?.value) || null;
+    const syncSshWorkspace = () => {
+      const group = selectedSshGroup();
+      if (!workspaceInput) return;
+      workspaceInput.required = !group;
+      workspaceInput.placeholder = group?.workspace_path || "/srv/serverpilot-workspace";
+      if (workspaceHint) {
+        workspaceHint.textContent = group
+          ? `留空则继承 ${group.workspace_path || "组默认工作区"}；填写则为覆盖路径。`
+          : "未分组时必须填写绝对路径。加入组后可留空以继承组默认工作区。";
+      }
+    };
+    groupSelect?.addEventListener("change", syncSshWorkspace);
+    syncSshWorkspace();
     let sshPreviewData = null;
     let sshBatchCommands = null;
     let sshProjectIds = [];
     let sshWorkspacePath = "";
+    let sshServerGroupId = "";
+    let sshWorkspaceOverride = null;
 
     const setClipboardStatus = (message) => {
       if (!clipboardStatus) return;
@@ -198,13 +251,36 @@
         const csrf = sshForm.elements.csrf.value;
         const commands = commandInput.value.split(/\r?\n/).map((command) => command.trim()).filter(Boolean);
         sshProjectIds = projectInput.value.trim() ? [projectInput.value.trim()] : [];
-        sshWorkspacePath = workspaceInput.value.trim();
+        const typedWorkspace = workspaceInput.value.trim();
+        sshServerGroupId = groupSelect?.value || "";
+        sshWorkspaceOverride = sshServerGroupId ? (typedWorkspace || null) : null;
+        sshWorkspacePath = sshServerGroupId ? "" : typedWorkspace;
         if (!sshProjectIds.length) throw new Error("请填写这台服务器的归属项目。");
-        if (!sshWorkspacePath.startsWith("/")) throw new Error("请填写绝对远端工作区路径。");
+        if (sshServerGroupId) {
+          if (typedWorkspace && !typedWorkspace.startsWith("/")) {
+            throw new Error("覆盖路径必须是绝对远端工作区路径。");
+          }
+        } else if (!typedWorkspace.startsWith("/")) {
+          throw new Error("请填写绝对远端工作区路径。");
+        }
         sshBatchCommands = commands.length > 1 ? commands : null;
         sshPreviewData = sshBatchCommands
-          ? await requestSshBatchPreview(sshBatchCommands, sshWorkspacePath, sshProjectIds, csrf)
-          : await requestSshPreview(commandInput.value, sshWorkspacePath, sshProjectIds, csrf);
+          ? await requestSshBatchPreview({
+            commands: sshBatchCommands,
+            workspacePath: sshWorkspacePath,
+            projectIds: sshProjectIds,
+            csrf,
+            serverGroupId: sshServerGroupId,
+            workspacePathOverride: sshWorkspaceOverride,
+          })
+          : await requestSshPreview({
+            command: commandInput.value,
+            workspacePath: sshWorkspacePath,
+            projectIds: sshProjectIds,
+            csrf,
+            serverGroupId: sshServerGroupId,
+            workspacePathOverride: sshWorkspaceOverride,
+          });
         const entries = previewEntries(sshPreviewData || {});
         const statusTitles = {
           new: "确认新服务器信息",
@@ -244,13 +320,22 @@
       commitButton.textContent = "正在注册…";
       try {
         const result = sshBatchCommands
-          ? await commitSshBatch({ commands: sshBatchCommands, workspacePath: sshWorkspacePath, projectIds: sshProjectIds, csrf: sshForm.elements.csrf.value })
+          ? await commitSshBatch({
+            commands: sshBatchCommands,
+            workspacePath: sshWorkspacePath,
+            projectIds: sshProjectIds,
+            csrf: sshForm.elements.csrf.value,
+            serverGroupId: sshServerGroupId,
+            workspacePathOverride: sshWorkspaceOverride,
+          })
           : await commitSshEndpoint({
             command: commandInput.value,
             endpointId: document.getElementById("ssh-endpoint-id").value.trim(),
             workspacePath: sshWorkspacePath,
             projectIds: sshPreviewData.endpoint?.project_ids,
             csrf: sshForm.elements.csrf.value,
+            serverGroupId: sshServerGroupId,
+            workspacePathOverride: sshWorkspaceOverride,
           });
         if (sshBatchCommands && result.entries.some((entry) => !["registered", "updated"].includes(entry.status))) {
           renderBatchPreview(result.entries);
@@ -275,6 +360,8 @@
       sshBatchCommands = null;
       sshProjectIds = [];
       sshWorkspacePath = "";
+      sshServerGroupId = "";
+      sshWorkspaceOverride = null;
       endpointIdField.hidden = false;
       commitButton.disabled = false;
       commitButton.textContent = "确认注册";
@@ -477,7 +564,7 @@
     return `
       <section class="server-block" data-server-id="${escapeHTML(endpoint.id)}" data-expanded="${expanded}">
         <div class="server-summary">
-          <span class="server-name"><i class="status-dot ${status.toLowerCase()}"></i><span><strong><code>${escapeHTML(sshCommand)}</code></strong><small>${escapeHTML(endpoint.workspace_path || "工作区未设置")} · ${escapeHTML(monitorLabels[status] || status)}${gpuObservationNote}</small></span></span>
+          <span class="server-name"><i class="status-dot ${status.toLowerCase()}"></i><span><strong><code>${escapeHTML(sshCommand)}</code></strong><small>${escapeHTML(serverSecondaryLine(endpoint, status, gpuObservationNote))}</small></span></span>
           <span class="server-counts" aria-label="GPU 状态：共 ${gpus.length}，可分配 ${available}，占用 ${busy}，任务分配 ${claimed}，异常 ${abnormal}"><span title="总数"><strong>${gpus.length}</strong></span><span class="count-available" title="可分配"><strong>${available}</strong></span><span title="占用"><strong>${busy}</strong></span><span title="任务分配"><strong>${claimed}</strong></span><span class="${abnormal ? "count-alert" : ""}" title="异常"><strong>${abnormal}</strong></span></span>
           <span class="server-aggregate">${clusterMeter("CPU", cpuLoadPct, "cpu", cpuDetail)}${clusterMeter("内存", memoryUsedPct, "memory", memoryDetail)}${clusterMeter("显存", memoryPct, "memory", vramDetail)}${clusterMeter("GPU", util, "utilization", `${Math.round(util)}% 利用率`)}</span>
           <span class="server-actions">
@@ -488,6 +575,64 @@
         </div>
         <div class="gpu-tiles">${expanded ? (gpus.length ? gpus.map(gpuRow).join("") : '<p class="empty-inline">尚未发现 GPU；该服务器不会参与分配。</p>') : ""}</div>
       </section>`;
+  };
+
+  const listedServerGroups = () => Array.isArray(data.server_groups) ? data.server_groups : [];
+  const groupById = (groupID) => listedServerGroups().find((group) => group.id === groupID) || null;
+  const endpointGroupID = (endpoint) => (
+    typeof endpoint.server_group_id === "string" && endpoint.server_group_id ? endpoint.server_group_id : null
+  );
+  const effectiveWorkspace = (endpoint) => {
+    if (typeof endpoint.workspace_path === "string" && endpoint.workspace_path) return endpoint.workspace_path;
+    if (typeof endpoint.workspace_path_override === "string" && endpoint.workspace_path_override) {
+      return endpoint.workspace_path_override;
+    }
+    return groupById(endpointGroupID(endpoint))?.workspace_path || null;
+  };
+  const hasFormalGroups = () => listedServerGroups().length > 0 || (data.endpoints || []).some(endpointGroupID);
+  const serverSecondaryLine = (endpoint, status, gpuObservationNote) => {
+    const group = groupById(endpointGroupID(endpoint));
+    const workspace = effectiveWorkspace(endpoint) || "工作区未设置";
+    const prefix = group ? group.display_name || group.id : workspace;
+    return `${prefix} · ${monitorLabels[status] || status}${gpuObservationNote}`;
+  };
+  const groupedEndpointSections = (endpoints) => {
+    const groups = listedServerGroups();
+    if (!hasFormalGroups()) return [{ group: null, ungrouped: false, items: endpoints }];
+    const buckets = new Map(groups.map((group) => [group.id, []]));
+    const extra = new Map();
+    const ungrouped = [];
+    endpoints.forEach((endpoint) => {
+      const groupID = endpointGroupID(endpoint);
+      if (!groupID) {
+        ungrouped.push(endpoint);
+        return;
+      }
+      if (buckets.has(groupID)) {
+        buckets.get(groupID).push(endpoint);
+        return;
+      }
+      if (!extra.has(groupID)) extra.set(groupID, []);
+      extra.get(groupID).push(endpoint);
+    });
+    const sections = [];
+    groups.forEach((group) => {
+      const items = buckets.get(group.id) || [];
+      if (items.length) sections.push({ group, ungrouped: false, items });
+    });
+    extra.forEach((items, groupID) => {
+      sections.push({ group: { id: groupID, display_name: groupID }, ungrouped: false, items });
+    });
+    if (ungrouped.length) sections.push({ group: null, ungrouped: true, items: ungrouped });
+    return sections;
+  };
+  const groupCapacity = (endpoints) => {
+    const gpus = data.gpus || [];
+    const total = endpoints.reduce((sum, endpoint) => sum + gpus.filter((gpu) => gpu.endpoint_id === endpoint.id).length, 0);
+    const free = endpoints.reduce((sum, endpoint) => (
+      sum + gpus.filter((gpu) => gpu.endpoint_id === endpoint.id && gpu.publicly_available === true).length
+    ), 0);
+    return `${endpoints.length} 台 · ${total ? `${free}/${total} 可分配` : "无 GPU"}`;
   };
 
   const renderSummary = () => {
@@ -506,7 +651,8 @@
   const endpointMatches = (endpoint) => {
     const gpus = data.gpus.filter((gpu) => gpu.endpoint_id === endpoint.id);
     const status = endpoint.monitor?.status || "PENDING";
-    const searchable = `${endpoint.id} ${endpoint.ssh_user} ${endpoint.host} ${endpoint.port} ${endpoint.workspace_path || ""}`.toLowerCase();
+    const group = groupById(endpointGroupID(endpoint));
+    const searchable = `${endpoint.id} ${endpoint.ssh_user} ${endpoint.host} ${endpoint.port} ${effectiveWorkspace(endpoint) || ""} ${group?.display_name || ""} ${group?.id || ""}`.toLowerCase();
     if (resourceQuery && !searchable.includes(resourceQuery)) return false;
     if (activeResourceFilter === "available") return gpus.some((gpu) => gpu.publicly_available === true);
     if (activeResourceFilter === "busy") return gpus.some((gpu) => busyStates.has(gpu.state));
@@ -521,14 +667,24 @@
   };
 
   const renderServers = () => {
+    liveServerGroups = listedServerGroups();
     const endpoints = data.endpoints.filter(endpointMatches);
     if (!data.endpoints.length) {
       serverGroups.innerHTML = '<p class="empty-inline">还没有服务器。点击“添加服务器”开始只读监控。</p>';
       return;
     }
-    serverGroups.innerHTML = endpoints.length
-      ? endpoints.map(serverBlock).join("")
-      : '<p class="empty-inline">没有符合当前筛选条件的服务器。</p>';
+    if (!endpoints.length) {
+      serverGroups.innerHTML = '<p class="empty-inline">没有符合当前筛选条件的服务器。</p>';
+      return;
+    }
+    serverGroups.innerHTML = groupedEndpointSections(endpoints).map((section) => {
+      const heading = section.group || section.ungrouped
+        ? `<header class="server-group-heading${section.ungrouped ? " ungrouped" : ""}"><span>${escapeHTML(section.ungrouped ? "未分组" : (section.group.display_name || section.group.id))}</span><small>${escapeHTML(groupCapacity(section.items))}</small></header>`
+        : "";
+      return `<div class="server-group-section">${heading}<div class="server-group-rows">${section.items.map(serverBlock).join("")}</div></div>`;
+    }).join("");
+    fillClaimGroupSelect();
+    fillSshGroupSelect();
   };
 
   const sideItems = () => {
@@ -550,10 +706,100 @@
       || `<p class="empty-inline">${activeSideTab === "claims" ? "当前没有资源分配" : "当前没有排队"}</p>`;
   };
 
+  const fillClaimGroupSelect = () => {
+    const select = document.getElementById("claim-server-group");
+    const endpointSelect = document.getElementById("claim-endpoint");
+    const endpointWrap = document.getElementById("claim-endpoint-wrap");
+    if (!select) return;
+    const current = select.value;
+    const groups = listedServerGroups();
+    const options = [`<option value="">${groups.length ? "选择服务器组" : "自动选择"}</option>`];
+    groups.forEach((group) => {
+      options.push(`<option value="${escapeHTML(group.id)}">${escapeHTML(group.display_name || group.id)}</option>`);
+    });
+    options.push(`<option value="__ungrouped__">未分组（按单机申请）</option>`);
+    select.innerHTML = options.join("");
+    if ([...select.options].some((option) => option.value === current)) select.value = current;
+    const ungrouped = (data.endpoints || []).filter((endpoint) => !endpointGroupID(endpoint));
+    if (endpointSelect) {
+      const selected = endpointSelect.value;
+      endpointSelect.innerHTML = `<option value="">不指定单机</option>${ungrouped.map((endpoint) => (
+        `<option value="${escapeHTML(endpoint.id)}">${escapeHTML(endpoint.id)} · ${escapeHTML(endpoint.host)}:${escapeHTML(endpoint.port)}</option>`
+      )).join("")}`;
+      if ([...endpointSelect.options].some((option) => option.value === selected)) endpointSelect.value = selected;
+    }
+    if (endpointWrap) endpointWrap.hidden = Boolean(groups.length) && select.value !== "__ungrouped__";
+  };
+
+  const fillSshGroupSelect = () => {
+    const select = document.getElementById("ssh-server-group");
+    if (!select) return;
+    const current = select.value;
+    select.innerHTML = `<option value="">未分组</option>${listedServerGroups().map((group) => (
+      `<option value="${escapeHTML(group.id)}">${escapeHTML(group.display_name || group.id)}</option>`
+    )).join("")}`;
+    if ([...select.options].some((option) => option.value === current)) select.value = current;
+  };
+
+  const renderGroupList = () => {
+    const list = document.getElementById("group-list");
+    if (!list) return;
+    const groups = listedServerGroups();
+    if (!groups.length) {
+      list.innerHTML = '<p class="muted">还没有服务器组。创建后即可绑定服务器并按组申请 GPU。</p>';
+      return;
+    }
+    list.innerHTML = groups.map((group) => {
+      const members = (data.endpoints || []).filter((endpoint) => endpointGroupID(endpoint) === group.id);
+      return `<article class="group-item"><div><strong>${escapeHTML(group.display_name || group.id)}</strong><small>${escapeHTML(group.workspace_path || "未设置工作区")} · ${members.length} 台</small></div><div class="group-item-actions"><button class="quiet-action" type="button" data-edit-group="${escapeHTML(group.id)}">编辑</button><button class="quiet-action" type="button" data-delete-group="${escapeHTML(group.id)}">删除</button></div></article>`;
+    }).join("");
+  };
+
+  const resetGroupForm = () => {
+    const original = document.getElementById("group-original-id");
+    const id = document.getElementById("group-id");
+    if (original) original.value = "";
+    if (id) {
+      id.value = "";
+      id.readOnly = false;
+    }
+    const display = document.getElementById("group-display-name");
+    const workspace = document.getElementById("group-workspace");
+    const description = document.getElementById("group-description");
+    const notes = document.getElementById("group-environment-notes");
+    if (display) display.value = "";
+    if (workspace) workspace.value = "";
+    if (description) description.value = "";
+    if (notes) notes.value = "";
+  };
+
+  const fillGroupForm = (group) => {
+    document.getElementById("group-original-id").value = group.id;
+    const id = document.getElementById("group-id");
+    id.value = group.id;
+    id.readOnly = true;
+    document.getElementById("group-display-name").value = group.display_name || "";
+    document.getElementById("group-workspace").value = group.workspace_path || "";
+    document.getElementById("group-description").value = group.description || "";
+    document.getElementById("group-environment-notes").value = group.environment_notes || "";
+  };
+
+  const mutateServerGroup = async (method, path, body) => {
+    const response = await fetch(path, {
+      method,
+      credentials: "same-origin",
+      headers: { Accept: "application/json", "Content-Type": "application/json" },
+      body: body ? JSON.stringify(body) : undefined,
+    });
+    return parseJsonResponse(response);
+  };
+
   const render = () => {
+    liveServerGroups = listedServerGroups();
     renderSummary();
     renderServers();
     renderCoordination();
+    renderGroupList();
   };
 
   serverGroups.addEventListener("click", (event) => {
@@ -604,6 +850,141 @@
     resourceQuery = event.currentTarget.value.trim().toLowerCase();
     renderServers();
   });
+
+  const buildQuickClaimConstraints = ({
+    hasFormalGroups,
+    groupID,
+    endpointID,
+    gpuCount,
+    placement,
+    gpuIds,
+  }) => {
+    if (hasFormalGroups && !groupID) {
+      throw new Error("请先选择服务器分组后再申请 GPU。");
+    }
+    if (hasFormalGroups && groupID === "__ungrouped__" && !endpointID) {
+      throw new Error("未分组申请请选择一台未分组服务器。");
+    }
+    const constraints = {
+      gpu_count: Number(gpuCount || 1),
+      placement: placement || "pack",
+    };
+    if (hasFormalGroups && groupID && groupID !== "__ungrouped__") {
+      constraints.server_group_ids = [groupID];
+      constraints.same_host = true;
+    } else if (endpointID) {
+      constraints.endpoint_ids = [endpointID];
+      if (hasFormalGroups) constraints.same_host = true;
+    }
+    const selectedGpus = (gpuIds || []).filter(Boolean);
+    if (selectedGpus.length) {
+      constraints.gpu_ids = selectedGpus;
+      constraints.gpu_count = selectedGpus.length;
+      constraints.placement = "exact";
+    }
+    return constraints;
+  }; // end buildQuickClaimConstraints
+
+  document.getElementById("claim-server-group")?.addEventListener("change", () => {
+    const wrap = document.getElementById("claim-endpoint-wrap");
+    if (wrap) wrap.hidden = hasFormalGroups() && document.getElementById("claim-server-group").value !== "__ungrouped__";
+  });
+
+  document.getElementById("quick-claim-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const groupID = form.get("server_group_id");
+    let constraints;
+    try {
+      constraints = buildQuickClaimConstraints({
+        hasFormalGroups: hasFormalGroups(),
+        groupID,
+        endpointID: form.get("endpoint_id"),
+        gpuCount: form.get("gpu_count"),
+        placement: form.get("placement"),
+        gpuIds: form.getAll("gpu_ids"),
+      });
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+      return;
+    }
+    const cpu = form.get("min_available_cpu_cores");
+    const memoryGib = form.get("min_available_memory_gib");
+    const totalGib = form.get("min_total_vram_gib");
+    const freeGib = form.get("min_free_vram_gib");
+    if (cpu) constraints.min_available_cpu_cores = Number(cpu);
+    if (memoryGib) constraints.min_available_memory_mib = Number(memoryGib) * 1024;
+    if (totalGib) constraints.min_total_vram_mib = Number(totalGib) * 1024;
+    if (freeGib) constraints.min_free_vram_mib = Number(freeGib) * 1024;
+    try {
+      await fetch("/api/v1/claims", {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          Accept: "application/json",
+          "Content-Type": "application/json",
+          "Idempotency-Key": `web-${crypto.randomUUID()}`,
+        },
+        body: JSON.stringify({
+          project_id: form.get("project_id"),
+          task_ref: form.get("task_ref"),
+          purpose: form.get("task_ref"),
+          constraints,
+        }),
+      }).then(async (response) => {
+        const payload = await response.json().catch(() => ({}));
+        if (!response.ok || payload.error) {
+          throw new Error(payload.error?.message || `申请失败（${response.status}）`);
+        }
+      });
+      document.getElementById("claim-dialog")?.close();
+      window.location.reload();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  });
+
+  document.getElementById("reset-group-form")?.addEventListener("click", () => resetGroupForm());
+  document.getElementById("group-list")?.addEventListener("click", async (event) => {
+    const edit = event.target.closest("[data-edit-group]");
+    if (edit) {
+      const group = groupById(edit.dataset.editGroup);
+      if (group) fillGroupForm(group);
+      return;
+    }
+    const remove = event.target.closest("[data-delete-group]");
+    if (!remove) return;
+    if (!window.confirm("删除这个服务器组？仍有成员时后端会拒绝删除。")) return;
+    try {
+      await mutateServerGroup("DELETE", `/api/v1/server-groups/${encodeURIComponent(remove.dataset.deleteGroup)}`);
+      window.location.reload();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  });
+  document.getElementById("group-form")?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    const originalID = form.get("original_id");
+    const payload = {
+      display_name: form.get("display_name"),
+      workspace_path: form.get("workspace_path"),
+      description: form.get("description") || "",
+      environment_notes: form.get("environment_notes") || "",
+    };
+    if (!originalID) payload.id = form.get("id");
+    try {
+      await mutateServerGroup(
+        originalID ? "PATCH" : "POST",
+        originalID ? `/api/v1/server-groups/${encodeURIComponent(originalID)}` : "/api/v1/server-groups",
+        payload,
+      );
+      window.location.reload();
+    } catch (error) {
+      window.alert(error instanceof Error ? error.message : String(error));
+    }
+  });
+  document.getElementById("groups-dialog")?.addEventListener("close", () => resetGroupForm());
 
   const coordinationPreferenceKey = "serverpilot.coordination-collapsed";
   const setCoordinationCollapsed = (collapsed, { focus = false } = {}) => {

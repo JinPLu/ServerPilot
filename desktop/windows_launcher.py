@@ -182,6 +182,55 @@ class BrokerServer:
             self._thread.join(timeout=3.0)
 
 
+# Canonical REST fields. environment_notes is JSON metadata on a server group
+# only; it is never copied into os.environ, subprocess env, collector, plugins,
+# or keepalive.
+_SERVER_GROUP_FIELDS = {
+    "id",
+    "display_name",
+    "workspace_path",
+    "environment_notes",
+    "description",
+}
+_SERVER_GROUP_UPDATE_FIELDS = _SERVER_GROUP_FIELDS - {"id"}
+_ENDPOINT_WRITE_FIELDS = {
+    "id",
+    "host",
+    "port",
+    "ssh_user",
+    "workspace_path",
+    "workspace_path_override",
+    "server_group_id",
+    "observation_profile",
+    "keepalive_adapter_id",
+    "labels",
+    "owner_project_id",
+}
+_ENDPOINT_UPDATE_FIELDS = {
+    "ssh_user",
+    "workspace_path",
+    "workspace_path_override",
+    "server_group_id",
+    "observation_profile",
+    "keepalive_adapter_id",
+    "labels",
+    "owner_project_id",
+}
+_CLAIM_CONSTRAINT_FIELDS = {
+    "gpu_count",
+    "placement",
+    "endpoint_ids",
+    "gpu_ids",
+    "deny_endpoint_ids",
+    "min_free_vram_mib",
+    "min_total_vram_mib",
+    "min_available_cpu_cores",
+    "min_available_memory_mib",
+    "server_group_ids",
+    "same_host",
+}
+
+
 class DesktopBridge:
     """Narrow pywebview bridge for the Windows-only desktop presentation.
 
@@ -230,22 +279,38 @@ class DesktopBridge:
         )
 
     def create_endpoint(self, endpoint: dict[str, Any]) -> dict[str, Any]:
-        allowed = {
-            "id",
-            "host",
-            "port",
-            "ssh_user",
-            "workspace_path",
-            "observation_profile",
-            "keepalive_adapter_id",
-            "labels",
-            "owner_project_id",
-        }
-        return self._request("POST", "/api/v1/endpoints", self._only(endpoint, allowed))
+        return self._request(
+            "POST", "/api/v1/endpoints", self._endpoint_mutation_payload(endpoint, _ENDPOINT_WRITE_FIELDS)
+        )
+
+    def update_endpoint(self, endpoint_id: str, endpoint: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "PATCH",
+            f"/api/v1/endpoints/{quote(endpoint_id, safe='')}",
+            self._endpoint_mutation_payload(endpoint, _ENDPOINT_UPDATE_FIELDS),
+        )
+
+    def create_server_group(self, group: dict[str, Any]) -> dict[str, Any]:
+        return self._request("POST", "/api/v1/server-groups", self._only(group, _SERVER_GROUP_FIELDS))
+
+    def update_server_group(self, group_id: str, group: dict[str, Any]) -> dict[str, Any]:
+        return self._request(
+            "PATCH",
+            f"/api/v1/server-groups/{quote(group_id, safe='')}",
+            self._only(group, _SERVER_GROUP_UPDATE_FIELDS),
+        )
+
+    def delete_server_group(self, group_id: str) -> dict[str, Any]:
+        return self._request("DELETE", f"/api/v1/server-groups/{quote(group_id, safe='')}")
 
     def claim(self, request: dict[str, Any]) -> dict[str, Any]:
-        allowed = {"project_id", "task_ref", "purpose", "constraints"}
-        return self._request("POST", "/api/v1/claims", self._only(request, allowed))
+        payload = self._only(request, {"project_id", "task_ref", "purpose", "constraints"})
+        constraints = payload.get("constraints")
+        if isinstance(constraints, dict):
+            payload["constraints"] = self._only(constraints, _CLAIM_CONSTRAINT_FIELDS)
+        elif "constraints" in payload:
+            payload["constraints"] = {}
+        return self._request("POST", "/api/v1/claims", payload)
 
     def set_keepalive(self, endpoint_id: str, enabled: bool) -> dict[str, Any]:
         return self._request(
@@ -274,6 +339,16 @@ class DesktopBridge:
         if not isinstance(payload, dict):
             return {}
         return {key: value for key, value in payload.items() if key in allowed}
+
+    @classmethod
+    def _endpoint_mutation_payload(cls, endpoint: object, allowed: set[str]) -> dict[str, Any]:
+        body = cls._only(endpoint, allowed)
+        if body.get("server_group_id"):
+            body.pop("workspace_path", None)
+            body.setdefault("workspace_path_override", None)
+        else:
+            body.pop("workspace_path_override", None)
+        return body
 
     @staticmethod
     def _invalid(message: str) -> dict[str, Any]:

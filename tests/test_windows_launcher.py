@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import sys
 import types
 from io import BytesIO
@@ -129,6 +130,213 @@ def test_windows_desktop_bridge_limits_the_rest_surface_and_sets_identity_header
         "purpose": "test",
         "constraints": {"gpu_count": 1},
     }
+
+
+def test_windows_desktop_bridge_keeps_group_constraint_and_strips_notes_from_claims(tmp_path: Path) -> None:
+    launcher = load_launcher()
+    calls = []
+
+    def opener(request, *, timeout: float):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        return FakeResponse({"ok": True})
+
+    paths = launcher.RuntimePaths(tmp_path, tmp_path / "inventory.yaml", "sqlite:///example.sqlite3", 8787, False)
+    before = dict(os.environ)
+    result = launcher.DesktopBridge("http://127.0.0.1:8787/", paths, opener=opener).claim(
+        {
+            "project_id": "demo",
+            "task_ref": "train",
+            "purpose": "test",
+            "constraints": {
+                "gpu_count": 2,
+                "same_host": True,
+                "server_group_ids": ["training-a"],
+                "server_group_id": "old-singular",
+                "endpoint_ids": ["should-not-mix-when-present"],
+                "environment_notes": "CUDA_VISIBLE_DEVICES=0",
+                "unexpected": "drop-me",
+            },
+        }
+    )
+
+    assert result["ok"] is True
+    assert json.loads(calls[0].data.decode("utf-8"))["constraints"] == {
+        "gpu_count": 2,
+        "same_host": True,
+        "server_group_ids": ["training-a"],
+        "endpoint_ids": ["should-not-mix-when-present"],
+    }
+    assert dict(os.environ) == before
+
+
+def test_windows_desktop_bridge_keeps_same_host_and_grouped_claim_keys(tmp_path: Path) -> None:
+    launcher = load_launcher()
+    calls = []
+
+    def opener(request, *, timeout: float):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        return FakeResponse({"ok": True})
+
+    paths = launcher.RuntimePaths(tmp_path, tmp_path / "inventory.yaml", "sqlite:///example.sqlite3", 8787, False)
+    bridge = launcher.DesktopBridge("http://127.0.0.1:8787/", paths, opener=opener)
+    grouped = bridge.claim(
+        {
+            "project_id": "demo",
+            "task_ref": "train",
+            "purpose": "test",
+            "constraints": {
+                "gpu_count": 1,
+                "placement": "pack",
+                "same_host": True,
+                "server_group_ids": ["training-a"],
+            },
+        }
+    )
+    ungrouped = bridge.claim(
+        {
+            "project_id": "demo",
+            "task_ref": "train",
+            "purpose": "test",
+            "constraints": {
+                "gpu_count": 1,
+                "placement": "pack",
+                "same_host": True,
+                "endpoint_ids": ["server-c"],
+            },
+        }
+    )
+
+    assert grouped["ok"] is ungrouped["ok"] is True
+    assert json.loads(calls[0].data.decode("utf-8"))["constraints"] == {
+        "gpu_count": 1,
+        "placement": "pack",
+        "same_host": True,
+        "server_group_ids": ["training-a"],
+    }
+    assert json.loads(calls[1].data.decode("utf-8"))["constraints"] == {
+        "gpu_count": 1,
+        "placement": "pack",
+        "same_host": True,
+        "endpoint_ids": ["server-c"],
+    }
+
+
+def test_windows_desktop_bridge_allows_group_fields_on_endpoints_without_notes(tmp_path: Path) -> None:
+    launcher = load_launcher()
+    calls = []
+
+    def opener(request, *, timeout: float):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        return FakeResponse({"endpoint": {"id": "server-a"}})
+
+    paths = launcher.RuntimePaths(tmp_path, tmp_path / "inventory.yaml", "sqlite:///example.sqlite3", 8787, False)
+    bridge = launcher.DesktopBridge("http://127.0.0.1:8787/", paths, opener=opener)
+    created = bridge.create_endpoint(
+        {
+            "id": "server-a",
+            "host": "10.0.0.1",
+            "port": 22,
+            "ssh_user": "gpu",
+            "workspace_path": "/srv/effective-must-drop",
+            "workspace_path_override": "/srv/override",
+            "server_group_id": "training-a",
+            "observation_profile": "server-script-v1",
+            "environment_notes": "must-not-leave-the-allowlist",
+        }
+    )
+    inherited = bridge.create_endpoint(
+        {
+            "id": "server-b",
+            "host": "10.0.0.2",
+            "port": 22,
+            "ssh_user": "gpu",
+            "workspace_path": "/srv/effective-must-drop",
+            "server_group_id": "training-a",
+            "observation_profile": "server-script-v1",
+        }
+    )
+    ungrouped = bridge.create_endpoint(
+        {
+            "id": "server-c",
+            "host": "10.0.0.3",
+            "port": 22,
+            "ssh_user": "gpu",
+            "workspace_path": "/srv/solo",
+            "workspace_path_override": "/srv/must-omit",
+            "observation_profile": "server-script-v1",
+        }
+    )
+    updated = bridge.update_endpoint(
+        "server-a",
+        {"server_group_id": None, "workspace_path": "/srv/solo", "workspace_path_override": "/srv/must-omit", "environment_notes": "drop"},
+    )
+
+    assert created["ok"] is inherited["ok"] is ungrouped["ok"] is updated["ok"] is True
+    create_body = json.loads(calls[0].data.decode("utf-8"))
+    assert create_body["server_group_id"] == "training-a"
+    assert create_body["workspace_path_override"] == "/srv/override"
+    assert "workspace_path" not in create_body
+    assert "environment_notes" not in create_body
+    inherit_body = json.loads(calls[1].data.decode("utf-8"))
+    assert inherit_body["server_group_id"] == "training-a"
+    assert inherit_body["workspace_path_override"] is None
+    assert "workspace_path" not in inherit_body
+    ungrouped_body = json.loads(calls[2].data.decode("utf-8"))
+    assert ungrouped_body["workspace_path"] == "/srv/solo"
+    assert "workspace_path_override" not in ungrouped_body
+    assert "server_group_id" not in ungrouped_body
+    update_body = json.loads(calls[3].data.decode("utf-8"))
+    assert calls[3].full_url == "http://127.0.0.1:8787/api/v1/endpoints/server-a"
+    assert calls[3].get_method() == "PATCH"
+    assert update_body["workspace_path"] == "/srv/solo"
+    assert "workspace_path_override" not in update_body
+    assert "environment_notes" not in update_body
+
+
+def test_windows_desktop_bridge_sends_group_crud_notes_as_json_not_process_env(tmp_path: Path) -> None:
+    launcher = load_launcher()
+    calls = []
+
+    def opener(request, *, timeout: float):  # type: ignore[no-untyped-def]
+        calls.append(request)
+        return FakeResponse({"server_group": {"id": "training-a"}})
+
+    paths = launcher.RuntimePaths(tmp_path, tmp_path / "inventory.yaml", "sqlite:///example.sqlite3", 8787, False)
+    bridge = launcher.DesktopBridge("http://127.0.0.1:8787/", paths, opener=opener)
+    environ = os.environ
+    before = dict(environ)
+    created = bridge.create_server_group(
+        {
+            "id": "training-a",
+            "display_name": "训练 A",
+            "workspace_path": "/srv/shared",
+            "environment_notes": "module load cuda",
+            "description": "A 区",
+            "unexpected": "drop",
+        }
+    )
+    updated = bridge.update_server_group(
+        "training-a",
+        {"display_name": "训练 A2", "id": "ignored", "environment_notes": "keep json only"},
+    )
+    deleted = bridge.delete_server_group("training-a")
+
+    assert created["ok"] is updated["ok"] is deleted["ok"] is True
+    assert json.loads(calls[0].data.decode("utf-8")) == {
+        "id": "training-a",
+        "display_name": "训练 A",
+        "workspace_path": "/srv/shared",
+        "environment_notes": "module load cuda",
+        "description": "A 区",
+    }
+    update_body = json.loads(calls[1].data.decode("utf-8"))
+    assert update_body["environment_notes"] == "keep json only"
+    assert "id" not in update_body
+    assert calls[2].get_method() == "DELETE"
+    assert calls[2].full_url == "http://127.0.0.1:8787/api/v1/server-groups/training-a"
+    assert dict(environ) == before
+    assert all("module load cuda" not in str(value) for value in environ.values())
+    assert all("keep json only" not in str(value) for value in environ.values())
 
 
 def test_windows_desktop_bridge_maps_service_errors_without_exposing_transport_details(tmp_path: Path) -> None:

@@ -56,14 +56,19 @@ plane.
 
 Server state refreshes on the collection interval you set. Free cards, busy
 cards, which task owns what, and collector failures are all visible in the app.
+Servers can sit in a first-class group that carries a shared workspace plus
+environment and data/weight notes; a member inherits that workspace or
+overrides it. Environment notes are descriptive only. Allocatable capacity is
+shown group → server → SKU, not as a menu of individual free cards.
 
 ### 🧩 Agents allocate for themselves
 
 The default MCP surface is three tools:
 
-- 🔍 `gpu_status` — what is allocatable, what is busy and to whom, and telemetry
-  for cards you already hold
-- 🔑 `gpu_apply` — take GPUs
+- 🔍 `gpu_status` — grouped allocatable capacity, what is busy and to whom, and
+  telemetry for cards you already hold
+- 🔑 `gpu_apply` — take GPUs (`server_group_id?`, `server_id?`, `gpu_count=1`,
+  `task?`)
 - ♻️ `gpu_release` — give them back
 
 A successful request returns the SSH connection, the remote working directory,
@@ -196,15 +201,24 @@ are in the [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master
 ## 🤖 How an agent uses it
 
 ```text
-gpu_status → gpu_apply(task="my task") → use what it returns → gpu_release(lease_id)
+gpu_status → gpu_apply(server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
 ```
 
-- Agents never pass GPU IDs. `gpu_apply` picks the cards, and one lease always
-  lands on a single server.
-- Allocatable cards report capacity only (`name`, `vram_mib`, `status`) and
-  carry no telemetry. Load observable on a free card comes from ServerPilot's
-  own keepalive hold, which is stopped before the card is handed over, so it is
-  not evidence that the card is busy. Telemetry follows the lease:
+- Routine apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`.
+  Agents never pass GPU IDs; `gpu_apply` picks the cards, and one lease always
+  lands on a single server. `gpu_count` is exact job parallelism from the launch
+  script or config. The safe default is 1. Never infer it from free capacity.
+- On grouped direct hosts, pass `server_group_id`; the broker then best-fits one
+  host inside that group. `server_id` remains for ungrouped hosts and for
+  plugin/scheduler compatibility.
+- Assess a group's workspace, environment notes, and data/weight notes before
+  claiming. Endpoints inherit the group workspace or override it. Environment
+  notes are descriptive only — they are not executed or injected.
+- Allocatable capacity is grouped group → server → SKU (`name`, `vram_mib`,
+  `total_count`, `available_count`), not a per-free-card menu, and carries no
+  telemetry. Load observable on a free card comes from ServerPilot's own
+  keepalive hold, which is stopped before the card is handed over, so it is not
+  evidence that the card is busy. Telemetry follows the lease:
   `gpu_status(lease_id=…)` returns rolling ten-minute averages for
   `leased_gpus` plus a `lease` summary (`min_memory_free_mib`, `slowest_gpu`)
   for judging whether your own job is using the cards well.

@@ -506,6 +506,19 @@ private func confirmEndpointDelete(_ endpoint: EndpointRecord) -> Bool {
     return alert.runModal() == .alertSecondButtonReturn
 }
 
+private func confirmServerGroupDelete(_ group: ServerGroupRecord) -> Bool {
+    let alert = NSAlert()
+    alert.alertStyle = .warning
+    alert.messageText = "删除服务器组「\(group.displayName)」？"
+    alert.informativeText = """
+    只会删除分组，不会停止远端进程，也不会移除组内服务器。组内仍有服务器时删除会失败。
+    """
+    alert.addButton(withTitle: "取消")
+    alert.addButton(withTitle: "删除服务器组")
+    alert.buttons.last?.hasDestructiveAction = true
+    return alert.runModal() == .alertSecondButtonReturn
+}
+
 // MARK: - Apple Home inspired native interface
 
 private struct StableRecordSelection: Identifiable, Equatable {
@@ -517,6 +530,7 @@ private struct NativeBrokerRoot: View {
     @ObservedObject private var contrast = ContrastState.shared
     @State private var showAddServer = false
     @State private var showClaim = false
+    @State private var showGroupManagement = false
     @State private var claimInitialEndpointID = ""
     @State private var selectedGPUID: String?
     @State private var selectedEndpointDetailID: String?
@@ -620,6 +634,7 @@ private struct NativeBrokerRoot: View {
                                 claimInitialEndpointID = endpointID
                                 showClaim = true
                             },
+                            manageGroups: { showGroupManagement = true },
                             openEndpoint: { endpoint in
                                 selectedEndpointDetailID = endpoint.id
                             },
@@ -647,6 +662,9 @@ private struct NativeBrokerRoot: View {
         }
         .sheet(isPresented: $showClaim) {
             ClaimSheet(store: store, initialEndpointID: claimInitialEndpointID)
+        }
+        .sheet(isPresented: $showGroupManagement) {
+            ManageServerGroupsSheet(store: store)
         }
         .sheet(item: selectedEndpointSelection) { selection in
             ServerDetailSheet(
@@ -848,8 +866,10 @@ private struct AppToolbar: View {
                     .buttonStyle(PrimaryActionButtonStyle())
                     .focusable()
                     .disabled(!store.allowsMutations || store.snapshot.operationalEndpoints.isEmpty)
-                    .help(!store.allowsMutations ? store.mutationUnavailableReason : (store.snapshot.operationalEndpoints.isEmpty ? "请先添加服务器" : "申请空闲 GPU"))
+                    .help(claimHelp)
                     .accessibilityLabel("申请 GPU")
+                    .accessibilityHint(claimHint)
+                    .accessibilityValue(claimHint)
                     Button(action: refresh) {
                         Label(store.isRefreshing ? "刷新中" : "刷新", systemImage: "arrow.clockwise")
                             .font(.callout.weight(.semibold))
@@ -914,6 +934,19 @@ private struct AppToolbar: View {
         case .settings: return "设置"
         }
     }
+
+    private var claimHelp: String {
+        if !store.allowsMutations { return store.mutationUnavailableReason }
+        if store.snapshot.operationalEndpoints.isEmpty { return "请先添加服务器" }
+        if store.snapshot.serverGroups.isEmpty { return "申请空闲 GPU" }
+        return "先选择服务器组，由控制面在组内选择服务器"
+    }
+
+    private var claimHint: String {
+        store.snapshot.serverGroups.isEmpty
+            ? "申请空闲 GPU"
+            : "先选择服务器组，由控制面在组内选择服务器"
+    }
 }
 
 private struct DashboardView: View {
@@ -922,6 +955,7 @@ private struct DashboardView: View {
     let addServer: () -> Void
     let claimGPU: () -> Void
     let claimEndpoint: (String) -> Void
+    let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
     @Binding var selectedSection: DashboardSection
     let selectGPU: (GPURecord) -> Void
@@ -948,6 +982,7 @@ private struct DashboardView: View {
                     ResourcesDashboard(
                         store: store,
                         claimEndpoint: claimEndpoint,
+                        manageGroups: manageGroups,
                         openEndpoint: openEndpoint,
                         selectGPU: selectGPU
                     )
@@ -1310,6 +1345,7 @@ private struct ResourcesDashboard: View {
     @State private var sort: EndpointSort = .id
     @State private var sortDirection: EndpointSortDirection = .ascending
     let claimEndpoint: (String) -> Void
+    let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
     let selectGPU: (GPURecord) -> Void
 
@@ -1365,6 +1401,7 @@ private struct ResourcesDashboard: View {
                     || endpoint.host.lowercased().contains(query)
                     || endpoint.sshCommand.lowercased().contains(query)
                     || (endpoint.workspacePath?.lowercased().contains(query) ?? false)
+                    || (store.snapshot.serverGroup(for: endpoint)?.displayName.lowercased().contains(query) ?? false)
                     || store.snapshot.gpus(for: endpoint).contains { $0.name.lowercased().contains(query) }
                     || endpointLeases.contains {
                         $0.projectID.lowercased().contains(query)
@@ -1373,6 +1410,31 @@ private struct ResourcesDashboard: View {
                     }
             }
             .sorted(by: endpointSort)
+    }
+
+    private var tableSections: [EndpointOverviewSection] {
+        let sorted = filteredEndpoints
+        let groups = store.snapshot.serverGroups
+        guard !groups.isEmpty else {
+            return [EndpointOverviewSection(kind: .flat, endpoints: sorted)]
+        }
+        var sections: [EndpointOverviewSection] = []
+        let orderedGroups = groups.sorted {
+            $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
+        for group in orderedGroups {
+            let memberIDs = Set(store.snapshot.endpoints(inGroup: group.id).map(\.id))
+            let members = sorted.filter { memberIDs.contains($0.id) }
+            if !members.isEmpty {
+                sections.append(EndpointOverviewSection(kind: .group(group), endpoints: members))
+            }
+        }
+        let ungroupedIDs = Set(store.snapshot.ungroupedEndpoints.map(\.id))
+        let ungrouped = sorted.filter { ungroupedIDs.contains($0.id) }
+        if !ungrouped.isEmpty {
+            sections.append(EndpointOverviewSection(kind: .ungrouped, endpoints: ungrouped))
+        }
+        return sections
     }
 
     var body: some View {
@@ -1443,7 +1505,7 @@ private struct ResourcesDashboard: View {
     private var endpointTable: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack(spacing: 10) {
-                TextField("搜索 SSH、GPU、项目或任务", text: $searchText)
+                TextField("搜索 SSH、GPU、项目、任务或服务器组", text: $searchText)
                     .textFieldStyle(.roundedBorder)
                     .font(Typography.identity)
                     .frame(maxWidth: 320)
@@ -1481,6 +1543,15 @@ private struct ResourcesDashboard: View {
                 .menuStyle(.borderlessButton)
                 .help("资源排序")
                 .accessibilityLabel("资源排序")
+
+                Button(action: manageGroups) {
+                    Label("服务器组", systemImage: "rectangle.3.group")
+                        .font(Typography.identity)
+                }
+                .buttonStyle(.borderless)
+                .help("管理服务器组")
+                .accessibilityLabel("管理服务器组")
+                .accessibilityIdentifier("manage-server-groups")
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 11)
@@ -1513,16 +1584,26 @@ private struct ResourcesDashboard: View {
                     } else {
                         ScrollView {
                             LazyVStack(spacing: 0) {
-                                ForEach(Array(filteredEndpoints.enumerated()), id: \.element.id) { index, endpoint in
-                                    if index > 0 { EndpointTableDivider() }
-                                    EndpointTableRow(
-                                        endpoint: endpoint,
-                                        gpus: store.snapshot.gpus(for: endpoint),
-                                        leases: leases(for: endpoint),
-                                        isSnapshotFresh: store.freshness == .fresh,
-                                        tier: tier
-                                    ) {
-                                        openEndpoint(endpoint)
+                                ForEach(Array(tableSections.enumerated()), id: \.element.id) { sectionIndex, section in
+                                    if section.showsHeader {
+                                        if sectionIndex > 0 { EndpointTableDivider() }
+                                        groupSectionHeader(section)
+                                        EndpointTableDivider()
+                                    } else if sectionIndex > 0 {
+                                        EndpointTableDivider()
+                                    }
+                                    ForEach(Array(section.endpoints.enumerated()), id: \.element.id) { index, endpoint in
+                                        if index > 0 { EndpointTableDivider() }
+                                        EndpointTableRow(
+                                            endpoint: endpoint,
+                                            gpus: store.snapshot.gpus(for: endpoint),
+                                            leases: leases(for: endpoint),
+                                            group: store.snapshot.serverGroup(for: endpoint),
+                                            isSnapshotFresh: store.freshness == .fresh,
+                                            tier: tier
+                                        ) {
+                                            openEndpoint(endpoint)
+                                        }
                                     }
                                 }
                             }
@@ -1564,6 +1645,31 @@ private struct ResourcesDashboard: View {
         } else {
             sortDirection = newSort.defaultDirection
             sort = newSort
+        }
+    }
+
+    @ViewBuilder
+    private func groupSectionHeader(_ section: EndpointOverviewSection) -> some View {
+        let summary = endpointGPUAvailabilitySummary(section.endpoints, store: store)
+        switch section.kind {
+        case .group(let group):
+            EndpointGroupSectionHeader(
+                title: group.displayName,
+                availableGPUs: summary.available,
+                totalGPUs: summary.total,
+                isSnapshotFresh: store.freshness == .fresh
+            )
+        case .ungrouped:
+            EndpointGroupSectionHeader(
+                title: "未分组的服务器",
+                availableGPUs: summary.available,
+                totalGPUs: summary.total,
+                isSnapshotFresh: store.freshness == .fresh,
+                actionTitle: "管理服务器组",
+                action: manageGroups
+            )
+        case .flat:
+            EmptyView()
         }
     }
 
@@ -1783,6 +1889,97 @@ private struct EndpointTableDivider: View {
     }
 }
 
+private struct EndpointOverviewSection: Identifiable {
+    enum Kind {
+        case flat
+        case group(ServerGroupRecord)
+        case ungrouped
+    }
+
+    let kind: Kind
+    let endpoints: [EndpointRecord]
+
+    var id: String {
+        switch kind {
+        case .flat: return "__flat__"
+        case .group(let group): return group.id
+        case .ungrouped: return "__ungrouped__"
+        }
+    }
+
+    var showsHeader: Bool {
+        switch kind {
+        case .flat: return false
+        case .group, .ungrouped: return true
+        }
+    }
+}
+
+/// A band that cuts the server table by group without turning rows into cards.
+private struct EndpointGroupSectionHeader: View {
+    let title: String
+    let availableGPUs: Int
+    let totalGPUs: Int
+    let isSnapshotFresh: Bool
+    var actionTitle: String? = nil
+    var action: (() -> Void)? = nil
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(title)
+                .font(Typography.label)
+                .foregroundStyle(DesignTokens.ink)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            Text(summary)
+                .font(Typography.rowValue)
+                .foregroundStyle(DesignTokens.mutedInk)
+            if let actionTitle, let action {
+                Button(actionTitle, action: action)
+                    .buttonStyle(.borderless)
+                    .font(Typography.identity)
+                    .foregroundStyle(DesignTokens.interaction)
+                    .fixedSize()
+                    .focusable()
+                    .accessibilityLabel(actionTitle)
+            }
+        }
+        .padding(.horizontal, EndpointTableLayout.cardPadding)
+        .frame(height: 32)
+        .background(DesignTokens.ink.opacity(DesignTokens.Alpha.hairline))
+        .accessibilityAddTraits(.isHeader)
+        .modifier(EndpointGroupSectionHeaderAccessibility(
+            title: title,
+            summary: summary,
+            combined: action == nil
+        ))
+        .accessibilityIdentifier(action == nil ? "server-group-header" : "ungrouped-server-header")
+    }
+
+    private var summary: String {
+        if totalGPUs == 0 { return "无 GPU" }
+        if !isSnapshotFresh { return "空闲未确认 · \(totalGPUs) 张" }
+        return "\(availableGPUs)/\(totalGPUs) 空闲"
+    }
+}
+
+private struct EndpointGroupSectionHeaderAccessibility: ViewModifier {
+    let title: String
+    let summary: String
+    let combined: Bool
+
+    func body(content: Content) -> some View {
+        if combined {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(title)
+                .accessibilityValue(summary)
+        } else {
+            content.accessibilityElement(children: .contain)
+        }
+    }
+}
+
 /// The table's column headers, which are also its sort controls.
 private struct EndpointTableHeader: View {
     let tier: EndpointTableLayout.Tier
@@ -1877,6 +2074,7 @@ private struct EndpointTableRow: View {
     let endpoint: EndpointRecord
     let gpus: [GPURecord]
     let leases: [LeaseRecord]
+    let group: ServerGroupRecord?
     let isSnapshotFresh: Bool
     let tier: EndpointTableLayout.Tier
     let select: () -> Void
@@ -2194,6 +2392,9 @@ private struct EndpointTableRow: View {
 
     private var tooltip: String {
         var lines = [endpoint.sshCommand, attentionLabel, gpuModelDetail]
+        if let group {
+            lines.append("服务器组 \(group.displayName)")
+        }
         if let vramSummary { lines.append("显存 \(vramSummary)") }
         lines.append(hostFacts)
         lines.append(endpoint.workspacePath ?? "工作区未设置")
@@ -2960,6 +3161,22 @@ private func historyElapsedDescription(_ value: TimeInterval) -> String {
     return "\(seconds / 3_600) 小时 \((seconds % 3_600) / 60) 分钟"
 }
 
+@MainActor
+private func endpointGPUAvailabilitySummary(
+    _ endpoints: [EndpointRecord],
+    store: BrokerStore
+) -> (available: Int, total: Int) {
+    let gpus = endpoints.flatMap { store.snapshot.gpus(for: $0) }
+    let available = store.freshness == .fresh
+        ? endpoints
+            .filter { $0.monitorStatus == "ONLINE" }
+            .flatMap { store.snapshot.gpus(for: $0) }
+            .filter(\.isPubliclyAvailable)
+            .count
+        : 0
+    return (available, gpus.count)
+}
+
 private func endpointGPUModelSummary(_ gpus: [GPURecord]) -> String {
     guard !gpus.isEmpty else { return "无 GPU" }
     let names = Array(Set(gpus.map(\.name))).sorted()
@@ -3390,6 +3607,10 @@ private struct ServerDetailSheet: View {
 
                         hostFactsCard(endpoint)
 
+                        if let group = store.snapshot.serverGroup(for: endpoint) {
+                            groupMetadataCard(group, endpoint: endpoint)
+                        }
+
                         if !gpus.isEmpty {
                             ServerGPUMemoryStatusGrid(gpus: gpus)
                         }
@@ -3437,7 +3658,8 @@ private struct ServerDetailSheet: View {
         let occupancy = endpoint.keepalive.configured && !gpus.isEmpty
             ? "，占卡\(endpoint.keepalive.label)"
             : ""
-        return "\(endpoint.displayName)，\(endpoint.monitorLabel)，\(gpus.count) 块 GPU\(occupancy)"
+        let groupName = store.snapshot.serverGroup(for: endpoint)?.displayName ?? "未分组"
+        return "\(endpoint.displayName)，服务器组 \(groupName)，\(endpoint.monitorLabel)，\(gpus.count) 块 GPU\(occupancy)"
     }
 
     /// Everything the tile deliberately stopped showing.
@@ -3508,8 +3730,54 @@ private struct ServerDetailSheet: View {
         if let peak = gpus.compactMap(\.temperature).max() {
             facts.append(("最高温度", "\(peak) °C"))
         }
+        facts.append(("服务器组", store.snapshot.serverGroup(for: endpoint)?.displayName ?? "未分组"))
         facts.append(("远端工作区", endpoint.workspacePath ?? "未设置"))
+        if store.snapshot.serverGroup(for: endpoint) != nil {
+            facts.append(("路径来源", endpoint.inheritsGroupWorkspacePath ? "继承组默认" : "本机覆盖"))
+        }
         return facts
+    }
+
+    private func groupMetadataCard(_ group: ServerGroupRecord, endpoint: EndpointRecord) -> some View {
+        HomeCard(padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                CardSectionLabel(text: "服务器组")
+                groupFact(label: "显示名称", value: group.displayName)
+                groupFact(label: "组默认工作区", value: group.workspacePath)
+                let override = endpoint.workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                groupFact(
+                    label: "本机路径覆盖",
+                    value: override.isEmpty ? "未设置，使用组默认路径" : override
+                )
+                if !group.environmentNotes.isEmpty {
+                    groupFact(label: "环境说明", value: group.environmentNotes, allowWrap: true)
+                }
+                if !group.description.isEmpty {
+                    groupFact(label: "说明", value: group.description, allowWrap: true)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("server-group-metadata")
+    }
+
+    private func groupFact(label: String, value: String, allowWrap: Bool = false) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            Text(label)
+                .font(Typography.annotation)
+                .foregroundStyle(DesignTokens.mutedInk)
+            Text(value)
+                .font(Typography.rowValue)
+                .foregroundStyle(DesignTokens.ink)
+                .fixedSize(horizontal: false, vertical: allowWrap)
+                .lineLimit(allowWrap ? nil : 1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(label)
+        .accessibilityValue(value)
     }
 
     private func header(_ endpoint: EndpointRecord) -> some View {
@@ -3552,7 +3820,8 @@ private struct ServerDetailSheet: View {
                 .buttonStyle(SoftButtonStyle(tint: DesignTokens.interaction, foreground: DesignTokens.onInteraction))
                 .accessibilityIdentifier("server-detail-claim")
                 .disabled(!canApplyForGPU)
-                .help(canApplyForGPU ? "只申请这台服务器上的 GPU；不会启动任务" : unavailableReason)
+                .help(claimActionHelp)
+                .accessibilityHint(claimActionHelp)
             }
 
             if store.supportsEndpointKeepalive {
@@ -3597,6 +3866,14 @@ private struct ServerDetailSheet: View {
         if gpus.isEmpty { return "这台服务器没有 GPU。" }
         if availableGPUCount == 0 { return "当前没有可申请的 GPU。" }
         return "当前不可申请。"
+    }
+
+    private var claimActionHelp: String {
+        guard canApplyForGPU, let endpoint else { return unavailableReason }
+        if store.snapshot.serverGroup(for: endpoint) != nil {
+            return "在此服务器组内申请 GPU；由控制面选择服务器，不会启动任务"
+        }
+        return "只申请这台服务器上的 GPU；不会启动任务"
     }
 
     private var occupancyActionHelp: String {
@@ -4019,57 +4296,70 @@ private struct AddServerSheet: View {
     @ObservedObject var store: BrokerStore
     @Environment(\.dismiss) private var dismiss
     @State private var sshCommand = ""
+    @State private var serverGroupID = ""
+    @State private var inheritGroupPath = true
     @State private var workspacePath = ""
     @State private var observationProfile = "server-script-v1"
     @State private var validationMessage: String?
     @State private var isSubmitting = false
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 18) {
-            SheetTitle(icon: "server.rack", title: "添加服务器", subtitle: "")
-            VStack(alignment: .leading, spacing: 8) {
-                Text("SSH 指令")
-                    .fieldLabel()
-                TextField("ssh -p 22 gpu@node-a.example", text: $sshCommand)
-                    .textFieldStyle(.roundedBorder)
-                    .font(.system(.body, design: .monospaced).weight(.medium))
-                    .accessibilityLabel("SSH 指令")
+        ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                SheetTitle(icon: "server.rack", title: "添加服务器", subtitle: "")
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("SSH 指令")
+                        .fieldLabel()
+                    TextField("ssh -p 22 gpu@node-a.example", text: $sshCommand)
+                        .textFieldStyle(.roundedBorder)
+                        .font(.system(.body, design: .monospaced).weight(.medium))
+                        .accessibilityLabel("SSH 指令")
+                }
+                ServerGroupAssignmentFields(
+                    serverGroupID: $serverGroupID,
+                    inheritGroupPath: $inheritGroupPath,
+                    workspacePath: $workspacePath,
+                    groups: store.snapshot.serverGroups
+                )
+                EndpointObservationProfileField(selection: $observationProfile, profiles: store.observationProfiles)
+                if let validationMessage {
+                    InlineValidation(message: validationMessage)
+                }
+                HStack {
+                    Spacer()
+                    Button("取消") { dismiss() }
+                        .keyboardShortcut(.cancelAction)
+                    Button("添加服务器") { submit() }
+                        .buttonStyle(SoftButtonStyle(tint: DesignTokens.ink, foreground: DesignTokens.onInteraction))
+                        .keyboardShortcut(.defaultAction)
+                        .disabled(!store.allowsMutations || isSubmitting)
+                        .help(store.allowsMutations ? "添加服务器" : store.mutationUnavailableReason)
+                }
             }
-            LabeledField(
-                label: "远端工作区路径",
-                placeholder: "/srv/serverpilot-workspace",
-                text: $workspacePath
-            )
-            EndpointObservationProfileField(selection: $observationProfile, profiles: store.observationProfiles)
-            if let validationMessage {
-                InlineValidation(message: validationMessage)
-            }
-            HStack {
-                Spacer()
-                Button("取消") { dismiss() }
-                    .keyboardShortcut(.cancelAction)
-                Button("添加服务器") { submit() }
-                    .buttonStyle(SoftButtonStyle(tint: DesignTokens.ink, foreground: DesignTokens.onInteraction))
-                    .keyboardShortcut(.defaultAction)
-                    .disabled(!store.allowsMutations || isSubmitting)
-                    .help(store.allowsMutations ? "添加服务器" : store.mutationUnavailableReason)
-            }
+            .padding(28)
         }
-        .padding(28)
-        .frame(width: 500)
+        .frame(width: 520, height: 580)
         .background(VisualEffect(material: .hudWindow, blendingMode: .behindWindow))
     }
 
     private func submit() {
         do {
             let parsed = try parseSSHCommand(sshCommand)
+            let assignment = try ServerGroupPathAssignment(
+                groups: store.snapshot.serverGroups,
+                serverGroupID: serverGroupID,
+                inheritGroupPath: inheritGroupPath,
+                workspacePath: workspacePath
+            )
             let draft = try EndpointDraft(
                 host: parsed.host,
                 port: parsed.port,
                 sshUser: parsed.user,
-                workspacePath: workspacePath,
+                workspacePath: assignment.effectiveWorkspacePath,
                 observationProfile: observationProfile,
-                suppliedID: ""
+                suppliedID: "",
+                serverGroupID: assignment.serverGroupID,
+                workspacePathOverride: assignment.workspacePathOverride
             )
             validationMessage = nil
             isSubmitting = true
@@ -4129,6 +4419,8 @@ private struct EditServerSheet: View {
     let endpoint: EndpointRecord
     let onRemoved: () -> Void
     @State private var sshUser: String
+    @State private var serverGroupID: String
+    @State private var inheritGroupPath: Bool
     @State private var workspacePath: String
     @State private var observationProfile: String
     @State private var validationMessage: String?
@@ -4139,7 +4431,11 @@ private struct EditServerSheet: View {
         self.endpoint = endpoint
         self.onRemoved = onRemoved
         _sshUser = State(initialValue: endpoint.sshUser)
-        _workspacePath = State(initialValue: endpoint.workspacePath ?? "")
+        let groupID = endpoint.serverGroupID ?? ""
+        let override = endpoint.workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        _serverGroupID = State(initialValue: groupID)
+        _inheritGroupPath = State(initialValue: endpoint.inheritsGroupWorkspacePath)
+        _workspacePath = State(initialValue: override.isEmpty ? (endpoint.workspacePath ?? "") : override)
         _observationProfile = State(initialValue: endpoint.observationProfile)
     }
 
@@ -4155,10 +4451,11 @@ private struct EditServerSheet: View {
                         .textSelection(.enabled)
                 }
                 LabeledField(label: "SSH 用户", placeholder: "collector", text: $sshUser)
-                LabeledField(
-                    label: "远端工作区路径",
-                    placeholder: "/srv/serverpilot-workspace",
-                    text: $workspacePath
+                ServerGroupAssignmentFields(
+                    serverGroupID: $serverGroupID,
+                    inheritGroupPath: $inheritGroupPath,
+                    workspacePath: $workspacePath,
+                    groups: store.snapshot.serverGroups
                 )
                 EndpointObservationProfileField(selection: $observationProfile, profiles: store.observationProfiles)
                 if let validationMessage {
@@ -4194,7 +4491,7 @@ private struct EditServerSheet: View {
             }
             .padding(28)
         }
-        .frame(width: 520, height: 560)
+        .frame(width: 520, height: 640)
         .background(VisualEffect(material: .hudWindow, blendingMode: .behindWindow))
     }
 
@@ -4222,10 +4519,18 @@ private struct EditServerSheet: View {
 
     private func submit() {
         do {
+            let assignment = try ServerGroupPathAssignment(
+                groups: store.snapshot.serverGroups,
+                serverGroupID: serverGroupID,
+                inheritGroupPath: inheritGroupPath,
+                workspacePath: workspacePath
+            )
             let draft = try EndpointUpdateDraft(
                 sshUser: sshUser,
-                workspacePath: workspacePath,
-                observationProfile: observationProfile
+                workspacePath: assignment.effectiveWorkspacePath,
+                observationProfile: observationProfile,
+                serverGroupID: assignment.serverGroupID,
+                workspacePathOverride: assignment.workspacePathOverride
             )
             validationMessage = nil
             isSubmitting = true
@@ -4270,6 +4575,8 @@ private struct EndpointObservationProfileField: View {
     }
 }
 
+private let ungroupedClaimToken = "__ungrouped__"
+
 private struct ClaimSheet: View {
     @ObservedObject var store: BrokerStore
     @Environment(\.dismiss) private var dismiss
@@ -4277,6 +4584,7 @@ private struct ClaimSheet: View {
     @State private var projectID = ""
     @State private var taskReference = ""
     @State private var gpuCountText = "1"
+    @State private var serverGroupID: String
     @State private var endpointID: String
     @State private var validationMessage: String?
     @State private var submissionResult: ClaimSubmissionResult?
@@ -4285,12 +4593,35 @@ private struct ClaimSheet: View {
     init(store: BrokerStore, initialEndpointID: String) {
         self.store = store
         self.initialEndpointID = initialEndpointID
-        _endpointID = State(initialValue: initialEndpointID)
+        let endpoint = store.snapshot.endpoint(id: initialEndpointID)
+        let group = endpoint.flatMap { store.snapshot.serverGroup(for: $0) }
+        if let group {
+            _serverGroupID = State(initialValue: group.id)
+            _endpointID = State(initialValue: "")
+        } else if endpoint != nil {
+            _serverGroupID = State(initialValue: store.snapshot.serverGroups.isEmpty ? "" : ungroupedClaimToken)
+            _endpointID = State(initialValue: initialEndpointID)
+        } else {
+            _serverGroupID = State(initialValue: "")
+            _endpointID = State(initialValue: "")
+        }
+    }
+
+    private var usesGroupedClaim: Bool {
+        !store.snapshot.serverGroups.isEmpty
+    }
+
+    private var ungroupedClaimEndpoints: [EndpointRecord] {
+        store.snapshot.ungroupedEndpoints
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            SheetTitle(icon: "checkmark.seal.fill", title: "申请 GPU", subtitle: "")
+            SheetTitle(
+                icon: "checkmark.seal.fill",
+                title: "申请 GPU",
+                subtitle: usesGroupedClaim ? "先选择服务器组，由控制面在组内选择服务器。" : ""
+            )
             HStack(spacing: 14) {
                 LabeledField(label: "项目", placeholder: "project-a", text: $projectID)
                 LabeledField(label: "任务", placeholder: "training-042", text: $taskReference)
@@ -4302,13 +4633,48 @@ private struct ClaimSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 110)
             }
-            VStack(alignment: .leading, spacing: 8) {
-                Text("服务器")
-                    .fieldLabel()
-                ClaimEndpointPicker(
-                    endpoints: store.snapshot.operationalEndpoints,
-                    selection: $endpointID
-                )
+            if usesGroupedClaim {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("服务器组")
+                        .fieldLabel()
+                    ClaimGroupPicker(
+                        groups: store.snapshot.serverGroups,
+                        includeUngrouped: !ungroupedClaimEndpoints.isEmpty,
+                        store: store,
+                        selection: $serverGroupID
+                    )
+                    if serverGroupID != ungroupedClaimToken, !serverGroupID.isEmpty {
+                        Text("由控制面在该组内选择一台能放下本次申请的服务器，不必指定具体机器。")
+                            .font(Typography.annotation)
+                            .foregroundStyle(DesignTokens.mutedInk)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                if serverGroupID == ungroupedClaimToken {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text("未分组的服务器")
+                            .fieldLabel()
+                        ClaimEndpointPicker(
+                            endpoints: ungroupedClaimEndpoints,
+                            selection: $endpointID
+                        )
+                    }
+                }
+            } else {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("服务器")
+                        .fieldLabel()
+                    ClaimEndpointPicker(
+                        endpoints: store.snapshot.operationalEndpoints,
+                        selection: $endpointID
+                    )
+                }
+            }
+            if !store.snapshot.schedulerTargets.isEmpty {
+                Text("外部调度目标仍按原有路径申请，不会与服务器组混在一起。")
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .fixedSize(horizontal: false, vertical: true)
             }
             if let validationMessage {
                 InlineValidation(message: validationMessage)
@@ -4336,9 +4702,6 @@ private struct ClaimSheet: View {
         .padding(28)
         .frame(width: 640)
         .background(VisualEffect(material: .hudWindow, blendingMode: .behindWindow))
-        .onAppear {
-            endpointID = initialEndpointID
-        }
     }
 
     private func submit() {
@@ -4352,6 +4715,24 @@ private struct ClaimSheet: View {
             validationMessage = "请填写项目和任务。"
             return
         }
+        let selectedGroupID: String?
+        let selectedEndpointID: String
+        if usesGroupedClaim {
+            if serverGroupID.isEmpty {
+                validationMessage = "请选择服务器组。"
+                return
+            }
+            if serverGroupID == ungroupedClaimToken {
+                selectedGroupID = nil
+                selectedEndpointID = endpointID
+            } else {
+                selectedGroupID = serverGroupID
+                selectedEndpointID = ""
+            }
+        } else {
+            selectedGroupID = nil
+            selectedEndpointID = endpointID
+        }
         validationMessage = nil
         submissionResult = nil
         isSubmitting = true
@@ -4361,7 +4742,8 @@ private struct ClaimSheet: View {
                 taskReference: task,
                 purpose: task,
                 gpuCount: gpuCount,
-                endpointID: endpointID,
+                endpointID: selectedEndpointID,
+                serverGroupID: selectedGroupID,
                 minimumCPUCores: nil,
                 minimumMemoryMiB: nil,
                 minimumTotalVRAMMiB: nil,
@@ -4376,7 +4758,90 @@ private struct ClaimSheet: View {
             submissionResult = result
         }
     }
+}
 
+private struct ClaimGroupPicker: View {
+    let groups: [ServerGroupRecord]
+    let includeUngrouped: Bool
+    @ObservedObject var store: BrokerStore
+    @Binding var selection: String
+
+    var body: some View {
+        ScrollView {
+            LazyVStack(spacing: 7) {
+                ForEach(groups) { group in
+                    let members = store.snapshot.endpoints(inGroup: group.id)
+                    let summary = endpointGPUAvailabilitySummary(members, store: store)
+                    let notes = group.environmentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+                    option(
+                        id: group.id,
+                        title: group.displayName,
+                        detail: notes.isEmpty
+                            ? "\(summary.available)/\(summary.total) 空闲 · \(group.workspacePath)"
+                            : "\(summary.available)/\(summary.total) 空闲 · \(group.workspacePath) · \(notes)"
+                    )
+                }
+                if includeUngrouped {
+                    option(
+                        id: ungroupedClaimToken,
+                        title: "未分组的服务器",
+                        detail: "沿用未加入服务器组的机器；可选自动选择或指定一台"
+                    )
+                }
+            }
+            .padding(1)
+        }
+        .frame(maxHeight: 224)
+        .accessibilityLabel("服务器组")
+        .accessibilityValue(selectedGroupDescription)
+        .accessibilityIdentifier("claim-group-picker")
+    }
+
+    private var selectedGroupDescription: String {
+        if selection == ungroupedClaimToken { return "未分组的服务器" }
+        return groups.first(where: { $0.id == selection })?.displayName ?? "未选择"
+    }
+
+    private func option(id: String, title: String, detail: String) -> some View {
+        let selected = selection == id
+        return Button {
+            selection = id
+        } label: {
+            HStack(alignment: .top, spacing: 10) {
+                Image(systemName: selected ? "checkmark.circle.fill" : "circle")
+                    .font(.body.weight(.semibold))
+                    .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
+                    .padding(.top, 1)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(title)
+                        .font(.callout.weight(.semibold))
+                        .foregroundStyle(DesignTokens.ink)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Text(detail)
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .textSelection(.enabled)
+                }
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 11)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(
+                selected ? DesignTokens.interaction.opacity(DesignTokens.Alpha.fill) : DesignTokens.ink.opacity(DesignTokens.Alpha.hairline),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                    .stroke(selected ? DesignTokens.interaction.opacity(DesignTokens.Alpha.muted) : DesignTokens.surfaceStroke, lineWidth: 1)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(title)
+        .accessibilityValue("\(detail)，\(selected ? "已选择" : "未选择")")
+    }
 }
 
 private struct ClaimEndpointPicker: View {
@@ -4450,6 +4915,355 @@ private struct ClaimEndpointPicker: View {
         .buttonStyle(.plain)
         .accessibilityLabel(title)
         .accessibilityValue("工作区 \(detail)，\(selected ? "已选择" : "未选择")")
+    }
+}
+
+private struct ServerGroupPathAssignment {
+    let serverGroupID: String?
+    let effectiveWorkspacePath: String
+    let workspacePathOverride: String?
+
+    init(
+        groups: [ServerGroupRecord],
+        serverGroupID: String,
+        inheritGroupPath: Bool,
+        workspacePath: String
+    ) throws {
+        let cleanedGroupID = serverGroupID.trimmingCharacters(in: .whitespacesAndNewlines)
+        let cleanedPath = workspacePath.trimmingCharacters(in: .whitespacesAndNewlines)
+        if cleanedGroupID.isEmpty {
+            self.serverGroupID = nil
+            self.effectiveWorkspacePath = cleanedPath
+            self.workspacePathOverride = nil
+            return
+        }
+        guard groups.contains(where: { $0.id == cleanedGroupID }) else {
+            throw EndpointDraftError.invalidEndpointFields
+        }
+        self.serverGroupID = cleanedGroupID
+        if inheritGroupPath {
+            self.effectiveWorkspacePath = ""
+            self.workspacePathOverride = nil
+        } else {
+            self.effectiveWorkspacePath = cleanedPath
+            self.workspacePathOverride = cleanedPath
+        }
+    }
+}
+
+private struct ServerGroupAssignmentFields: View {
+    @Binding var serverGroupID: String
+    @Binding var inheritGroupPath: Bool
+    @Binding var workspacePath: String
+    let groups: [ServerGroupRecord]
+
+    private var selectedGroup: ServerGroupRecord? {
+        groups.first { $0.id == serverGroupID }
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("服务器组")
+                    .fieldLabel()
+                Picker("服务器组", selection: $serverGroupID) {
+                    Text("未分组").tag("")
+                    ForEach(groups) { group in
+                        Text(group.displayName).tag(group.id)
+                    }
+                }
+                .labelsHidden()
+                .pickerStyle(.menu)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .accessibilityLabel("服务器组")
+                .accessibilityValue(selectedGroup?.displayName ?? "未分组")
+                if let group = selectedGroup {
+                    Text("组默认路径 \(group.workspacePath)")
+                        .font(.subheadline.weight(.medium))
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .textSelection(.enabled)
+                    Toggle("使用本组默认路径", isOn: $inheritGroupPath)
+                        .toggleStyle(.checkbox)
+                        .accessibilityLabel("使用本组默认路径")
+                }
+            }
+            if selectedGroup == nil || !inheritGroupPath {
+                LabeledField(
+                    label: selectedGroup == nil ? "远端工作区路径" : "本机路径覆盖",
+                    placeholder: "/srv/serverpilot-workspace",
+                    text: $workspacePath
+                )
+            }
+        }
+        .onChange(of: serverGroupID) { _, newValue in
+            if newValue.isEmpty {
+                inheritGroupPath = true
+            } else {
+                inheritGroupPath = true
+            }
+        }
+    }
+}
+
+private enum ServerGroupSheetMode: Equatable {
+    case list
+    case create
+    case edit(String)
+}
+
+private struct ManageServerGroupsSheet: View {
+    @ObservedObject var store: BrokerStore
+    @Environment(\.dismiss) private var dismiss
+    @State private var mode: ServerGroupSheetMode = .list
+    @State private var displayName = ""
+    @State private var groupID = ""
+    @State private var workspacePath = ""
+    @State private var environmentNotes = ""
+    @State private var descriptionText = ""
+    @State private var validationMessage: String?
+    @State private var isSubmitting = false
+
+    private var groups: [ServerGroupRecord] {
+        store.snapshot.serverGroups.sorted {
+            $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending
+        }
+    }
+
+    private var canMutateGroups: Bool {
+        store.allowsMutations && store.supportsServerGroupCRUD
+    }
+
+    private var groupMutationHelp: String {
+        if !store.allowsMutations { return store.mutationUnavailableReason }
+        if !store.supportsServerGroupCRUD { return "当前服务不支持服务器组变更。" }
+        return "管理服务器组"
+    }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            SheetTitle(
+                icon: "rectangle.3.group",
+                title: "服务器组",
+                subtitle: "同一路径和环境的机器放在一组；申请 GPU 时先选组。"
+            )
+            switch mode {
+            case .list:
+                groupList
+            case .create, .edit:
+                groupEditor
+            }
+            if let validationMessage {
+                InlineValidation(message: validationMessage)
+            }
+        }
+        .padding(28)
+        .frame(width: 640, height: 640)
+        .background(VisualEffect(material: .hudWindow, blendingMode: .behindWindow))
+        .accessibilityElement(children: .contain)
+    }
+
+    @ViewBuilder
+    private var groupList: some View {
+        if groups.isEmpty {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("还没有服务器组。")
+                    .font(Typography.sectionTitle)
+                Text("创建后即可把共享路径和环境的机器放在一起申请。")
+                    .font(Typography.secondary)
+                    .foregroundStyle(DesignTokens.mutedInk)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        } else {
+            ScrollView {
+                LazyVStack(spacing: 8) {
+                    ForEach(groups) { group in
+                        groupRow(group)
+                    }
+                }
+            }
+            .frame(maxHeight: .infinity)
+        }
+        HStack {
+            Spacer()
+            Button("完成") { dismiss() }
+                .keyboardShortcut(.cancelAction)
+            Button("添加服务器组") { beginCreate() }
+                .buttonStyle(SoftButtonStyle(tint: DesignTokens.ink, foreground: DesignTokens.onInteraction))
+                .disabled(!canMutateGroups || isSubmitting)
+                .help(groupMutationHelp)
+                .accessibilityLabel("添加服务器组")
+        }
+    }
+
+    private func groupRow(_ group: ServerGroupRecord) -> some View {
+        let members = store.snapshot.endpoints(inGroup: group.id)
+        let summary = endpointGPUAvailabilitySummary(members, store: store)
+        return VStack(alignment: .leading, spacing: 8) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Text(group.displayName)
+                    .font(Typography.label)
+                    .foregroundStyle(DesignTokens.ink)
+                    .lineLimit(1)
+                Spacer(minLength: 8)
+                Text("\(summary.available)/\(summary.total) 空闲")
+                    .font(Typography.rowValue)
+                    .foregroundStyle(DesignTokens.mutedInk)
+            }
+            Text(group.workspacePath)
+                .font(Typography.command)
+                .foregroundStyle(DesignTokens.mutedInk)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            if !group.environmentNotes.isEmpty {
+                Text(group.environmentNotes)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            HStack {
+                Spacer()
+                Button("编辑") { beginEdit(group) }
+                    .buttonStyle(.borderless)
+                    .disabled(isSubmitting)
+                    .accessibilityLabel("编辑服务器组 \(group.displayName)")
+                Button("删除…") { deleteGroup(group) }
+                    .buttonStyle(.borderless)
+                    .foregroundStyle(DesignTokens.danger)
+                    .disabled(!canMutateGroups || isSubmitting)
+                    .help(groupMutationHelp)
+                    .accessibilityLabel("删除服务器组 \(group.displayName)")
+            }
+        }
+        .padding(14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            DesignTokens.ink.opacity(DesignTokens.Alpha.hairline),
+            in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+        )
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel("服务器组 \(group.displayName)")
+        .accessibilityValue("\(summary.available)/\(summary.total) 空闲，路径 \(group.workspacePath)")
+    }
+
+    @ViewBuilder
+    private var groupEditor: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 14) {
+                LabeledField(label: "显示名称", placeholder: "训练服务器组", text: $displayName)
+                if mode == .create {
+                    LabeledField(label: "分组标识", placeholder: "training-lab", text: $groupID)
+                    Text("创建后不能修改。只能使用小写字母、数字和连字符。")
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                }
+                LabeledField(label: "默认工作区路径", placeholder: "/srv/shared-workspace", text: $workspacePath)
+                LabeledField(label: "环境说明", placeholder: "CUDA 版本、共享盘与权重状态", text: $environmentNotes)
+                LabeledField(label: "说明", placeholder: "这组机器的数据与用途", text: $descriptionText)
+                Text("环境说明只给操作者阅读，不会进入采集、插件或远端进程环境。")
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(maxHeight: .infinity)
+        HStack {
+            Spacer()
+            Button("取消") { cancelEditor() }
+                .keyboardShortcut(.cancelAction)
+            Button(mode == .create ? "创建服务器组" : "保存服务器组") { submitEditor() }
+                .buttonStyle(SoftButtonStyle(tint: DesignTokens.ink, foreground: DesignTokens.onInteraction))
+                .keyboardShortcut(.defaultAction)
+                .disabled(!canMutateGroups || isSubmitting)
+                .help(groupMutationHelp)
+        }
+    }
+
+    private func beginCreate() {
+        mode = .create
+        displayName = ""
+        groupID = ""
+        workspacePath = ""
+        environmentNotes = ""
+        descriptionText = ""
+        validationMessage = nil
+    }
+
+    private func beginEdit(_ group: ServerGroupRecord) {
+        mode = .edit(group.id)
+        displayName = group.displayName
+        workspacePath = group.workspacePath
+        environmentNotes = group.environmentNotes
+        descriptionText = group.description
+        validationMessage = nil
+    }
+
+    private func cancelEditor() {
+        mode = .list
+        validationMessage = nil
+        isSubmitting = false
+    }
+
+    private func submitEditor() {
+        do {
+            switch mode {
+            case .create:
+                let draft = try ServerGroupDraft(
+                    id: groupID,
+                    displayName: displayName,
+                    workspacePath: workspacePath,
+                    environmentNotes: environmentNotes,
+                    description: descriptionText
+                )
+                validationMessage = nil
+                isSubmitting = true
+                store.createServerGroup(draft) { success, error in
+                    isSubmitting = false
+                    if success {
+                        mode = .list
+                    } else {
+                        validationMessage = error
+                    }
+                }
+            case .edit(let groupID):
+                guard let group = store.snapshot.serverGroups.first(where: { $0.id == groupID }) else {
+                    validationMessage = "该服务器组已不在当前快照中。"
+                    return
+                }
+                let draft = try ServerGroupUpdateDraft(
+                    displayName: displayName,
+                    workspacePath: workspacePath,
+                    environmentNotes: environmentNotes,
+                    description: descriptionText
+                )
+                validationMessage = nil
+                isSubmitting = true
+                store.updateServerGroup(group, draft: draft) { success, error in
+                    isSubmitting = false
+                    if success {
+                        mode = .list
+                    } else {
+                        validationMessage = error
+                    }
+                }
+            case .list:
+                break
+            }
+        } catch {
+            validationMessage = error.localizedDescription
+        }
+    }
+
+    private func deleteGroup(_ group: ServerGroupRecord) {
+        guard confirmServerGroupDelete(group) else { return }
+        validationMessage = nil
+        isSubmitting = true
+        store.deleteServerGroup(group) { success, error in
+            isSubmitting = false
+            if !success {
+                validationMessage = error
+            }
+        }
     }
 }
 

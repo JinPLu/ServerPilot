@@ -49,14 +49,14 @@
 
 ### 🛰️ 人类实时监控：多台服务器，一张图
 
-按设置的采集间隔更新服务器状态；GPU 空闲、占用、任务归属和采集异常，都在 App 里直接看。
+按设置的采集间隔更新服务器状态；GPU 空闲、占用、任务归属和采集异常，都在 App 里直接看。服务器可以放进一等分组：分组携带共享工作目录、环境说明和数据/权重说明；成员继承该工作目录，或按服务器覆盖。环境说明只供阅读，不会被执行或注入。可申请容量按 组 → 服务器 → SKU 展示，不是逐张空闲卡菜单。
 
 ### 🧩 Agent 自主调度：有空卡，Agent 自己领
 
 默认 MCP 只有三个日常工具：
 
-- 🔍 `gpu_status`：查看可用 GPU 及最近显存、利用率遥测
-- 🔑 `gpu_apply`：申请 GPU
+- 🔍 `gpu_status`：查看分组后的可申请容量、忙卡归属，以及自己已持有卡的遥测
+- 🔑 `gpu_apply`：申请 GPU（`server_group_id?`、`server_id?`、`gpu_count=1`、`task?`）
 - ♻️ `gpu_release`：明确归还
 
 申请成功后，Agent 会拿到 SSH 连接、远端工作目录、CUDA selector 和 `lease_id`，不用再猜服务器、目录或 GPU 编号。
@@ -138,11 +138,13 @@ python3 scripts/install_agent_policy.py codex --install
 ## 🤖 Agent 用法
 
 ```text
-gpu_status → gpu_apply(task="任务名") → 使用返回的分配 → gpu_release(lease_id)
+gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, task="任务名") → 使用返回的分配 → gpu_release(lease_id)
 ```
 
-- Agent 不传 GPU ID，`gpu_apply` 负责选卡。
-- `gpu_status` 的可申请卡只讲容量（`name`、`vram_mib`、`status`），不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配。
+- 日常申请签名是 `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`。Agent 不传 GPU ID，`gpu_apply` 负责选卡，一份租约始终只落在一台机器上。`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，绝不从空闲容量推断。
+- 已分组的裸机先传 `server_group_id`，再由分配器在组内 best-fit 一台主机；未分组主机以及插件/调度器兼容路径仍可用 `server_id`。
+- 申请前先看分组的工作目录、环境说明和数据/权重说明。成员继承组工作目录，或按服务器覆盖。环境说明只供阅读，不会被执行或注入。
+- `gpu_status` 按 组 → 服务器 → SKU 讲可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，也不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配。
 - SSH 后先进入返回的 `workspace.path`，再使用 CUDA selector。`workspace.path` 是远端工作目录，不是代码仓库。
 - CUDA 初始化或工作负载启动失败时，立即 `gpu_release`。
 - `no_capacity` 表示不分配、不排队；不要在同一轮反复申请。

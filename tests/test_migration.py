@@ -45,6 +45,8 @@ def test_migration_upgrade_and_downgrade(tmp_path: Path) -> None:
     lease_columns = {column["name"] for column in inspect(database.engine).get_columns("leases")}
     assert "keepalive_adapter_id" in endpoint_columns
     assert "workspace_path" in endpoint_columns
+    assert "server_group_id" in endpoint_columns
+    assert "server_groups" in inspect(database.engine).get_table_names()
     assert "kind" in lease_columns
     expires_at = next(
         column for column in inspect(database.engine).get_columns("leases")
@@ -193,12 +195,16 @@ def test_workspace_migration_preserves_legacy_endpoints_without_inventing_paths(
     command.upgrade(config, "head")
     with database.engine.connect() as connection:
         row = connection.execute(
-            text("SELECT id, workspace_path FROM endpoints WHERE id = 'legacy-endpoint'")
+            text(
+                "SELECT id, workspace_path, server_group_id FROM endpoints "
+                "WHERE id = 'legacy-endpoint'"
+            )
         ).one()
         count = connection.execute(text("SELECT COUNT(*) FROM endpoints")).scalar_one()
 
     assert row.id == "legacy-endpoint"
     assert row.workspace_path is None
+    assert row.server_group_id is None
     assert count == 1
 
 
@@ -391,3 +397,46 @@ def test_migration_uses_packaged_scripts_without_project_tree(tmp_path: Path) ->
     assert "endpoint_telemetry_snapshots" in inspector.get_table_names()
     gpu_columns = {column["name"] for column in inspector.get_columns("gpu_devices")}
     assert {"present", "absent_at"}.issubset(gpu_columns)
+
+
+def test_server_group_migration_leaves_legacy_storage_group_untouched(
+    tmp_path: Path,
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    database = Database(f"sqlite:///{tmp_path / 'server-group-upgrade.sqlite3'}", root)
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "src" / "serverpilot" / "migrations"))
+    config.set_main_option("sqlalchemy.url", database.url)
+
+    command.upgrade(config, "20260822_0031")
+    with database.engine.begin() as connection:
+        connection.execute(
+            text(
+                """
+                INSERT INTO endpoints (
+                    id, host, port, ssh_user, workspace_path, observation_profile,
+                    keepalive_policy, labels_json, storage_group, lifecycle_state, enabled,
+                    created_at, updated_at
+                ) VALUES (
+                    'legacy-storage', '127.0.0.1', 22, 'gpu', '/srv/legacy', 'linux-nvidia',
+                    'disabled', '[]', 'old-nfs-tag', 'active', 1,
+                    CURRENT_TIMESTAMP, CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+
+    command.upgrade(config, "head")
+    inspector = inspect(database.engine)
+    assert "server_groups" in inspector.get_table_names()
+    with database.engine.connect() as connection:
+        row = connection.execute(
+            text(
+                "SELECT storage_group, server_group_id FROM endpoints WHERE id = 'legacy-storage'"
+            )
+        ).one()
+        group_count = connection.execute(text("SELECT COUNT(*) FROM server_groups")).scalar_one()
+
+    assert row.storage_group == "old-nfs-tag"
+    assert row.server_group_id is None
+    assert group_count == 0

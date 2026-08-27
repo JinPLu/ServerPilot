@@ -39,6 +39,38 @@ GPU_UUIDS = (
 EIGHT_GPU_UUIDS = tuple(f"GPU-00000000-0000-0000-0000-{index:012d}" for index in range(1, 9))
 
 
+def _capacity_servers(status):  # type: ignore[no-untyped-def]
+    """Collect per-server SKU capacity from grouped or ungrouped routine status."""
+
+    servers = [
+        server
+        for group in status.get("server_groups") or []
+        for server in group.get("servers") or []
+    ]
+    servers.extend(status.get("ungrouped_servers") or [])
+    return servers
+
+
+def _assert_sku_capacity(status, *, available_count: int, total_count: int):  # type: ignore[no-untyped-def]
+    """Allocatable capacity is per-server SKU counts, never a top-level per-card menu."""
+
+    assert "gpus" not in status
+    assert "servers" not in status
+    servers = _capacity_servers(status)
+    assert len(servers) == 1
+    skus = servers[0]["gpus"]
+    assert len(skus) == 1
+    sku = skus[0]
+    assert sku == {
+        "name": "Test GPU",
+        "vram_mib": 100_000,
+        "total_count": total_count,
+        "available_count": available_count,
+    }
+    assert "keepalive" not in sku and "telemetry" not in sku
+    return sku
+
+
 class FakeKeepaliveAdapter:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.failure = failure
@@ -1544,13 +1576,13 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     )
     assert enabled.status_code == 200, enabled.text
     status_on = tools.gpu_status()
-    assert len(status_on["gpus"]) == len(GPU_UUIDS)
+    _assert_sku_capacity(status_on, available_count=len(GPU_UUIDS), total_count=len(GPU_UUIDS))
     # Keepalive is how ServerPilot holds an idle card for itself.  A routine
     # caller can act only on whether the card can be claimed, so the mechanism
-    # never reaches it: one status, no keepalive field, no telemetry carrying
+    # never reaches it: SKU counts, no keepalive field, no telemetry carrying
     # the hold.
-    assert {gpu["status"] for gpu in status_on["gpus"]} == {"available"}
-    assert all("keepalive" not in gpu and "telemetry" not in gpu for gpu in status_on["gpus"])
+    assert "busy_gpus" not in status_on
+    assert "no_capacity" not in status_on
 
     # Simulate the exact production failure: the workload has already been
     # released and the helper restarted its own workers, so their PIDs no
@@ -1572,10 +1604,11 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
 
     asyncio.run(collect_restarted_workers())
     unavailable = tools.gpu_status()
-    assert unavailable["gpus"] == []
+    _assert_sku_capacity(unavailable, available_count=0, total_count=len(GPU_UUIDS))
     assert unavailable["no_capacity"]["reason"] == "all_gpus_busy_or_unavailable"
     assert {gpu["status"] for gpu in unavailable["busy_gpus"]} == {"ownership_conflict"}
     assert len(unavailable["busy_gpus"]) == len(GPU_UUIDS)
+    assert {gpu["gpu_id"] for gpu in unavailable["busy_gpus"]} == set(GPU_UUIDS)
 
     async def recover_restarted_workers() -> None:
         await app.state.reconcile_endpoint_keepalive(
@@ -1588,8 +1621,10 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert adapter.calls == calls_before_recovery
     assert adapter.attest_calls[-1] == ("endpoint-a", GPU_UUIDS)
     recovered_status = tools.gpu_status()
-    assert len(recovered_status["gpus"]) == len(GPU_UUIDS)
-    assert {gpu["status"] for gpu in recovered_status["gpus"]} == {"available"}
+    _assert_sku_capacity(
+        recovered_status, available_count=len(GPU_UUIDS), total_count=len(GPU_UUIDS)
+    )
+    assert "busy_gpus" not in recovered_status
 
     allocation_on = tools.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡开启申请验收"
@@ -1599,7 +1634,15 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert allocation_on["cuda_visible_devices"]
     selected_uuid = allocation_on["gpus"][0]["gpu_id"]
     assert selected_uuid not in adapter.active_pids
+    # Keepalive reclamation is per-card: only the claimed GPU's helper stops,
+    # and the sibling stays advertised as allocatable SKU capacity.
     assert len(adapter.active_pids) == len(GPU_UUIDS) - 1
+    after_one = tools.gpu_status()
+    _assert_sku_capacity(after_one, available_count=1, total_count=len(GPU_UUIDS))
+    assert "no_capacity" not in after_one
+    assert len(after_one["busy_gpus"]) == 1
+    assert after_one["busy_gpus"][0]["gpu_id"] == selected_uuid
+    assert after_one["busy_gpus"][0]["task"] == "Agent 占卡开启申请验收"
     tools.gpu_release(allocation_on["lease_id"])
 
     async def restore_then_disable() -> None:
@@ -1625,11 +1668,11 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     )
     assert disabled.status_code == 200, disabled.text
     status_off = tools.gpu_status()
-    assert len(status_off["gpus"]) == len(GPU_UUIDS)
+    _assert_sku_capacity(status_off, available_count=len(GPU_UUIDS), total_count=len(GPU_UUIDS))
     # Turning the policy off changes nothing a routine caller can see: the card
     # was claimable before and is claimable now.
-    assert {gpu["status"] for gpu in status_off["gpus"]} == {"available"}
-    assert all("keepalive" not in gpu for gpu in status_off["gpus"])
+    assert "busy_gpus" not in status_off
+    assert "no_capacity" not in status_off
 
     allocation_off = tools.gpu_apply(
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡关闭申请验收"

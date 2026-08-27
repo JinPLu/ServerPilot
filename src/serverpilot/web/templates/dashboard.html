@@ -6,7 +6,8 @@
     <h1>我的计算资源</h1>
     <p class="muted dashboard-subtitle">查看服务器容量，再为项目、Agent 和任务分配资源。这里只协调资源，不执行任务。</p>
   </div>
-  {% if payload.endpoints %}<div class="dashboard-actions" aria-label="常用操作">
+  {% if payload.endpoints or payload.server_groups %}<div class="dashboard-actions" aria-label="常用操作">
+    <button class="quiet-action" type="button" data-open-dialog="groups-dialog"><i class="ph ph-folders" aria-hidden="true"></i>管理分组</button>
     <button class="quiet-action" type="button" data-open-dialog="server-dialog"><i class="ph ph-plus" aria-hidden="true"></i>添加服务器</button>
     <button type="button" data-open-dialog="claim-dialog"><i class="ph ph-user-plus" aria-hidden="true"></i>申请 GPU</button>
   </div>{% endif %}
@@ -84,7 +85,8 @@
     <div id="ssh-error" class="inline-message error-message" role="alert" hidden></div>
     <form id="ssh-preview-form" class="stack">
       <label>SSH 命令（每行一台服务器）<textarea id="ssh-command" name="command" rows="4" required spellcheck="false" autocomplete="off" placeholder="ssh -p 22 user@gpu-host"></textarea></label>
-      <label>远端工作区路径<input id="ssh-workspace-path" name="workspace_path" required value="/srv/serverpilot-workspace"></label>
+      <label>服务器组<select id="ssh-server-group" name="server_group_id"><option value="">未分组</option>{% for group in payload.server_groups|default([]) %}<option value="{{ group.id }}">{{ group.display_name }}</option>{% endfor %}</select></label>
+      <label>远端工作区路径<input id="ssh-workspace-path" name="workspace_path" placeholder="/srv/serverpilot-workspace"><span class="field-help" id="ssh-workspace-hint">未分组时必须填写绝对路径。加入组后可留空以继承组默认工作区。</span></label>
       <label>归属项目<input id="ssh-project-id" name="owner_project_id" required placeholder="例如：storyboard"></label>
       <button id="paste-ssh-command" class="quiet-action" type="button" hidden>从系统剪贴板粘贴</button>
       <p id="ssh-clipboard-status" class="muted" role="status" hidden></p>
@@ -106,7 +108,8 @@
       <label>主机或 SSH 地址<input name="host" required placeholder="10.0.0.1 或 gpu-host"></label>
       <label>SSH 端口<input name="port" type="number" min="1" max="65535" value="22" required></label>
       <label>SSH 用户<input name="ssh_user" value="root" required></label>
-      <label>远端工作区路径<input name="workspace_path" required value="/srv/serverpilot-workspace"></label>
+      <label>服务器组<select name="server_group_id"><option value="">未分组</option>{% for group in payload.server_groups|default([]) %}<option value="{{ group.id }}">{{ group.display_name }}</option>{% endfor %}</select></label>
+      <label>远端工作区路径<input name="workspace_path" placeholder="/srv/serverpilot-workspace"><span class="field-help">加入组后可留空以继承组默认；填写则为覆盖路径。</span></label>
       <label>归属项目<input name="owner_project_id" required placeholder="例如：storyboard"></label>
       <label>期望 GPU 数（可留空）<input name="expected_gpu_count" type="number" min="1" placeholder="自动发现"></label>
       <input type="hidden" name="labels" value="gpu"><input type="hidden" name="enabled" value="true">
@@ -133,21 +136,39 @@
   {% endif %}
   <details class="stack">
     <summary>一次性申请（需明确资源）</summary>
-    <form method="post" action="/ui/action/quick-claim" class="stack form-grid quick-claim-form">
+    <form method="post" action="/ui/action/quick-claim" id="quick-claim-form" class="stack form-grid quick-claim-form">
       <label>项目标识<input name="project_id" required placeholder="例如：storyboard"></label>
       <label>任务<input name="task_ref" required placeholder="例如：WAN 视频评测"></label>
-      <label>服务器<select name="endpoint_id"><option value="">自动选择</option>{% for endpoint in payload.endpoints %}<option value="{{ endpoint.id }}">{{ endpoint.id }} · {{ endpoint.host }}:{{ endpoint.port }}</option>{% endfor %}</select></label>
+      <label>服务器组<select name="server_group_id" id="claim-server-group"><option value="">{{ payload.server_groups|default([]) and '选择服务器组' or '自动选择' }}</option>{% for group in payload.server_groups|default([]) %}<option value="{{ group.id }}">{{ group.display_name }}</option>{% endfor %}<option value="__ungrouped__">未分组（按单机申请）</option></select></label>
+      <label id="claim-endpoint-wrap">未分组服务器（兼容）<select name="endpoint_id" id="claim-endpoint"><option value="">不指定单机</option>{% for endpoint in payload.endpoints if not endpoint.server_group_id %}<option value="{{ endpoint.id }}">{{ endpoint.id }} · {{ endpoint.host }}:{{ endpoint.port }}</option>{% endfor %}</select></label>
       <label>GPU 数量<input name="gpu_count" type="number" min="1" value="1" required></label>
       <label>可用 CPU 核数<input name="min_available_cpu_cores" type="number" min="0" step="0.5" placeholder="例如：16"></label>
       <label>可用内存 GiB<input name="min_available_memory_gib" type="number" min="0" placeholder="例如：64"></label>
       <label>单卡总显存 GiB<input name="min_total_vram_gib" type="number" min="1" placeholder="例如：80"></label>
       <label>单卡可用显存 GiB<input name="min_free_vram_gib" type="number" min="0" placeholder="例如：60"></label>
       <details class="span-all"><summary>高级：指定精确 GPU</summary><label>GPU（可多选）<select name="gpu_ids" multiple size="6">{% for gpu in payload.gpus %}<option value="{{ gpu.id }}">{{ gpu.endpoint_id }} / GPU {{ gpu.gpu_index }} · {{ gpu.state }}</option>{% endfor %}</select></label><p class="field-help">选择后以所选 GPU 数量为准。</p></details>
-      <p class="field-help span-all">CPU、内存和显存请填绝对需求；ServerPilot 只按这些下限分配，成功后也不会启动远端任务。</p>
+      <p class="field-help span-all">分组申请由后端在组内 best-fit。未分组服务器与外部调度器仍按单机申请。CPU、内存和显存请填绝对需求；成功后也不会启动远端任务。</p>
       <input type="hidden" name="placement" value="pack"><input type="hidden" name="csrf" value="{{ csrf }}"><input type="hidden" name="confirmed" value="yes">
       <div class="dialog-actions span-all"><button class="quiet-action" type="button" data-close-dialog>取消</button><button type="submit">一次性申请</button></div>
     </form>
   </details>
+</dialog>
+
+</dialog>
+
+<dialog id="groups-dialog" class="modal-dialog">
+  <div class="dialog-heading"><div><p class="eyebrow">数据与环境边界</p><h2>服务器组</h2></div><button type="button" class="icon-button" data-close-dialog aria-label="关闭"><i class="ph ph-x" aria-hidden="true"></i></button></div>
+  <p class="muted consequence-copy">组默认工作区可被成员覆盖。环境说明只给人看，不会传入采集、插件或进程环境。</p>
+  <div id="group-list" class="group-list"></div>
+  <form id="group-form" class="stack form-grid">
+    <input type="hidden" name="original_id" id="group-original-id">
+    <label>组标识<input name="id" id="group-id" required pattern="[a-z][a-z0-9-]{1,127}" placeholder="例如：training-a"></label>
+    <label>显示名称<input name="display_name" id="group-display-name" required maxlength="120" placeholder="例如：训练 A 区"></label>
+    <label class="span-all">默认工作区路径<input name="workspace_path" id="group-workspace" required placeholder="/srv/shared-workspace"></label>
+    <label class="span-all">说明<input name="description" id="group-description" maxlength="1000" placeholder="可选"></label>
+    <label class="span-all">环境说明<textarea name="environment_notes" id="group-environment-notes" rows="3" maxlength="8000" placeholder="例如：共享权重目录。不会写入进程环境。"></textarea></label>
+    <div class="dialog-actions span-all"><button class="quiet-action" type="button" id="reset-group-form">新建</button><button class="quiet-action" type="button" data-close-dialog>关闭</button><button type="submit" id="submit-group">保存分组</button></div>
+  </form>
 </dialog>
 
 <dialog id="gpu-detail" class="drawer-dialog">

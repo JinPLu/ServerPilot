@@ -407,13 +407,22 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
         lease_id=None,
     )
 
-    assert status["gpus"] == []
-    assert status["servers"][0]["workspace"] == {
+    assert "gpus" not in status
+    assert "servers" not in status
+    assert status["ungrouped_servers"][0]["workspace"] == {
         "path": "/srv/server-a",
         "kind": "working_directory",
         "use_as_cwd": True,
         "code_location": "not_provided",
     }
+    assert status["ungrouped_servers"][0]["gpus"] == [
+        {
+            "name": "A",
+            "vram_mib": 80_000,
+            "total_count": 1,
+            "available_count": 0,
+        }
+    ]
     # Who holds a busy card is actionable; how hard their job works it is not,
     # so somebody else's telemetry never reaches this response.
     assert status["busy_gpus"] == [
@@ -425,7 +434,12 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
             "task": "训练任务",
         }
     ]
-    assert set(status["servers"][0]) == {"server_id", "workspace_path", "workspace"}
+    assert set(status["ungrouped_servers"][0]) == {
+        "server_id",
+        "workspace_path",
+        "workspace",
+        "gpus",
+    }
 
 
 def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:
@@ -434,7 +448,7 @@ def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:
         lease_id=None,
     )
 
-    assert status == {"servers": [], "gpus": [], "message": "no GPUs are registered"}
+    assert status == {"message": "no GPUs are registered"}
 
 
 def test_routine_status_reports_recognized_cpu_only_servers() -> None:
@@ -465,8 +479,6 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
     )
 
     assert status == {
-        "servers": [],
-        "gpus": [],
         "cpu_only_servers": [
             {
                 "server_id": "server-cpu",
@@ -502,8 +514,6 @@ def test_routine_status_projects_scheduler_servers_without_no_capacity() -> None
     )
 
     assert status == {
-        "servers": [],
-        "gpus": [],
         "scheduler_servers": [
             {
                 "server_id": "slurm-login-p22",
@@ -522,8 +532,6 @@ def test_routine_status_explains_when_all_gpus_are_unavailable() -> None:
     )
 
     assert status == {
-        "servers": [],
-        "gpus": [],
         "no_capacity": {
             "reason": "all_gpus_busy_or_unavailable",
             "message": "no GPU is allocatable right now; busy_gpus lists the tasks holding them.",

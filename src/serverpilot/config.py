@@ -45,6 +45,40 @@ class ProjectConfig(BaseModel):
     concurrency_limit: int | None = Field(default=None, ge=1)
 
 
+def absolute_single_line_path(value: str) -> str:
+    if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
+        raise ValueError("workspace_path must be an absolute single-line path")
+    return value
+
+
+def plain_text(value: str | None) -> str | None:
+    if value is None:
+        return None
+    if "\x00" in value:
+        raise ValueError("text must be plain text without NUL")
+    return value
+
+
+class ServerGroupConfig(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(pattern=r"^[a-z][a-z0-9-]{1,127}$")
+    display_name: str = Field(min_length=1, max_length=120)
+    workspace_path: str = Field(min_length=1, max_length=2000)
+    environment_notes: str | None = Field(default=None, max_length=8000)
+    description: str | None = Field(default=None, max_length=1000)
+
+    @field_validator("workspace_path")
+    @classmethod
+    def valid_workspace_path(cls, value: str) -> str:
+        return absolute_single_line_path(value)
+
+    @field_validator("environment_notes", "description")
+    @classmethod
+    def plain_text_fields(cls, value: str | None) -> str | None:
+        return plain_text(value)
+
+
 class EndpointConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -53,8 +87,8 @@ class EndpointConfig(BaseModel):
     port: int = Field(ge=1, le=65535)
     ssh_user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
-    # Nullable only while projecting a migrated legacy database row. Inventory
-    # validation below requires every configured endpoint to name the path.
+    # Optional per-endpoint override when server_group_id names a group.
+    # Inventory still requires a path or a group default.
     workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
     # A closed profile chooses the probe. Built-in ids plus discovered plugin
     # ids are accepted; this is not a command, shell fragment, key path, or
@@ -67,6 +101,7 @@ class EndpointConfig(BaseModel):
     keepalive_policy: KeepalivePolicy = "disabled"
     labels: list[str] = Field(default_factory=list)
     storage_group: str | None = Field(default=None, max_length=120)
+    server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
     expected_gpu_count: int | None = Field(default=None, ge=1, le=1024)
     expected_gpu_total_vram_mib: int | None = Field(default=None, ge=1)
     # Kept as a tolerated legacy inventory field.  Endpoint access is global;
@@ -87,9 +122,7 @@ class EndpointConfig(BaseModel):
     def valid_workspace_path(cls, value: str | None) -> str | None:
         if value is None:
             return None
-        if not value.startswith("/") or "\x00" in value or "\n" in value or "\r" in value:
-            raise ValueError("workspace_path must be an absolute single-line path")
-        return value
+        return absolute_single_line_path(value)
 
     @field_validator("observation_profile")
     @classmethod
@@ -124,6 +157,7 @@ class InventoryConfig(BaseModel):
     # Project policies are optional.  The broker creates a neutral record when
     # a claim first uses an otherwise unknown project_id.
     projects: list[ProjectConfig] = Field(default_factory=list)
+    server_groups: list[ServerGroupConfig] = Field(default_factory=list)
     endpoints: list[EndpointConfig] = Field(default_factory=list)
 
     @model_validator(mode="after")
@@ -149,8 +183,20 @@ class InventoryConfig(BaseModel):
             raise ValueError("host:port endpoint identities must be unique")
         if any(RESERVED_SYSTEM_ID in endpoint.project_ids for endpoint in self.endpoints):
             raise ValueError("the ServerPilot internal project id is reserved")
-        if any(endpoint.workspace_path is None for endpoint in self.endpoints):
-            raise ValueError("every configured endpoint requires workspace_path")
+        group_ids = [group.id for group in self.server_groups]
+        if len(group_ids) != len(set(group_ids)):
+            raise ValueError("server_group ids must be unique")
+        group_id_set = set(group_ids)
+        for endpoint in self.endpoints:
+            if endpoint.server_group_id is not None and endpoint.server_group_id not in group_id_set:
+                raise ValueError(
+                    f"endpoint {endpoint.id} references unknown server_group_id "
+                    f"{endpoint.server_group_id}"
+                )
+            if endpoint.workspace_path is None and endpoint.server_group_id is None:
+                raise ValueError(
+                    "every configured endpoint requires workspace_path or a server group default"
+                )
         return self
 
 

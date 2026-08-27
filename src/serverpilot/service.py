@@ -51,6 +51,7 @@ from serverpilot.models import (
     SchedulerJobEvent,
     SchedulerTarget,
     SchedulerTransfer,
+    ServerGroup,
     TelemetryCurrent,
     TelemetrySnapshot,
     WorkloadBinding,
@@ -87,6 +88,8 @@ from serverpilot.schemas import (
     SchedulerProfileSubmit,
     SchedulerTargetUpsert,
     SchedulerUploadRequest,
+    ServerGroupCreate,
+    ServerGroupUpdate,
     WorkloadProfileClaim,
     WorkloadProfileUpsert,
 )
@@ -180,6 +183,18 @@ def _external_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return None
     return ensure_utc(parsed)
+
+
+def resolve_effective_workspace(
+    *,
+    override: str | None,
+    group_workspace: str | None,
+) -> str | None:
+    """Resolve the remote working directory: endpoint override, then group default."""
+
+    if override:
+        return override
+    return group_workspace
 
 
 class BrokerService:
@@ -341,6 +356,59 @@ class BrokerService:
                 self.inventory.collector.stale_after_seconds = settings.interval_seconds * 3
             return result
 
+    def _upsert_server_groups(self, session: Session, now: datetime) -> None:
+        for configured in self.inventory.server_groups:
+            group = session.get(ServerGroup, configured.id)
+            if group is None:
+                session.add(
+                    ServerGroup(
+                        id=configured.id,
+                        display_name=configured.display_name,
+                        workspace_path=configured.workspace_path,
+                        environment_notes=configured.environment_notes,
+                        description=configured.description,
+                        created_at=now,
+                        updated_at=now,
+                    )
+                )
+                continue
+            if group.workspace_path != configured.workspace_path:
+                self._reject_group_workspace_change_if_keepalive(
+                    session, group.id, fields=["workspace_path"]
+                )
+            group.display_name = configured.display_name
+            group.workspace_path = configured.workspace_path
+            group.environment_notes = configured.environment_notes
+            group.description = configured.description
+            group.updated_at = now
+        session.flush()
+
+    def _reject_group_workspace_change_if_keepalive(
+        self,
+        session: Session,
+        group_id: str,
+        *,
+        fields: list[str],
+    ) -> None:
+        inheriting = session.scalars(
+            select(Endpoint).where(
+                Endpoint.server_group_id == group_id,
+                Endpoint.workspace_path.is_(None),
+            )
+        ).all()
+        blocked = [
+            endpoint.id
+            for endpoint in inheriting
+            if self._active_keepalive_for_endpoint(session, endpoint.id) is not None
+        ]
+        if blocked:
+            raise BrokerError(
+                "keepalive_endpoint_connection_in_use",
+                "stop active keepalive on inheriting members before changing the group workspace",
+                status_code=409,
+                details={"fields": fields, "endpoint_ids": blocked},
+            )
+
     def _upsert_inventory(self, session: Session, now: datetime) -> None:
         for configured_project in self.inventory.projects:
             project = session.get(Project, configured_project.id)
@@ -366,11 +434,25 @@ class BrokerService:
 
         session.flush()
         tombstoned_ids = set(session.scalars(select(EndpointDeletion.endpoint_id)))
+        self._upsert_server_groups(session, now)
         for configured_endpoint in self.inventory.endpoints:
             if configured_endpoint.id in tombstoned_ids:
                 continue
             endpoint = session.get(Endpoint, configured_endpoint.id)
             if endpoint is None:
+                assigned_group_id = configured_endpoint.server_group_id
+                if assigned_group_id is not None and session.get(ServerGroup, assigned_group_id) is None:
+                    raise BrokerError(
+                        "server_group_not_found",
+                        f"endpoint {configured_endpoint.id} references unknown server_group_id",
+                        status_code=422,
+                    )
+                self._require_effective_workspace(
+                    override=configured_endpoint.workspace_path,
+                    group=session.get(ServerGroup, assigned_group_id)
+                    if assigned_group_id is not None
+                    else None,
+                )
                 endpoint = Endpoint(
                     id=configured_endpoint.id,
                     host=configured_endpoint.host,
@@ -383,6 +465,7 @@ class BrokerService:
                     keepalive_policy=configured_endpoint.keepalive_policy,
                     labels_json=json_dump(configured_endpoint.labels),
                     storage_group=configured_endpoint.storage_group,
+                    server_group_id=assigned_group_id,
                     expected_gpu_count=configured_endpoint.expected_gpu_count,
                     expected_gpu_total_vram_mib=configured_endpoint.expected_gpu_total_vram_mib,
                     resource_kind="unknown",
@@ -407,17 +490,54 @@ class BrokerService:
                         f"endpoint {endpoint.id} cannot change host:port; create a new immutable endpoint id",
                         status_code=409,
                     )
+                next_group_id = (
+                    configured_endpoint.server_group_id
+                    if "server_group_id" in configured_endpoint.model_fields_set
+                    else endpoint.server_group_id
+                )
+                next_override = (
+                    configured_endpoint.workspace_path
+                    if "workspace_path" in configured_endpoint.model_fields_set
+                    else endpoint.workspace_path
+                )
+                next_group = (
+                    session.get(ServerGroup, next_group_id) if next_group_id is not None else None
+                )
+                if next_group_id is not None and next_group is None:
+                    raise BrokerError(
+                        "server_group_not_found",
+                        f"endpoint {endpoint.id} references unknown server_group_id",
+                        status_code=422,
+                    )
+                effective_before = self._endpoint_effective_workspace(session, endpoint)
+                effective_after = resolve_effective_workspace(
+                    override=next_override,
+                    group_workspace=next_group.workspace_path if next_group is not None else None,
+                )
+                if effective_after is None:
+                    raise BrokerError(
+                        "endpoint_workspace_required",
+                        "endpoint requires workspace_path or a server group default",
+                        status_code=422,
+                    )
                 protected_values = {
                     "ssh_user": configured_endpoint.ssh_user,
                     "ssh_alias": configured_endpoint.ssh_alias,
-                    "workspace_path": configured_endpoint.workspace_path,
+                    "workspace_path": effective_after,
                     "observation_profile": configured_endpoint.observation_profile,
                     "keepalive_adapter_id": configured_endpoint.keepalive_adapter_id,
+                }
+                current_protected = {
+                    "ssh_user": endpoint.ssh_user,
+                    "ssh_alias": endpoint.ssh_alias,
+                    "workspace_path": effective_before,
+                    "observation_profile": endpoint.observation_profile,
+                    "keepalive_adapter_id": endpoint.keepalive_adapter_id,
                 }
                 changed_protected_fields = sorted(
                     field
                     for field, value in protected_values.items()
-                    if value != getattr(endpoint, field)
+                    if value != current_protected[field]
                 )
                 if (
                     changed_protected_fields
@@ -431,7 +551,8 @@ class BrokerService:
                     )
                 endpoint.ssh_user = configured_endpoint.ssh_user
                 endpoint.ssh_alias = configured_endpoint.ssh_alias
-                endpoint.workspace_path = configured_endpoint.workspace_path
+                if "workspace_path" in configured_endpoint.model_fields_set:
+                    endpoint.workspace_path = configured_endpoint.workspace_path
                 endpoint.observation_profile = configured_endpoint.observation_profile
                 if (
                     endpoint.keepalive_policy == "idle_keepalive"
@@ -450,6 +571,8 @@ class BrokerService:
                     endpoint.keepalive_policy = configured_endpoint.keepalive_policy
                 endpoint.labels_json = json_dump(configured_endpoint.labels)
                 endpoint.storage_group = configured_endpoint.storage_group
+                if "server_group_id" in configured_endpoint.model_fields_set:
+                    endpoint.server_group_id = configured_endpoint.server_group_id
                 endpoint.expected_gpu_count = configured_endpoint.expected_gpu_count
                 endpoint.expected_gpu_total_vram_mib = (
                     configured_endpoint.expected_gpu_total_vram_mib
@@ -536,6 +659,61 @@ class BrokerService:
             session.add(ActorProject(actor_id=SYSTEM_ACTOR_ID, project_id=SYSTEM_PROJECT_ID))
         return actor, project
 
+    @staticmethod
+    def _server_groups_by_id(session: Session) -> dict[str, ServerGroup]:
+        return {
+            group.id: group
+            for group in session.scalars(select(ServerGroup).order_by(ServerGroup.id)).all()
+        }
+
+    @staticmethod
+    def _server_group_dict(group: ServerGroup) -> dict[str, Any]:
+        return {
+            "id": group.id,
+            "display_name": group.display_name,
+            "workspace_path": group.workspace_path,
+            "environment_notes": group.environment_notes,
+            "description": group.description,
+            "created_at": _iso(group.created_at),
+            "updated_at": _iso(group.updated_at),
+        }
+
+    def _endpoint_effective_workspace(
+        self,
+        session: Session,
+        endpoint: Endpoint,
+        *,
+        groups: Mapping[str, ServerGroup] | None = None,
+    ) -> str | None:
+        group = None
+        if endpoint.server_group_id is not None:
+            if groups is not None:
+                group = groups.get(endpoint.server_group_id)
+            else:
+                group = session.get(ServerGroup, endpoint.server_group_id)
+        return resolve_effective_workspace(
+            override=endpoint.workspace_path,
+            group_workspace=group.workspace_path if group is not None else None,
+        )
+
+    @staticmethod
+    def _require_effective_workspace(
+        *,
+        override: str | None,
+        group: ServerGroup | None,
+    ) -> str:
+        value = resolve_effective_workspace(
+            override=override,
+            group_workspace=group.workspace_path if group is not None else None,
+        )
+        if value is None:
+            raise BrokerError(
+                "endpoint_workspace_required",
+                "endpoint requires workspace_path or a server group default",
+                status_code=422,
+            )
+        return value
+
     def collector_endpoints(self) -> list[EndpointConfig]:
         """Read current control-plane endpoint inventory for fixed-command collection."""
 
@@ -546,6 +724,7 @@ class BrokerService:
                 .where(Endpoint.lifecycle_state.in_({"active", "draining"}))
                 .order_by(Endpoint.id)
             ).all()
+            groups = self._server_groups_by_id(session)
             for endpoint in endpoints:
                 values.append(
                     EndpointConfig(
@@ -554,12 +733,15 @@ class BrokerService:
                         port=endpoint.port,
                         ssh_user=endpoint.ssh_user,
                         ssh_alias=endpoint.ssh_alias,
-                        workspace_path=endpoint.workspace_path,
+                        workspace_path=self._endpoint_effective_workspace(
+                            session, endpoint, groups=groups
+                        ),
                         observation_profile=endpoint.observation_profile,
                         keepalive_adapter_id=endpoint.keepalive_adapter_id,
                         keepalive_policy=endpoint.keepalive_policy,
                         labels=json_load(endpoint.labels_json),
                         storage_group=endpoint.storage_group,
+                        server_group_id=endpoint.server_group_id,
                         expected_gpu_count=endpoint.expected_gpu_count,
                         expected_gpu_total_vram_mib=endpoint.expected_gpu_total_vram_mib,
                         project_ids=[],
@@ -588,12 +770,13 @@ class BrokerService:
                 port=endpoint.port,
                 ssh_user=endpoint.ssh_user,
                 ssh_alias=endpoint.ssh_alias,
-                workspace_path=endpoint.workspace_path,
+                workspace_path=self._endpoint_effective_workspace(session, endpoint),
                 observation_profile=endpoint.observation_profile,
                 keepalive_adapter_id=endpoint.keepalive_adapter_id,
                 keepalive_policy=endpoint.keepalive_policy,
                 labels=json_load(endpoint.labels_json),
                 storage_group=endpoint.storage_group,
+                server_group_id=endpoint.server_group_id,
                 expected_gpu_count=endpoint.expected_gpu_count,
                 expected_gpu_total_vram_mib=endpoint.expected_gpu_total_vram_mib,
                 project_ids=[],
@@ -1179,15 +1362,27 @@ class BrokerService:
 
     @staticmethod
     def _endpoint_dict(
-        endpoint: Endpoint, *, scheduler_capacity: dict[str, Any] | None = None
+        endpoint: Endpoint,
+        *,
+        scheduler_capacity: dict[str, Any] | None = None,
+        server_groups: Mapping[str, ServerGroup] | None = None,
     ) -> dict[str, Any]:
+        group = None
+        if endpoint.server_group_id is not None and server_groups is not None:
+            group = server_groups.get(endpoint.server_group_id)
+        effective = resolve_effective_workspace(
+            override=endpoint.workspace_path,
+            group_workspace=group.workspace_path if group is not None else None,
+        )
         return {
             "id": endpoint.id,
             "host": endpoint.host,
             "port": endpoint.port,
             "ssh_user": endpoint.ssh_user,
             "ssh_alias": endpoint.ssh_alias,
-            "workspace_path": endpoint.workspace_path,
+            "workspace_path": effective,
+            "workspace_path_override": endpoint.workspace_path,
+            "server_group_id": endpoint.server_group_id,
             "observation_profile": endpoint.observation_profile,
             "keepalive_adapter_id": endpoint.keepalive_adapter_id,
             "keepalive_policy": endpoint.keepalive_policy,
@@ -1203,6 +1398,21 @@ class BrokerService:
             "created_at": _iso(endpoint.created_at),
             "updated_at": _iso(endpoint.updated_at),
         }
+
+    def _project_endpoint(
+        self,
+        session: Session,
+        endpoint: Endpoint,
+        *,
+        scheduler_capacity: dict[str, Any] | None = None,
+        server_groups: Mapping[str, ServerGroup] | None = None,
+    ) -> dict[str, Any]:
+        groups = server_groups if server_groups is not None else self._server_groups_by_id(session)
+        return self._endpoint_dict(
+            endpoint,
+            scheduler_capacity=scheduler_capacity,
+            server_groups=groups,
+        )
 
     @staticmethod
     def _project_dict(project: Project) -> dict[str, Any]:
@@ -1461,7 +1671,9 @@ class BrokerService:
                             "host": endpoint.host,
                             "port": endpoint.port,
                             "ssh_user": endpoint.ssh_user,
-                            "workspace_path": endpoint.workspace_path,
+                            "workspace_path": self._endpoint_effective_workspace(
+                                session, endpoint
+                            ),
                         },
                         "gpus": [
                             {
@@ -3477,6 +3689,7 @@ class BrokerService:
     ) -> dict[str, Any]:
         def operation(session: Session) -> dict[str, Any]:
             now = utcnow()
+            groups = self._server_groups_by_id(session)
             endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
             provider_states = {
                 provider_state.endpoint_id: provider_state
@@ -3718,6 +3931,7 @@ class BrokerService:
                         scheduler_capacity=self._decode_plugin_capacity(
                             plugin_capacity_values.get(self._plugin_capacity_key(endpoint.id))
                         ),
+                        server_groups=groups,
                     ),
                     # Filled from the final per-GPU projection below, so a
                     # busy sibling GPU never invalidates an independent
@@ -4263,7 +4477,7 @@ class BrokerService:
                     {
                         "provider": self._provider_dict(provider) if provider is not None else None,
                         "unit": self._allocatable_unit_dict(unit) if unit is not None else None,
-                        "endpoint": self._endpoint_dict(endpoint),
+                        "endpoint": self._endpoint_dict(endpoint, server_groups=groups),
                         "monitor_status": monitor_status,
                         "admission_state": admission_state,
                         "admission_reason": admission_reason,
@@ -4562,6 +4776,7 @@ class BrokerService:
                 "resource_projection": resource_projection,
                 "data_age_seconds": round(max(ages), 1) if ages else None,
                 "endpoints": endpoint_payloads,
+                "server_groups": [self._server_group_dict(group) for group in groups.values()],
                 "gpus": gpu_payloads,
                 "absent_gpu_ids": absent_gpu_ids,
                 "leases": visible_lease_payloads,
@@ -4635,6 +4850,7 @@ class BrokerService:
             "data_age_seconds",
             "freshness_seconds",
             "endpoints",
+            "server_groups",
             "gpus",
             "absent_gpu_ids",
             "leases",
@@ -7024,7 +7240,7 @@ class BrokerService:
                 {
                     "provider": self._provider_dict(provider) if provider is not None else None,
                     "unit": self._allocatable_unit_dict(unit) if unit is not None else None,
-                    "endpoint": self._endpoint_dict(endpoint),
+                    "endpoint": self._project_endpoint(session, endpoint),
                     "monitor_status": monitor_status,
                     "admission_state": admission_state,
                     "admission_reason": admission_reason,
@@ -7125,6 +7341,7 @@ class BrokerService:
         values: list[GPUDevice] = []
         direct_commitment_usage = self._endpoint_commitment_usage(session)
         generic_host_usage = self._active_generic_host_usage(session)
+        selected_group_ids = set(constraints.server_group_ids)
         all_gpus = session.scalars(
             select(GPUDevice).order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
         ).all()
@@ -7139,11 +7356,15 @@ class BrokerService:
             if endpoint is None:
                 excluded["missing_endpoint"] += 1
                 continue
+            if selected_group_ids:
+                if endpoint.server_group_id not in selected_group_ids:
+                    excluded["server_group"] += 1
+                    continue
+            elif constraints.endpoint_ids and endpoint.id not in constraints.endpoint_ids:
+                excluded["endpoint_allowlist"] += 1
+                continue
             if endpoint.lifecycle_state != "active":
                 excluded["endpoint_lifecycle"] += 1
-                continue
-            if constraints.endpoint_ids and endpoint.id not in constraints.endpoint_ids:
-                excluded["endpoint_allowlist"] += 1
                 continue
             if endpoint.id in constraints.deny_endpoint_ids:
                 excluded["endpoint_denylist"] += 1
@@ -7284,7 +7505,9 @@ class BrokerService:
                 now=now,
                 include_reclaimable_keepalive=True,
             )
-            selected = self._select_resources(candidates, request_data.constraints)
+            selected = self._select_resources_in_group_partitions(
+                session, candidates, request_data.constraints
+            )
             if selected is None:
                 return {
                     "snapshot_revision": self._revision(session),
@@ -7402,6 +7625,42 @@ class BrokerService:
             queues = next_queues
         return selected if len(selected) == constraints.gpu_count else None
 
+    def _select_resources_in_group_partitions(
+        self,
+        session: Session,
+        candidates: list[GPUDevice],
+        constraints: ResourceConstraints,
+    ) -> list[GPUDevice] | None:
+        """Choose GPUs inside one server-group partition only.
+
+        Ungrouped endpoints share one partition. Existing host topology and
+        best-fit stay in ``_select_resources``; this only prevents a lease from
+        mixing two groups, or a group with ungrouped hosts.
+        """
+
+        if not candidates:
+            return None
+        partitions: dict[str | None, list[GPUDevice]] = defaultdict(list)
+        for gpu in candidates:
+            endpoint = session.get(Endpoint, gpu.endpoint_id)
+            partitions[None if endpoint is None else endpoint.server_group_id].append(gpu)
+        chosen: list[GPUDevice] | None = None
+        chosen_score: tuple[int, int, str, str] | None = None
+        for group_id, gpus in partitions.items():
+            selected = self._select_resources(gpus, constraints)
+            if selected is None:
+                continue
+            used = {gpu.endpoint_id for gpu in selected}
+            eligible_by_host: dict[str, int] = defaultdict(int)
+            for gpu in gpus:
+                eligible_by_host[gpu.endpoint_id] += 1
+            host_score = min((eligible_by_host[host_id], host_id) for host_id in used)
+            score = (len(used), host_score[0], host_score[1], group_id or "")
+            if chosen_score is None or score < chosen_score:
+                chosen = selected
+                chosen_score = score
+        return chosen
+
     def _queue_candidates(self, session: Session, now: datetime) -> list[AllocationRequest]:
         queued = session.scalars(
             select(AllocationRequest)
@@ -7507,7 +7766,9 @@ class BrokerService:
                 request.updated_at = now
                 continue
             candidates, excluded = self._eligible_gpus(session, request=request, now=now)
-            resources = self._select_resources(candidates, constraints)
+            resources = self._select_resources_in_group_partitions(
+                session, candidates, constraints
+            )
             if resources is None:
                 top_exclusions = ", ".join(
                     f"{reason}={count}"
@@ -7599,6 +7860,114 @@ class BrokerService:
             allocated.append(lease.id)
         return allocated
 
+    def _enforce_direct_group_selection(
+        self,
+        session: Session,
+        constraints: ResourceConstraints,
+        *,
+        plugin_allocation: dict[str, Any] | None,
+        now: datetime,
+    ) -> None:
+        if plugin_allocation is not None or constraints.gpu_count <= 0:
+            return
+        selected_groups = list(constraints.server_group_ids)
+        if selected_groups:
+            missing = [
+                group_id
+                for group_id in selected_groups
+                if session.get(ServerGroup, group_id) is None
+            ]
+            if missing:
+                raise BrokerError(
+                    "server_group_not_found",
+                    f"unknown server_group_ids: {missing}",
+                    status_code=404,
+                    details={"server_group_ids": missing},
+                )
+            return
+        groups = self._server_groups_by_id(session)
+        if not groups:
+            return
+        pinned_ids = list(constraints.endpoint_ids)
+        if pinned_ids:
+            from serverpilot.plugins import is_plugin_profile
+
+            grouped_pins: list[str] = []
+            for endpoint_id in pinned_ids:
+                endpoint = session.get(Endpoint, endpoint_id)
+                if endpoint is None:
+                    continue
+                if is_plugin_profile(endpoint.observation_profile):
+                    continue
+                if endpoint.server_group_id is not None:
+                    grouped_pins.append(endpoint.id)
+            if not grouped_pins:
+                return
+        raise BrokerError(
+            "group_selection_required",
+            "select a server_group_id before claiming GPUs",
+            status_code=409,
+            details=self._group_selection_details(session, groups, now),
+        )
+
+    def _group_selection_details(
+        self,
+        session: Session,
+        groups: Mapping[str, ServerGroup],
+        now: datetime,
+    ) -> dict[str, Any]:
+        endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
+        gpus = session.scalars(
+            select(GPUDevice).where(GPUDevice.present.is_(True)).order_by(
+                GPUDevice.endpoint_id, GPUDevice.gpu_index
+            )
+        ).all()
+        gpus_by_endpoint: dict[str, list[GPUDevice]] = defaultdict(list)
+        for gpu in gpus:
+            gpus_by_endpoint[gpu.endpoint_id].append(gpu)
+
+        def server_shape(endpoint: Endpoint) -> dict[str, Any]:
+            skus: dict[tuple[str, int], dict[str, int]] = {}
+            for gpu in gpus_by_endpoint.get(endpoint.id, []):
+                key = (gpu.name, gpu.total_vram_mib)
+                bucket = skus.setdefault(
+                    key,
+                    {
+                        "name": gpu.name,
+                        "vram_mib": gpu.total_vram_mib,
+                        "total_count": 0,
+                        "available_count": 0,
+                    },
+                )
+                bucket["total_count"] += 1
+                state, _reason = self._gpu_state(session, gpu, now)
+                if state in {"AVAILABLE", "KEEPALIVE"}:
+                    bucket["available_count"] += 1
+            return {
+                "server_id": endpoint.id,
+                "gpus": [
+                    skus[key]
+                    for key in sorted(skus, key=lambda item: (item[0], item[1]))
+                ],
+            }
+
+        group_payloads = []
+        for group_id in sorted(groups):
+            group = groups[group_id]
+            members = [
+                endpoint for endpoint in endpoints if endpoint.server_group_id == group.id
+            ]
+            group_payloads.append(
+                {
+                    **self._server_group_dict(group),
+                    "servers": [server_shape(endpoint) for endpoint in members],
+                }
+            )
+        ungrouped = [
+            server_shape(endpoint) for endpoint in endpoints if endpoint.server_group_id is None
+        ]
+        return {"server_groups": group_payloads, "ungrouped_servers": ungrouped}
+
     def _create_request_in_session(
         self,
         session: Session,
@@ -7623,6 +7992,12 @@ class BrokerService:
         project = self._ensure_claim_project(session, request_data.project_id, now)
         if not project.enabled:
             raise BrokerError("project_disabled", "project is disabled", status_code=409)
+        self._enforce_direct_group_selection(
+            session,
+            request_data.constraints,
+            plugin_allocation=plugin_allocation,
+            now=now,
+        )
         revision = self._bump_revision(session, now)
         constraints_payload = request_data.constraints.model_dump(mode="json")
         if plugin_allocation is not None:
@@ -9037,6 +9412,7 @@ class BrokerService:
         """Resolve a constraint reservation to stable GPU identities at creation time."""
 
         candidates: list[GPUDevice] = []
+        selected_group_ids = set(constraints.server_group_ids)
         for gpu in session.scalars(
             select(GPUDevice).order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
         ).all():
@@ -9044,6 +9420,8 @@ class BrokerService:
                 continue
             endpoint = session.get(Endpoint, gpu.endpoint_id)
             if endpoint is None or not endpoint.enabled or not gpu.enabled:
+                continue
+            if selected_group_ids and endpoint.server_group_id not in selected_group_ids:
                 continue
             if constraints.endpoint_ids and endpoint.id not in constraints.endpoint_ids:
                 continue
@@ -9079,7 +9457,9 @@ class BrokerService:
             if self._reservation_blocks_gpu(session, gpu.id, start=start_at, end=end_at):
                 continue
             candidates.append(gpu)
-        selected = self._select_resources(candidates, constraints)
+        selected = self._select_resources_in_group_partitions(
+            session, candidates, constraints
+        )
         return [gpu.id for gpu in selected] if selected else None
 
     def create_reservation(
@@ -10942,6 +11322,20 @@ class BrokerService:
                     "an immutable endpoint already owns this host:port",
                     status_code=409,
                 )
+            group = None
+            if endpoint_data.server_group_id is not None:
+                group = session.get(ServerGroup, endpoint_data.server_group_id)
+                if group is None:
+                    raise BrokerError(
+                        "server_group_not_found",
+                        "server group does not exist",
+                        status_code=404,
+                    )
+            stored_override = endpoint_data.stored_workspace_override()
+            self._require_effective_workspace(
+                override=stored_override,
+                group=group,
+            )
             now = utcnow()
             revision = self._bump_revision(session, now)
             endpoint = Endpoint(
@@ -10950,12 +11344,13 @@ class BrokerService:
                 port=endpoint_data.port,
                 ssh_user=endpoint_data.ssh_user,
                 ssh_alias=endpoint_data.ssh_alias,
-                workspace_path=endpoint_data.workspace_path,
+                workspace_path=stored_override,
                 observation_profile=endpoint_data.observation_profile,
                 keepalive_adapter_id=endpoint_data.keepalive_adapter_id,
                 keepalive_policy=endpoint_data.keepalive_policy,
                 labels_json=json_dump(endpoint_data.labels),
                 storage_group=endpoint_data.storage_group,
+                server_group_id=endpoint_data.server_group_id,
                 expected_gpu_count=endpoint_data.expected_gpu_count,
                 expected_gpu_total_vram_mib=endpoint_data.expected_gpu_total_vram_mib,
                 resource_kind="unknown",
@@ -10970,7 +11365,7 @@ class BrokerService:
             session.execute(
                 delete(EndpointDeletion).where(EndpointDeletion.endpoint_id == endpoint.id)
             )
-            payload = self._endpoint_dict(endpoint)
+            payload = self._project_endpoint(session, endpoint)
             event = self._audit(
                 session,
                 actor_id=actor.id,
@@ -11021,7 +11416,7 @@ class BrokerService:
             if endpoint is None:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
-            before = self._endpoint_dict(endpoint)
+            before = self._project_endpoint(session, endpoint)
             fields = endpoint_data.model_fields_set
             values = endpoint_data.model_dump()
             if values.get("owner_project_id") == SYSTEM_PROJECT_ID:
@@ -11030,13 +11425,34 @@ class BrokerService:
                     "the ServerPilot internal project cannot own an endpoint",
                     status_code=422,
                 )
+            next_group_id = (
+                values["server_group_id"] if "server_group_id" in fields else endpoint.server_group_id
+            )
+            next_group = (
+                session.get(ServerGroup, next_group_id) if next_group_id is not None else None
+            )
+            if next_group_id is not None and next_group is None:
+                raise BrokerError(
+                    "server_group_not_found",
+                    "server group does not exist",
+                    status_code=404,
+                )
+            next_override = (
+                endpoint_data.stored_workspace_override()
+                if endpoint_data.workspace_override_specified()
+                else endpoint.workspace_path
+            )
+            effective_after = self._require_effective_workspace(
+                override=next_override,
+                group=next_group,
+            )
+            effective_before = self._endpoint_effective_workspace(session, endpoint)
             protected_keepalive_fields = {
                 "host",
                 "port",
                 "keepalive_adapter_id",
                 "ssh_user",
                 "ssh_alias",
-                "workspace_path",
                 "observation_profile",
             }
             changed_protected_fields = sorted(
@@ -11044,6 +11460,8 @@ class BrokerService:
                 for field in fields.intersection(protected_keepalive_fields)
                 if values[field] != getattr(endpoint, field)
             )
+            if effective_before != effective_after:
+                changed_protected_fields = sorted({*changed_protected_fields, "workspace_path"})
             if (
                 changed_protected_fields
                 and self._active_keepalive_for_endpoint(session, endpoint.id) is not None
@@ -11066,6 +11484,8 @@ class BrokerService:
                 )
             changed = False
             for field in fields:
+                if field in {"workspace_path", "workspace_path_override"}:
+                    continue
                 value = values[field]
                 attribute = "labels_json" if field == "labels" else field
                 if field == "labels":
@@ -11073,12 +11493,18 @@ class BrokerService:
                 if getattr(endpoint, attribute) != value:
                     setattr(endpoint, attribute, value)
                     changed = True
+            if (
+                endpoint_data.workspace_override_specified()
+                and endpoint.workspace_path != next_override
+            ):
+                endpoint.workspace_path = next_override
+                changed = True
             now = utcnow()
             if changed:
                 endpoint.updated_at = now
                 revision = self._bump_revision(session, now)
                 session.flush()
-                payload = self._endpoint_dict(endpoint)
+                payload = self._project_endpoint(session, endpoint)
                 event = self._audit(
                     session,
                     actor_id=actor.id,
@@ -11136,7 +11562,7 @@ class BrokerService:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
             now = utcnow()
-            before = self._endpoint_dict(endpoint)
+            before = self._project_endpoint(session, endpoint)
             changed = endpoint.lifecycle_state == "active"
             if changed:
                 endpoint.lifecycle_state = "draining"
@@ -11144,7 +11570,7 @@ class BrokerService:
                 endpoint.updated_at = now
                 revision = self._bump_revision(session, now)
                 session.flush()
-                payload = self._endpoint_dict(endpoint)
+                payload = self._project_endpoint(session, endpoint)
                 event = self._audit(
                     session,
                     actor_id=actor.id,
@@ -11200,7 +11626,7 @@ class BrokerService:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
             now = utcnow()
-            before = self._endpoint_dict(endpoint)
+            before = self._project_endpoint(session, endpoint)
             changed = endpoint.lifecycle_state == "draining"
             if changed:
                 endpoint.lifecycle_state = "active"
@@ -11208,7 +11634,7 @@ class BrokerService:
                 endpoint.updated_at = now
                 revision = self._bump_revision(session, now)
                 session.flush()
-                payload = self._endpoint_dict(endpoint)
+                payload = self._project_endpoint(session, endpoint)
                 event = self._audit(
                     session,
                     actor_id=actor.id,
@@ -11279,7 +11705,7 @@ class BrokerService:
                     status_code=409,
                 )
             now = utcnow()
-            before = self._endpoint_dict(endpoint)
+            before = self._project_endpoint(session, endpoint)
             tombstone = session.get(EndpointDeletion, endpoint.id)
             if tombstone is None:
                 session.add(
@@ -11343,7 +11769,7 @@ class BrokerService:
             now = utcnow()
             revision = self._bump_revision(session, now)
             endpoint = session.get(Endpoint, endpoint_data.id)
-            before = self._endpoint_dict(endpoint) if endpoint else None
+            before = self._project_endpoint(session, endpoint) if endpoint else None
             same_address = session.scalar(
                 select(Endpoint).where(
                     Endpoint.host == endpoint_data.host,
@@ -11364,18 +11790,33 @@ class BrokerService:
                         "a new endpoint must begin active",
                         status_code=409,
                     )
+                group = None
+                if endpoint_data.server_group_id is not None:
+                    group = session.get(ServerGroup, endpoint_data.server_group_id)
+                    if group is None:
+                        raise BrokerError(
+                            "server_group_not_found",
+                            "server group does not exist",
+                            status_code=404,
+                        )
+                stored_override = endpoint_data.stored_workspace_override()
+                self._require_effective_workspace(
+                    override=stored_override,
+                    group=group,
+                )
                 endpoint = Endpoint(
                     id=endpoint_data.id,
                     host=endpoint_data.host,
                     port=endpoint_data.port,
                     ssh_user=endpoint_data.ssh_user,
                     ssh_alias=endpoint_data.ssh_alias,
-                    workspace_path=endpoint_data.workspace_path,
+                    workspace_path=stored_override,
                     observation_profile=endpoint_data.observation_profile,
                     keepalive_adapter_id=endpoint_data.keepalive_adapter_id,
                     keepalive_policy=endpoint_data.keepalive_policy,
                     labels_json=json_dump(endpoint_data.labels),
                     storage_group=endpoint_data.storage_group,
+                    server_group_id=endpoint_data.server_group_id,
                     expected_gpu_count=endpoint_data.expected_gpu_count,
                     expected_gpu_total_vram_mib=endpoint_data.expected_gpu_total_vram_mib,
                     owner_project_id=endpoint_data.owner_project_id,
@@ -11393,17 +11834,44 @@ class BrokerService:
                         "existing endpoint id cannot change host:port; create a new endpoint id",
                         status_code=409,
                     )
+                next_group_id = (
+                    endpoint_data.server_group_id
+                    if "server_group_id" in endpoint_data.model_fields_set
+                    else endpoint.server_group_id
+                )
+                next_group = (
+                    session.get(ServerGroup, next_group_id) if next_group_id is not None else None
+                )
+                if next_group_id is not None and next_group is None:
+                    raise BrokerError(
+                        "server_group_not_found",
+                        "server group does not exist",
+                        status_code=404,
+                    )
+                stored_override = endpoint_data.stored_workspace_override()
+                effective_after = self._require_effective_workspace(
+                    override=stored_override,
+                    group=next_group,
+                )
+                effective_before = self._endpoint_effective_workspace(session, endpoint)
                 protected_values = {
                     "ssh_user": endpoint_data.ssh_user,
                     "ssh_alias": endpoint_data.ssh_alias,
-                    "workspace_path": endpoint_data.workspace_path,
+                    "workspace_path": effective_after,
                     "observation_profile": endpoint_data.observation_profile,
                     "keepalive_adapter_id": endpoint_data.keepalive_adapter_id,
+                }
+                current_protected = {
+                    "ssh_user": endpoint.ssh_user,
+                    "ssh_alias": endpoint.ssh_alias,
+                    "workspace_path": effective_before,
+                    "observation_profile": endpoint.observation_profile,
+                    "keepalive_adapter_id": endpoint.keepalive_adapter_id,
                 }
                 changed_protected_fields = sorted(
                     field
                     for field, value in protected_values.items()
-                    if value != getattr(endpoint, field)
+                    if value != current_protected[field]
                 )
                 if (
                     changed_protected_fields
@@ -11417,7 +11885,7 @@ class BrokerService:
                     )
                 if endpoint_data.owner_project_id is not None:
                     endpoint.owner_project_id = endpoint_data.owner_project_id
-                endpoint.workspace_path = endpoint_data.workspace_path
+                endpoint.workspace_path = stored_override
                 requested_lifecycle = endpoint_data.lifecycle_state
                 if requested_lifecycle is None and endpoint_data.enabled is False:
                     requested_lifecycle = "draining"
@@ -11443,6 +11911,8 @@ class BrokerService:
                 endpoint.keepalive_policy = endpoint_data.keepalive_policy
                 endpoint.labels_json = json_dump(endpoint_data.labels)
                 endpoint.storage_group = endpoint_data.storage_group
+                if "server_group_id" in endpoint_data.model_fields_set:
+                    endpoint.server_group_id = endpoint_data.server_group_id
                 endpoint.expected_gpu_count = endpoint_data.expected_gpu_count
                 endpoint.expected_gpu_total_vram_mib = endpoint_data.expected_gpu_total_vram_mib
                 endpoint.enabled = endpoint.lifecycle_state == "active"
@@ -11456,18 +11926,235 @@ class BrokerService:
                 resource_id=endpoint.id,
                 result="success",
                 before=before,
-                after=self._endpoint_dict(endpoint),
+                after=self._project_endpoint(session, endpoint),
                 now=now,
             )
             result = {
                 "event_id": event.id,
                 "snapshot_revision": revision,
-                "endpoint": self._endpoint_dict(endpoint),
+                "endpoint": self._project_endpoint(session, endpoint),
             }
             self._remember_idempotency(
                 session,
                 actor=actor,
                 action="endpoint.upsert",
+                key=idempotency_key,
+                response=result,
+                now=now,
+            )
+            return result
+
+        return self._write(operation)
+
+    def list_server_groups(self, actor: ActorContext) -> dict[str, Any]:
+        self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
+
+        def operation(session: Session) -> dict[str, Any]:
+            values = [
+                self._server_group_dict(group)
+                for group in session.scalars(select(ServerGroup).order_by(ServerGroup.id)).all()
+            ]
+            return self.envelope(session, values)
+
+        return self._read(operation)
+
+    def get_server_group(self, actor: ActorContext, group_id: str) -> dict[str, Any]:
+        self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
+
+        def operation(session: Session) -> dict[str, Any]:
+            group = session.get(ServerGroup, group_id)
+            if group is None:
+                raise BrokerError(
+                    "server_group_not_found", "server group does not exist", status_code=404
+                )
+            return self.envelope(session, self._server_group_dict(group))
+
+        return self._read(operation)
+
+    def create_server_group(
+        self, actor: ActorContext, group_data: ServerGroupCreate, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            existing = self._idempotent(
+                session, actor=actor, action="server_group.create", key=idempotency_key
+            )
+            if existing is not None:
+                return existing
+            if session.get(ServerGroup, group_data.id) is not None:
+                raise BrokerError(
+                    "server_group_exists", "server group id already exists", status_code=409
+                )
+            now = utcnow()
+            revision = self._bump_revision(session, now)
+            group = ServerGroup(
+                id=group_data.id,
+                display_name=group_data.display_name,
+                workspace_path=group_data.workspace_path,
+                environment_notes=group_data.environment_notes,
+                description=group_data.description,
+                created_at=now,
+                updated_at=now,
+            )
+            session.add(group)
+            session.flush()
+            payload = self._server_group_dict(group)
+            event = self._audit(
+                session,
+                actor_id=actor.id,
+                action="server_group.created",
+                resource_type="server_group",
+                resource_id=group.id,
+                result="success",
+                after=payload,
+                now=now,
+            )
+            result = {
+                "event_id": event.id,
+                "snapshot_revision": revision,
+                "server_group": payload,
+                "changed": True,
+            }
+            self._remember_idempotency(
+                session,
+                actor=actor,
+                action="server_group.create",
+                key=idempotency_key,
+                response=result,
+                now=now,
+            )
+            return result
+
+        return self._write(operation)
+
+    def update_server_group(
+        self,
+        actor: ActorContext,
+        group_id: str,
+        group_data: ServerGroupUpdate,
+        *,
+        idempotency_key: str,
+    ) -> dict[str, Any]:
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            existing = self._idempotent(
+                session, actor=actor, action="server_group.update", key=idempotency_key
+            )
+            if existing is not None:
+                return existing
+            group = session.get(ServerGroup, group_id)
+            if group is None:
+                raise BrokerError(
+                    "server_group_not_found", "server group does not exist", status_code=404
+                )
+            before = self._server_group_dict(group)
+            fields = group_data.model_fields_set
+            values = group_data.model_dump()
+            if "workspace_path" in fields and values["workspace_path"] != group.workspace_path:
+                self._reject_group_workspace_change_if_keepalive(
+                    session, group.id, fields=["workspace_path"]
+                )
+            changed = False
+            for field in fields:
+                value = values[field]
+                if getattr(group, field) != value:
+                    setattr(group, field, value)
+                    changed = True
+            now = utcnow()
+            if changed:
+                group.updated_at = now
+                revision = self._bump_revision(session, now)
+                session.flush()
+                payload = self._server_group_dict(group)
+                event = self._audit(
+                    session,
+                    actor_id=actor.id,
+                    action="server_group.updated",
+                    resource_type="server_group",
+                    resource_id=group.id,
+                    result="success",
+                    before=before,
+                    after=payload,
+                    now=now,
+                )
+                event_id: int | None = event.id
+            else:
+                revision = self._revision(session)
+                payload = before
+                event_id = None
+            result = {
+                "event_id": event_id,
+                "snapshot_revision": revision,
+                "server_group": payload,
+                "changed": changed,
+            }
+            self._remember_idempotency(
+                session,
+                actor=actor,
+                action="server_group.update",
+                key=idempotency_key,
+                response=result,
+                now=now,
+            )
+            return result
+
+        return self._write(operation)
+
+    def delete_server_group(
+        self, actor: ActorContext, group_id: str, *, idempotency_key: str
+    ) -> dict[str, Any]:
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            existing = self._idempotent(
+                session, actor=actor, action="server_group.delete", key=idempotency_key
+            )
+            if existing is not None:
+                return existing
+            group = session.get(ServerGroup, group_id)
+            if group is None:
+                raise BrokerError(
+                    "server_group_not_found", "server group does not exist", status_code=404
+                )
+            member_ids = list(
+                session.scalars(
+                    select(Endpoint.id).where(Endpoint.server_group_id == group.id)
+                ).all()
+            )
+            if member_ids:
+                raise BrokerError(
+                    "server_group_has_members",
+                    "server group still has member endpoints",
+                    status_code=409,
+                    details={"endpoint_ids": member_ids},
+                )
+            now = utcnow()
+            before = self._server_group_dict(group)
+            session.delete(group)
+            session.flush()
+            revision = self._bump_revision(session, now)
+            event = self._audit(
+                session,
+                actor_id=actor.id,
+                action="server_group.deleted",
+                resource_type="server_group",
+                resource_id=group_id,
+                result="success",
+                before=before,
+                now=now,
+            )
+            result = {
+                "event_id": event.id,
+                "snapshot_revision": revision,
+                "server_group_id": group_id,
+                "changed": True,
+            }
+            self._remember_idempotency(
+                session,
+                actor=actor,
+                action="server_group.delete",
                 key=idempotency_key,
                 response=result,
                 now=now,
@@ -11768,14 +12455,22 @@ class BrokerService:
         self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
 
         def operation(session: Session) -> dict[str, Any]:
+            groups = [
+                self._server_group_dict(group)
+                for group in session.scalars(select(ServerGroup).order_by(ServerGroup.id)).all()
+            ]
             endpoints = []
+            group_map = self._server_groups_by_id(session)
             for endpoint in session.scalars(select(Endpoint).order_by(Endpoint.id)).all():
-                endpoints.append(self._endpoint_dict(endpoint))
+                endpoints.append(self._endpoint_dict(endpoint, server_groups=group_map))
             return self.envelope(
                 session,
                 {
                     "bootstrap_inventory": self.inventory.model_dump(mode="json"),
-                    "database_inventory": {"endpoints": endpoints},
+                    "database_inventory": {
+                        "server_groups": groups,
+                        "endpoints": endpoints,
+                    },
                     "scheduler": {
                         "exclusive_lease": True,
                         "auto_preemption": False,

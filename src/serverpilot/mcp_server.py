@@ -11,7 +11,7 @@ import secrets
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Any
+from typing import Annotated, Any
 
 import anyio
 import httpx
@@ -51,12 +51,18 @@ RESOURCE_MARGINAL_MIN_SAVED_RATIO = 0.10
 RESOURCE_MARGINAL_MIN_SAVED_SECONDS = 120
 _ROUTINE_MCP_INSTANCE_ID = secrets.token_hex(16)
 
+ROUTINE_GPU_COUNT_DESCRIPTION = (
+    "exact job parallelism from launch script/config (`devices`, "
+    "`--nproc_per_node`, `num_processes`, `--gres`), never server/free capacity"
+)
+
 MCP_INSTRUCTIONS = """Three tools cover routine GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=the task name, never the client UI title); gpu_release.
-Connection and working directory are projected once per server in servers[], not per card: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository; gpus[] point back with server_id.
+Assess server-group workspace/environment/data-weight notes and capacity first; choose server_group_id for direct grouped hosts; the broker then best-fits within that group. server_id is for scheduler/plugin or explicit ungrouped compatibility and must not pin a grouped direct host.
+Connection and working directory are projected once per server, not per card: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.
 cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
-gpu_status gives allocatable capacity (name/vram_mib/status) and busy_gpus(task) with no telemetry; server_id narrows to one server. Unaccounted scheduler headroom appears in scheduler_servers, which you can gpu_apply against by server_id.
+gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count) and busy_gpus(task) with no telemetry; server_id narrows to one server. Unaccounted scheduler headroom appears in scheduler_servers, which you can gpu_apply against by server_id. gpu_count is exact job parallelism from launch script/config (devices, --nproc_per_node, num_processes, --gres), never server/free capacity.
 Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Load on a free card is ServerPilot's own hold, stopped before allocation, and is not evidence the card is taken.
-no_capacity is an answer, not a failure, and nothing is queued; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. Claim only cards you will use: an idle card is reclaimed on its own.
+no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. Claim only cards you will use: an idle card is reclaimed on its own.
 ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
 
 
@@ -167,11 +173,15 @@ class _AsyncBroker:
             error = payload.get("error", {}) if isinstance(payload, dict) else {}
             code = error.get("code")
             message = error.get("message", "request failed")
-            raise BrokerClientError(
+            details = error.get("details") if isinstance(error, dict) else None
+            exc = BrokerClientError(
                 f"broker HTTP {response.status_code}: {code or 'unknown'}: {message}",
                 code=code if isinstance(code, str) else None,
                 status_code=response.status_code,
             )
+            if details is not None:
+                exc.details = details
+            raise exc
         if not isinstance(payload, dict):
             raise BrokerClientError("broker returned an invalid JSON envelope")
         return payload
@@ -452,7 +462,11 @@ def _routine_client() -> BrokerClient | _AsyncBroker:
 
 
 def _routine_no_capacity(
-    exc: BrokerClientError, *, gpu_count: int, server_id: str | None
+    exc: BrokerClientError,
+    *,
+    gpu_count: int,
+    server_id: str | None,
+    server_group_id: str | None = None,
 ) -> dict[str, Any]:
     """Report a documented outcome as data rather than as a tool failure."""
 
@@ -462,8 +476,60 @@ def _routine_no_capacity(
             "message": str(exc).split(": ", 2)[-1],
             "gpu_count": gpu_count,
             "server_id": server_id,
+            "server_group_id": server_group_id,
         }
     }
+
+
+def _routine_group_selection_required(
+    exc: BrokerClientError,
+    *,
+    gpu_count: int,
+    server_id: str | None,
+    server_group_id: str | None,
+) -> dict[str, Any]:
+    """Report a missing group choice as data, like ``no_capacity``."""
+
+    payload: dict[str, Any] = {
+        "reason": "direct_grouped_hosts_require_server_group_id",
+        "message": str(exc).split(": ", 2)[-1],
+        "gpu_count": gpu_count,
+        "server_id": server_id,
+        "server_group_id": server_group_id,
+    }
+    details = getattr(exc, "details", None)
+    if isinstance(details, dict):
+        for key, value in details.items():
+            if key in payload and payload[key] is not None:
+                continue
+            payload[key] = value
+    return {"group_selection_required": payload}
+
+
+def _routine_documented_claim_outcome(
+    exc: BrokerClientError,
+    *,
+    gpu_count: int,
+    server_id: str | None,
+    server_group_id: str | None,
+) -> dict[str, Any] | None:
+    """Map broker business answers onto structured MCP data."""
+
+    if exc.code == "no_capacity":
+        return _routine_no_capacity(
+            exc,
+            gpu_count=gpu_count,
+            server_id=server_id,
+            server_group_id=server_group_id,
+        )
+    if exc.code == "group_selection_required":
+        return _routine_group_selection_required(
+            exc,
+            gpu_count=gpu_count,
+            server_id=server_id,
+            server_group_id=server_group_id,
+        )
+    return None
 
 
 def _routine_task(task: str | None) -> str:
@@ -974,16 +1040,101 @@ def _compact_gpu_status(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dict[str, Any]:
-    """Project the routine status view as three groups that answer three questions.
+def _routine_group_catalog(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep top-level server-group records in snapshot order."""
 
-    ``gpus`` says what can be claimed, ``leased_gpus`` says how the caller's own
-    workload is running, and ``busy_gpus`` says who holds the rest.  Telemetry
-    belongs to exactly one of them: a card is only readable where its occupancy
-    provably belongs to the reader.  On an unclaimed card the observable load is
-    ServerPilot's own keepalive hold, which is stopped before allocation, so
-    publishing it there would read as somebody else's work and turn a free card
-    into a card that looks full.  Capacity is what an unclaimed card can answer.
+    raw = data.get("server_groups")
+    if not isinstance(raw, list):
+        return []
+    return [
+        item
+        for item in raw
+        if isinstance(item, dict) and isinstance(item.get("id"), str) and item["id"]
+    ]
+
+
+def _routine_sku_capacity(gpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Aggregate one server's GPUs by name and VRAM so 4+4 cannot look like 8."""
+
+    buckets: dict[tuple[Any, Any], dict[str, Any]] = {}
+    order: list[tuple[Any, Any]] = []
+    for gpu in gpus:
+        key = (gpu.get("name"), gpu.get("total_vram_mib"))
+        bucket = buckets.get(key)
+        if bucket is None:
+            bucket = {
+                "name": gpu.get("name"),
+                "vram_mib": gpu.get("total_vram_mib"),
+                "total_count": 0,
+                "available_count": 0,
+            }
+            buckets[key] = bucket
+            order.append(key)
+        bucket["total_count"] += 1
+        if gpu.get("publicly_available") is True:
+            bucket["available_count"] += 1
+    return [buckets[key] for key in order]
+
+
+def _routine_status_server(endpoint: Any, server_id: Any, gpus: list[dict[str, Any]]) -> dict[str, Any]:
+    """Project one GPU server: connection once, capacity as SKU counts."""
+
+    workspace_path = endpoint.get("workspace_path") if isinstance(endpoint, dict) else None
+    server: dict[str, Any] = {
+        "server_id": server_id,
+        "workspace_path": workspace_path,
+        "workspace": _routine_workspace(workspace_path),
+        "gpus": _routine_sku_capacity(gpus),
+    }
+    ssh = _routine_ssh(endpoint)
+    if ssh is not None:
+        server["ssh"] = ssh
+    return server
+
+
+def _routine_group_projection(record: dict[str, Any], servers: list[dict[str, Any]]) -> dict[str, Any]:
+    """Project group metadata plus the nested per-server capacity summary."""
+
+    return {
+        "id": record.get("id"),
+        "display_name": record.get("display_name"),
+        "workspace_path": record.get("workspace_path"),
+        "environment_notes": record.get("environment_notes"),
+        "description": record.get("description"),
+        "servers": servers,
+    }
+
+
+def _routine_has_available_capacity(
+    server_groups: list[dict[str, Any]], ungrouped_servers: list[dict[str, Any]]
+) -> bool:
+    servers = [
+        server
+        for group in server_groups
+        for server in group.get("servers", [])
+        if isinstance(server, dict)
+    ]
+    servers.extend(ungrouped_servers)
+    return any(
+        isinstance(sku.get("available_count"), int) and sku["available_count"] > 0
+        for server in servers
+        for sku in server.get("gpus", [])
+        if isinstance(sku, dict)
+    )
+
+
+def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dict[str, Any]:
+    """Project the routine status view as grouped capacity plus occupancy.
+
+    Allocatable capacity is a per-server SKU summary under ``server_groups`` or
+    ``ungrouped_servers``, never one free row per card.  ``leased_gpus`` says
+    how the caller's own workload is running, and ``busy_gpus`` says who holds
+    the rest.  Telemetry belongs to exactly one of them: a card is only
+    readable where its occupancy provably belongs to the reader.  On an
+    unclaimed card the observable load is ServerPilot's own keepalive hold,
+    which is stopped before allocation, so publishing it there would read as
+    somebody else's work and turn a free card into a card that looks full.
+    Capacity is what an unclaimed card can answer.
     """
 
     data = payload.get("data")
@@ -994,16 +1145,13 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         for endpoint in endpoints
         if isinstance(endpoint, dict) and endpoint.get("id")
     }
-    gpus: list[dict[str, Any]] = []
+    catalog = _routine_group_catalog(data if isinstance(data, dict) else {})
+    catalog_by_id = {item["id"]: item for item in catalog}
+    gpus_by_server: dict[Any, list[dict[str, Any]]] = {}
     leased_gpus: list[dict[str, Any]] = []
     busy_gpus: list[dict[str, Any]] = []
-    referenced_server_ids: list[Any] = []
     lease_windows: list[dict[str, Any] | None] = []
     lease_task: str | None = None
-
-    def reference(server_id: Any) -> None:
-        if server_id not in referenced_server_ids:
-            referenced_server_ids.append(server_id)
 
     for gpu in values:
         if not isinstance(gpu, dict):
@@ -1020,6 +1168,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         lease = gpu.get("lease")
         lease = lease if isinstance(lease, dict) else None
         server_id = gpu.get("endpoint_id")
+        gpus_by_server.setdefault(server_id, []).append(gpu)
         task = (lease.get("task_ref") or ROUTINE_UNNAMED_TASK) if lease is not None else None
         identity = {
             "server_id": server_id,
@@ -1030,7 +1179,6 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
             # The caller's own cards: every process on them is this lease's
             # workload, so telemetry here answers "is my job using the card
             # well" and nothing else.
-            reference(server_id)
             row = dict(identity)
             row["name"] = gpu.get("name")
             row["vram_mib"] = gpu.get("total_vram_mib")
@@ -1051,34 +1199,39 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
             # Answer "who holds the busy cards" inside the same response so a
             # placement decision does not need a second call.  Whose task it is
             # is actionable; how hard their job is working the card is not.
-            reference(server_id)
             busy_gpus.append({**identity, "status": status, "task": task})
-            continue
-        reference(server_id)
-        gpus.append(
-            {
-                **identity,
-                "name": gpu.get("name"),
-                "vram_mib": gpu.get("total_vram_mib"),
-                "status": status,
-            }
-        )
 
-    servers: list[dict[str, Any]] = []
-    for server_id in referenced_server_ids:
+    grouped_servers: dict[str, list[dict[str, Any]]] = {}
+    ungrouped_servers: list[dict[str, Any]] = []
+    for server_id, server_gpus in gpus_by_server.items():
         endpoint = endpoint_by_id.get(server_id)
-        workspace_path = endpoint.get("workspace_path") if isinstance(endpoint, dict) else None
-        server: dict[str, Any] = {
-            "server_id": server_id,
-            "workspace_path": workspace_path,
-            "workspace": _routine_workspace(workspace_path),
-        }
-        ssh = _routine_ssh(endpoint)
-        if ssh is not None:
-            server["ssh"] = ssh
-        servers.append(server)
+        row = _routine_status_server(endpoint, server_id, server_gpus)
+        group_id = endpoint.get("server_group_id") if isinstance(endpoint, dict) else None
+        if isinstance(group_id, str) and group_id:
+            grouped_servers.setdefault(group_id, []).append(row)
+        else:
+            ungrouped_servers.append(row)
 
-    result: dict[str, Any] = {"servers": servers, "gpus": gpus}
+    server_groups: list[dict[str, Any]] = []
+    emitted_group_ids: set[str] = set()
+    for record in catalog:
+        group_id = record["id"]
+        servers = grouped_servers.get(group_id)
+        if not servers:
+            continue
+        server_groups.append(_routine_group_projection(record, servers))
+        emitted_group_ids.add(group_id)
+    for group_id, servers in grouped_servers.items():
+        if group_id in emitted_group_ids:
+            continue
+        record = catalog_by_id.get(group_id, {"id": group_id})
+        server_groups.append(_routine_group_projection(record, servers))
+
+    result: dict[str, Any] = {}
+    if server_groups:
+        result["server_groups"] = server_groups
+    if ungrouped_servers:
+        result["ungrouped_servers"] = ungrouped_servers
     if lease_id is not None:
         result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
     if busy_gpus:
@@ -1130,7 +1283,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         isinstance(item.get("free_gpu_count"), int) and item["free_gpu_count"] > 0
         for item in scheduler_servers
     )
-    if not gpus and not has_scheduler_free:
+    if not _routine_has_available_capacity(server_groups, ungrouped_servers) and not has_scheduler_free:
         if isinstance(summary, dict) and summary.get("total_gpus") == 0 and not scheduler_servers:
             result["message"] = "no GPUs are registered"
         else:
@@ -1401,7 +1554,7 @@ async def control_plane_state(
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-    """List allocatable GPUs, busy_gpus and who holds them, CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
+    """List grouped allocatable GPU capacity, busy_gpus and who holds them, CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
 
     if server_id is not None:
         server_id = server_id.strip()
@@ -2069,15 +2222,23 @@ def gpu_claim_profile(
     )
 )
 async def gpu_apply(
+    server_group_id: str | None = None,
     server_id: str | None = None,
-    gpu_count: int = 1,
+    gpu_count: Annotated[
+        int,
+        Field(ge=1, le=1024, description=ROUTINE_GPU_COUNT_DESCRIPTION),
+    ] = 1,
     task: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Claim GPUs on a single server now; returns SSH, the remote working directory and a CUDA selector. no_capacity is an answer and nothing is queued."""
+    """Claim GPUs on a single server now; pass server_group_id for grouped direct hosts. Returns SSH, the remote working directory and a CUDA selector. no_capacity and group_selection_required are answers and nothing is queued."""
 
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
         raise ValueError("gpu_count must be a positive integer")
+    if server_group_id is not None:
+        server_group_id = server_group_id.strip()
+        if not server_group_id:
+            raise ValueError("server_group_id must not be empty when it is given")
     if server_id is not None:
         server_id = server_id.strip()
         if not server_id:
@@ -2090,6 +2251,8 @@ async def gpu_apply(
         "placement": "pack",
         "same_host": True,
     }
+    if server_group_id is not None:
+        constraints["server_group_ids"] = [server_group_id]
     if server_id is not None:
         constraints["endpoint_ids"] = [server_id]
     task_ref = _routine_task(task)
@@ -2110,8 +2273,14 @@ async def gpu_apply(
             idempotency_key=replay_key,
         )
     except BrokerClientError as exc:
-        if exc.code == "no_capacity":
-            return _routine_no_capacity(exc, gpu_count=gpu_count, server_id=server_id)
+        documented = _routine_documented_claim_outcome(
+            exc,
+            gpu_count=gpu_count,
+            server_id=server_id,
+            server_group_id=server_group_id,
+        )
+        if documented is not None:
+            return documented
         if not str(exc).startswith("broker request failed:"):
             raise
         # The broker may have committed before the local HTTP response was
@@ -2126,9 +2295,15 @@ async def gpu_apply(
                 idempotency_key=replay_key,
             )
         except BrokerClientError as retried:
-            if retried.code != "no_capacity":
+            documented = _routine_documented_claim_outcome(
+                retried,
+                gpu_count=gpu_count,
+                server_id=server_id,
+                server_group_id=server_group_id,
+            )
+            if documented is None:
                 raise
-            return _routine_no_capacity(retried, gpu_count=gpu_count, server_id=server_id)
+            return documented
     return _routine_gpu_allocation(payload)
 
 

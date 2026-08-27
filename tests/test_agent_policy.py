@@ -127,6 +127,8 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "leased_gpus",
         "gpu_apply",
         "gpu_count",
+        "server_group_id",
+        "group_selection_required",
         "no_capacity",
         "gpus[]",
         "cuda_visible_devices",
@@ -155,9 +157,12 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # telemetry moved onto the lease: an agent that is not told a free card
     # carries no telemetry, and that the load it can observe there is
     # ServerPilot's own hold, re-derives availability from that observation
-    # and reads free cards as taken.  Contract sentences are never cut to fit
-    # this bound.
-    assert len(adapter.split()) < 250
+    # and reads free cards as taken.  It moved from 250 to 340 when routine
+    # status became grouped capacity: the caller has to be told to assess
+    # group notes first, pass server_group_id for direct grouped hosts, and
+    # not pin those hosts with server_id, or it treats two 4-GPU servers as
+    # one 8-GPU menu.  Contract sentences are never cut to fit this bound.
+    assert len(adapter.split()) < 340
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -187,9 +192,11 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "code_location=not_provided",
         "never the client ui title",
         "no_capacity is an answer, not a failure",
+        "group_selection_required is the same kind of answer",
         "nothing is queued",
         "serverpilot only coordinates gpus",
         "needs no lease",
+        "server_group_id",
     ):
         assert runtime_contract in mcp_instructions
     # The routine instructions load once per session, so they stay bounded.  The
@@ -207,8 +214,11 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # stands in for what the text costs an agent every turn, and a character is
     # not the same size in the two languages: a Chinese character is close to
     # one token, an English one closer to a quarter. The English text is longer
-    # and cheaper.
-    assert len(mcp.instructions) < 1600
+    # and cheaper.  It moved from 1600 to 2200 when grouped capacity replaced
+    # the per-card free menu: the caller has to be told to choose
+    # server_group_id, not to pin a grouped direct host with server_id, and
+    # that gpu_count comes from the launch script.
+    assert len(mcp.instructions) < 2200
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -225,7 +235,7 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
 def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contract() -> None:
     required = (
         "gpu_status(server_id?, lease_id?)",
-        "gpu_apply(server_id?, gpu_count=1, task?)",
+        "gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)",
         "gpu_release(lease_id)",
     )
     forbidden = (

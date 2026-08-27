@@ -292,7 +292,112 @@ final class FixtureModeUITests: XCTestCase {
             XCTAssertTrue(app.buttons["使用情况"].exists)
             XCTAssertTrue(app.buttons["设置"].exists)
             XCTAssertTrue(app.buttons["更新资源数据"].exists)
+            XCTAssertTrue(
+                app.buttons["manage-server-groups"].exists,
+                "Server group management must stay reachable at \(viewport)"
+            )
         }
+    }
+
+    func testResourceTableCutsGroupsWithoutTurningServersIntoCards() {
+        relaunch(fixture: "server-groups", section: "server-pool")
+        let groupHeader = app.descendants(matching: .any)["server-group-header"]
+        XCTAssertTrue(groupHeader.waitForExistence(timeout: 5), "Grouped fixtures must expose a server-group section header")
+        XCTAssertEqual(groupHeader.label, "夹具实验室")
+        XCTAssertTrue(
+            String(describing: groupHeader.value).contains("1/1 空闲"),
+            "The group header must show a compact available/total GPU summary"
+        )
+
+        let serverRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "服务器 ssh -p 2221 gpu@127.0.0.1")
+        ).firstMatch
+        XCTAssertTrue(serverRow.waitForExistence(timeout: 5), "Grouped servers must remain aligned table rows")
+        let rowValue = String(describing: serverRow.value)
+        XCTAssertFalse(rowValue.contains("/srv/serverpilot-fixtures"), "The 44 pt row must not carry the full workspace path")
+        XCTAssertFalse(rowValue.contains("CUDA 12"), "Environment notes must stay out of the 44 pt row")
+        XCTAssertFalse(rowValue.contains("共享权重盘"), "Data/weight notes must stay out of the 44 pt row")
+    }
+
+    func testUngroupedServersAppearLastWithActionableLabel() {
+        relaunch(fixture: "mixed-resources", section: "server-pool")
+
+        let groupHeader = app.descendants(matching: .any)["server-group-header"]
+        XCTAssertTrue(groupHeader.waitForExistence(timeout: 5), "The grouped GPU server must sit under a server-group header")
+        XCTAssertEqual(groupHeader.label, "训练服务器组")
+
+        let ungroupedHeader = app.descendants(matching: .any)["ungrouped-server-header"]
+        XCTAssertTrue(ungroupedHeader.waitForExistence(timeout: 2), "Ungrouped servers must have an actionable section header")
+        XCTAssertTrue(ungroupedHeader.staticTexts["未分组的服务器"].exists)
+        XCTAssertTrue(ungroupedHeader.buttons["管理服务器组"].exists)
+        XCTAssertLessThan(
+            groupHeader.frame.maxY,
+            ungroupedHeader.frame.minY,
+            "Ungrouped servers must remain last in the table"
+        )
+    }
+
+    func testServerGroupManagementSheetListsGroupsAndCreateAction() {
+        relaunch(fixture: "server-groups", section: "server-pool")
+        let manage = app.buttons["manage-server-groups"]
+        XCTAssertTrue(manage.waitForExistence(timeout: 5), "Server group management must be reachable from the Servers page")
+        manage.click()
+
+        XCTAssertTrue(app.staticTexts["服务器组"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["夹具实验室"].exists)
+        XCTAssertTrue(app.staticTexts["/srv/serverpilot-fixtures"].exists)
+        XCTAssertTrue(app.staticTexts["CUDA 12，共享权重盘已同步"].exists)
+        XCTAssertTrue(app.buttons["添加服务器组"].exists)
+        XCTAssertTrue(app.buttons["编辑服务器组 夹具实验室"].exists)
+
+        app.buttons["编辑服务器组 夹具实验室"].click()
+        XCTAssertTrue(app.staticTexts["显示名称"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["默认工作区路径"].exists)
+        XCTAssertTrue(app.staticTexts["环境说明"].exists)
+        XCTAssertTrue(app.staticTexts["说明"].exists)
+        XCTAssertTrue(
+            app.staticTexts.matching(NSPredicate(format: "label CONTAINS %@", "不会进入采集")).firstMatch.exists
+        )
+    }
+
+    func testServerDetailExposesGroupAndFullMetadata() {
+        relaunch(fixture: "server-groups", section: "server-pool")
+        let serverRow = app.descendants(matching: .any).matching(
+            NSPredicate(format: "label == %@", "服务器 ssh -p 2221 gpu@127.0.0.1")
+        ).firstMatch
+        XCTAssertTrue(serverRow.waitForExistence(timeout: 5))
+        serverRow.click()
+
+        XCTAssertTrue(app.staticTexts["服务器组"].waitForExistence(timeout: 2))
+        XCTAssertTrue(app.staticTexts["夹具实验室"].exists)
+        let groupMetadata = app.descendants(matching: .any)["server-group-metadata"]
+        XCTAssertTrue(groupMetadata.waitForExistence(timeout: 2), "Server detail must expose full group metadata")
+        XCTAssertTrue(app.staticTexts["组默认工作区"].exists)
+        XCTAssertTrue(app.staticTexts["环境说明"].exists)
+        XCTAssertTrue(app.staticTexts["CUDA 12，共享权重盘已同步"].exists)
+        XCTAssertTrue(app.staticTexts["桌面测试夹具的 GPU 服务器组"].exists)
+        XCTAssertTrue(app.staticTexts["继承组默认"].exists)
+
+        let claim = app.buttons["server-detail-claim"]
+        XCTAssertTrue(claim.exists)
+        XCTAssertTrue(
+            String(describing: claim.value).contains("服务器组") || claim.label == "申请 GPU",
+            "Grouped claim must remain labeled as applying for GPU"
+        )
+    }
+
+    func testClaimActionPrefersServerGroupSelection() {
+        relaunch(fixture: "server-groups", section: "server-pool")
+        let claim = app.buttons["申请 GPU"]
+        XCTAssertTrue(claim.waitForExistence(timeout: 5))
+        XCTAssertTrue(
+            String(describing: claim.value).contains("服务器组"),
+            "Grouped direct claims must tell the operator to select a server group first"
+        )
+        XCTAssertFalse(
+            String(describing: claim.value).contains("指定"),
+            "The primary claim action must not encourage pinning a specific server"
+        )
     }
 
     private func relaunch(fixture: String, section: String, viewport: String? = nil) {

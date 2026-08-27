@@ -4,6 +4,15 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+**Source now has first-class server groups and a task-declared GPU count; routine MCP picks a host inside a group instead of offering a menu of free cards.**
+
+- Routine MCP apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`. `gpu_count` is exact job parallelism from the launch script or config. The safe default is 1. It is never inferred from free capacity — a one-card job on an eight-card machine therefore takes one card.
+- `gpu_status` projects allocatable capacity group → server → SKU (`name` / `vram_mib` / `total_count` / `available_count`), not one row per free card.
+- A group carries a workspace plus environment and data/weight notes; a member inherits that workspace or overrides it. Environment notes are descriptive only — they are not executed or injected.
+- Grouped routine direct claims select a group, then one best-fit host inside it. Ungrouped hosts and plugin/scheduler requests still use `server_id`.
+
 ## 1.9.1 - 2026-08-27
 
 **ServerPilot 1.9.1 makes the new MCP entry panel work on an ordinary installation.**
