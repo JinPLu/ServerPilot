@@ -219,8 +219,8 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # gets smaller in exchange.  Prohibition wording is never shortened to fit
     # this bound.  It moved from 730 to 830 when a scheduler cluster became
     # reachable through a plugin: the caller has to be told that an unclaimed
-    # cluster reports headroom in scheduler_servers rather than gpus[], and
-    # that one lease never spans servers, or it reads both as "no capacity".
+    # cluster reports headroom inside its server_group rather than a parallel
+    # scheduler_servers bucket, or it reads the group as "no capacity".
     # It moved from 830 to 1600 when the instructions became English. The bound
     # stands in for what the text costs an agent every turn, and a character is
     # not the same size in the two languages: a Chinese character is close to
@@ -290,9 +290,8 @@ def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:
 
     mcp_instructions = _plain_policy_text(mcp.instructions).lower()
     assert "advanced" not in mcp_instructions
-    # scheduler_servers remains a routine gpu_status field when a cluster can
-    # be reached through a plugin. The retired scheduler tools must not
-    # reappear in policy or instructions.
+    # Delegated clusters now appear inside server_groups. The retired
+    # scheduler tools must not reappear in policy or instructions.
     for advanced_tool in (
         "gpu_scheduler_targets",
         "gpu_scheduler_access_status",

@@ -587,6 +587,43 @@ def test_server_script_parser_accepts_optional_scheduler_capacity() -> None:
     }
 
 
+def test_server_script_parser_accepts_optional_scheduler_block_fields() -> None:
+    snapshot = _server_script_snapshot(gpu_probe_available=False)
+    snapshot["gpu_probe_status"] = "cpu_only"
+    snapshot["scheduler"] = {
+        "free_gpu_count": 27,
+        "gpu_name": "NVIDIA A100-SXM4-80GB",
+        "largest_free_block": 8,
+        "vram_mib": 81920,
+        "max_gpus_per_lease": 8,
+        "cpu_cores_per_gpu": 8,
+        "memory_mib_per_gpu": 16384,
+        "note": "按需申请，不排队",
+    }
+    observation = parse_server_script_snapshot(
+        json.dumps(snapshot),
+        endpoint_id="slurm-login-p22",
+        observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+    )
+    assert observation.scheduler == snapshot["scheduler"]
+
+
+def test_server_script_parser_rejects_largest_free_block_above_free_count() -> None:
+    snapshot = _server_script_snapshot(gpu_probe_available=False)
+    snapshot["gpu_probe_status"] = "cpu_only"
+    snapshot["scheduler"] = {
+        "free_gpu_count": 3,
+        "gpu_name": "A100",
+        "largest_free_block": 8,
+    }
+    with pytest.raises(CollectionError):
+        parse_server_script_snapshot(
+            json.dumps(snapshot),
+            endpoint_id="slurm-login-p22",
+            observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
 def test_server_script_parser_rejects_unknown_scheduler_fields() -> None:
     snapshot = _server_script_snapshot(gpu_probe_available=False)
     snapshot["gpu_probe_status"] = "cpu_only"

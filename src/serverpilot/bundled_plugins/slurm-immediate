@@ -19,9 +19,12 @@ import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 2
+PLUGIN_INFO_SCHEMA_VERSION = 3
 CONFIG_NAME = "slurm-immediate.json"
 APPLY_TIME_LIMIT = "01:00:00"
 APPLY_IMMEDIATE_SECONDS = 25
+MAX_LEASE_SECONDS = 3600
+APPLY_MAX_SECONDS = APPLY_IMMEDIATE_SECONDS + 8
 SSH_APPLY_TIMEOUT_SECONDS = 50
 NO_CAPACITY_EXIT_CODE = 3
 JOB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
@@ -327,8 +330,9 @@ def cluster_free_gpu_count():
             text=True,
         )
     except (OSError, subprocess.CalledProcessError):
-        return 0
+        return 0, 0
     free = 0
+    largest = 0
     for line in raw.splitlines():
         if len(line) < 52:
             continue
@@ -340,8 +344,11 @@ def cluster_free_gpu_count():
             continue
         total = parse_gres_total(gres)
         used = parse_gres_used_indexes(gres_used, total)
-        free += max(0, total - len(used))
-    return free
+        node_free = max(0, total - len(used))
+        free += node_free
+        if node_free > largest:
+            largest = node_free
+    return free, largest
 
 
 def running_jobs():
@@ -482,6 +489,7 @@ def cmd_observe():
                 "process_started_at": "2020-01-01T00:00:00+00:00",
             })
             ordinal += 1
+    free_gpu_count, largest_free_block = cluster_free_gpu_count()
     print(json.dumps({
         "hostname": host["hostname"],
         "boot_id": host["boot_id"],
@@ -494,8 +502,13 @@ def cmd_observe():
         "gpus": gpus,
         "processes": processes,
         "scheduler": {
-            "free_gpu_count": cluster_free_gpu_count(),
+            "free_gpu_count": free_gpu_count,
             "gpu_name": GPU_NAME,
+            "largest_free_block": largest_free_block,
+            "vram_mib": VRAM_MIB,
+            "max_gpus_per_lease": GPUS_PER_NODE,
+            "cpu_cores_per_gpu": CPUS_PER_GPU,
+            "memory_mib_per_gpu": MEM_GIB_PER_GPU * 1024,
             "note": "按需申请，不排队",
         },
     }, separators=(",", ":")))
@@ -836,13 +849,19 @@ def cmd_info() -> int:
         {
             "plugin_id": "slurm-immediate",
             "display_name": "Slurm 立刻申请",
-            "schema_version": SCHEMA_VERSION,
+            "schema_version": PLUGIN_INFO_SCHEMA_VERSION,
             "capabilities": ["observe", "apply", "release"],
             "description": (
                 "只观测本用户自己的 Slurm GPU 作业；用 srun --immediate 立刻申请，"
                 "不能马上启动则失败、不排队。集群参数来自插件旁的 slurm-immediate.json；"
                 "未配置则失败。配置了 SSH 目标时，master 不在则失败，绝不认证。"
             ),
+            "limits": {
+                "lease_ends": "hard_kill_at_time_limit",
+                "max_lease_seconds": MAX_LEASE_SECONDS,
+                "apply_max_seconds": APPLY_MAX_SECONDS,
+                "queues": False,
+            },
         }
     )
 

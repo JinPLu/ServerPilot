@@ -10,6 +10,7 @@ import pytest
 from serverpilot.collector import CollectionError, SSHCollector, parse_server_script_snapshot
 from serverpilot.config import CollectorConfig, EndpointConfig, InventoryConfig
 from serverpilot.plugins import (
+    DIRECT_PROFILE_LIMITS,
     PLUGIN_ID_PATTERN,
     PluginError,
     add_plugin,
@@ -20,7 +21,9 @@ from serverpilot.plugins import (
     is_valid_plugin_id,
     list_observation_profiles,
     observe_plugin,
+    parse_plugin_limits,
     probe_plugin,
+    profile_limits,
     release_plugin,
     user_plugin_dir,
 )
@@ -39,20 +42,34 @@ def _write_plugin(directory: Path, plugin_id: str, script: str) -> Path:
     return path
 
 
+def _info_limits() -> dict[str, object]:
+    return {
+        "lease_ends": "on_release",
+        "max_lease_seconds": None,
+        "apply_max_seconds": None,
+        "queues": False,
+    }
+
+
 def _info_script(
     plugin_id: str = "sample-plug",
     capabilities: str = '["observe"]',
     extra: str = "",
+    limits: dict[str, object] | None = None,
+    schema_version: int = 3,
 ) -> str:
+    payload_limits = json.dumps(_info_limits() if limits is None else limits)
     return f"""#!/usr/bin/env python3
 import json, sys
 if sys.argv[1:] == ["info"]:
-    json.dump({{
+    payload = {{
         "plugin_id": "{plugin_id}",
         "display_name": "Sample",
-        "schema_version": 2,
+        "schema_version": {schema_version},
         "capabilities": {capabilities},
-    }}, sys.stdout)
+        "limits": json.loads({payload_limits!r}),
+    }}
+    json.dump(payload, sys.stdout)
     raise SystemExit(0)
 {extra}
 raise SystemExit("unexpected argv")
@@ -277,9 +294,18 @@ def test_bundled_slurm_immediate_declares_observe_apply_release() -> None:
     info = probe_plugin(path, source="builtin")
     assert info.plugin_id == "slurm-immediate"
     assert info.capabilities == ("observe", "apply", "release")
+    assert info.schema_version == 3
+    assert info.limits == {
+        "lease_ends": "hard_kill_at_time_limit",
+        "max_lease_seconds": 3600,
+        "apply_max_seconds": 33,
+        "queues": False,
+    }
     profiles = {item["id"] for item in list_observation_profiles()}
     assert "slurm-immediate" in profiles
     assert {"linux-nvidia", "linux-host", "server-script-v1"} <= profiles
+    assert profile_limits("linux-nvidia") == DIRECT_PROFILE_LIMITS
+    assert profile_limits("slurm-immediate") == info.limits
 
 
 def test_slurm_immediate_sinfo_parsers_and_job_name() -> None:
@@ -370,3 +396,50 @@ if sys.argv[1:] == ["observe"]:
     )
     assert [gpu.gpu_uuid for gpu in owned_obs.gpus] == ["GPU-real-1"]
     assert owned_obs.gpus[0].cuda_ordinal == 0
+
+
+def test_parse_plugin_limits_enforces_lease_ends_and_unknown_keys() -> None:
+    assert parse_plugin_limits(_info_limits()) == _info_limits()
+    hard = {
+        "lease_ends": "hard_kill_at_time_limit",
+        "max_lease_seconds": 3600,
+        "apply_max_seconds": 33,
+        "queues": False,
+    }
+    assert parse_plugin_limits(hard) == hard
+    with pytest.raises(PluginError, match="unknown keys"):
+        parse_plugin_limits({**_info_limits(), "extra": True})
+    with pytest.raises(PluginError, match="must be null"):
+        parse_plugin_limits({**_info_limits(), "max_lease_seconds": 60})
+    with pytest.raises(PluginError, match="positive integer"):
+        parse_plugin_limits(
+            {
+                "lease_ends": "hard_kill_at_time_limit",
+                "max_lease_seconds": None,
+                "apply_max_seconds": None,
+                "queues": False,
+            }
+        )
+    with pytest.raises(PluginError, match="must be false"):
+        parse_plugin_limits({**_info_limits(), "queues": True})
+
+
+def test_probe_plugin_rejects_schema_v2_and_missing_limits(tmp_path: Path) -> None:
+    path = _write_plugin(tmp_path, "sample-plug", _info_script(schema_version=2))
+    with pytest.raises(PluginError, match="schema_version must be 3"):
+        probe_plugin(path, source="local")
+    missing = """#!/usr/bin/env python3
+import json, sys
+if sys.argv[1:] == ["info"]:
+    json.dump({
+        "plugin_id": "sample-plug",
+        "display_name": "Sample",
+        "schema_version": 3,
+        "capabilities": ["observe"],
+    }, sys.stdout)
+    raise SystemExit(0)
+raise SystemExit("unexpected argv")
+"""
+    path = _write_plugin(tmp_path, "sample-plug", missing)
+    with pytest.raises(PluginError, match="limits"):
+        probe_plugin(path, source="local")

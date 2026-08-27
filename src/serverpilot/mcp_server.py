@@ -51,10 +51,10 @@ ROUTINE_GPU_COUNT_DESCRIPTION = (
 )
 
 MCP_INSTRUCTIONS = """Five tools cover GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=the task name, never the client UI title); gpu_release; gpu_add_server registers a host (observation_profile: linux-nvidia, linux-host, server-script-v1, or local plugin ID); gpu_update_server updates safe host metadata.
-Assess group workspace/environment/data-weight notes and capacity first; choose server_group_id for direct grouped hosts; the broker best-fits within that group. server_id is for scheduler/plugin or ungrouped compatibility and must not pin a grouped direct host.
+Assess group workspace/environment/data-weight notes, capacity and limits first; choose server_group_id for grouped hosts; the broker best-fits within that group. server_id is for ungrouped compatibility and must not pin a grouped host.
 Connection and working directory are projected once per server: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.
 cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
-gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count) and busy_gpus(task) with no telemetry; server_id narrows to one server. Unaccounted scheduler headroom appears in scheduler_servers, which you can gpu_apply against by server_id. gpu_count is exact job parallelism from launch script/config (devices, --nproc_per_node, num_processes, --gres), never server/free capacity.
+gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus(task) with no telemetry; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards. gpu_count is exact job parallelism from launch script/config (devices, --nproc_per_node, num_processes, --gres), never server/free capacity.
 Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Load on a free card is ServerPilot's own hold, stopped before allocation, and is not evidence the card is taken.
 no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. Claim only cards you will use: an idle card is reclaimed on its own.
 ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
@@ -584,7 +584,7 @@ def _routine_status_server(endpoint: Any, server_id: Any, gpus: list[dict[str, A
 def _routine_group_projection(record: dict[str, Any], servers: list[dict[str, Any]]) -> dict[str, Any]:
     """Project group metadata plus the nested per-server capacity summary."""
 
-    return {
+    payload = {
         "id": record.get("id"),
         "display_name": record.get("display_name"),
         "workspace_path": record.get("workspace_path"),
@@ -592,6 +592,61 @@ def _routine_group_projection(record: dict[str, Any], servers: list[dict[str, An
         "description": record.get("description"),
         "servers": servers,
     }
+    if "allocation" in record:
+        payload["allocation"] = record["allocation"]
+    if "limits" in record:
+        payload["limits"] = record["limits"]
+    if "largest_allocatable_block" in record:
+        payload["largest_allocatable_block"] = record["largest_allocatable_block"]
+    return payload
+
+
+def _routine_scheduler_capacity(endpoint: Any) -> dict[str, Any] | None:
+    if not isinstance(endpoint, dict):
+        return None
+    capacity = endpoint.get("scheduler_capacity")
+    if (
+        not isinstance(capacity, dict)
+        or not isinstance(capacity.get("free_gpu_count"), int)
+        or not isinstance(capacity.get("gpu_name"), str)
+        or not capacity["gpu_name"]
+    ):
+        return None
+    return capacity
+
+
+def _routine_delegated_server(endpoint: dict[str, Any], capacity: dict[str, Any]) -> dict[str, Any]:
+    """Project a delegated cluster login as one server with a scheduler SKU."""
+
+    sku: dict[str, Any] = {
+        "name": capacity["gpu_name"],
+        "available_count": capacity["free_gpu_count"],
+    }
+    vram = capacity.get("vram_mib")
+    if type(vram) is int and not isinstance(vram, bool) and vram >= 1:
+        sku["vram_mib"] = vram
+    workspace_path = endpoint.get("workspace_path")
+    server: dict[str, Any] = {
+        "server_id": endpoint.get("id"),
+        "workspace_path": workspace_path,
+        "workspace": _routine_workspace(workspace_path),
+        "gpus": [sku],
+    }
+    ssh = _routine_ssh(endpoint)
+    if ssh is not None:
+        server["ssh"] = ssh
+    return server
+
+
+def _routine_has_gpu_servers(
+    server_groups: list[dict[str, Any]], ungrouped_servers: list[dict[str, Any]]
+) -> bool:
+    if ungrouped_servers:
+        return True
+    return any(
+        isinstance(group, dict) and group.get("servers")
+        for group in server_groups
+    )
 
 
 def _routine_has_available_capacity(
@@ -692,22 +747,39 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
 
     grouped_servers: dict[str, list[dict[str, Any]]] = {}
     ungrouped_servers: list[dict[str, Any]] = []
-    for server_id, server_gpus in gpus_by_server.items():
-        endpoint = endpoint_by_id.get(server_id)
-        row = _routine_status_server(endpoint, server_id, server_gpus)
-        group_id = endpoint.get("server_group_id") if isinstance(endpoint, dict) else None
+    delegated_ids: set[Any] = set()
+
+    def place_server(row: dict[str, Any], group_id: Any) -> None:
         if isinstance(group_id, str) and group_id:
             grouped_servers.setdefault(group_id, []).append(row)
         else:
             ungrouped_servers.append(row)
 
+    for server_id, server_gpus in gpus_by_server.items():
+        endpoint = endpoint_by_id.get(server_id)
+        if _routine_scheduler_capacity(endpoint) is not None:
+            continue
+        row = _routine_status_server(endpoint, server_id, server_gpus)
+        group_id = endpoint.get("server_group_id") if isinstance(endpoint, dict) else None
+        place_server(row, group_id)
+
+    for endpoint in endpoints:
+        if not isinstance(endpoint, dict):
+            continue
+        capacity = _routine_scheduler_capacity(endpoint)
+        if capacity is None:
+            continue
+        delegated_ids.add(endpoint.get("id"))
+        place_server(
+            _routine_delegated_server(endpoint, capacity),
+            endpoint.get("server_group_id"),
+        )
+
     server_groups: list[dict[str, Any]] = []
     emitted_group_ids: set[str] = set()
     for record in catalog:
         group_id = record["id"]
-        servers = grouped_servers.get(group_id)
-        if not servers:
-            continue
+        servers = grouped_servers.get(group_id, [])
         server_groups.append(_routine_group_projection(record, servers))
         emitted_group_ids.add(group_id)
     for group_id, servers in grouped_servers.items():
@@ -725,26 +797,11 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
     if busy_gpus:
         result["busy_gpus"] = busy_gpus
-    scheduler_servers: list[dict[str, Any]] = []
     cpu_only_servers: list[dict[str, Any]] = []
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):
             continue
-        capacity = endpoint.get("scheduler_capacity")
-        if (
-            isinstance(capacity, dict)
-            and isinstance(capacity.get("free_gpu_count"), int)
-            and isinstance(capacity.get("gpu_name"), str)
-            and capacity["gpu_name"]
-        ):
-            scheduler_servers.append(
-                {
-                    "server_id": endpoint.get("id"),
-                    "free_gpu_count": capacity["free_gpu_count"],
-                    "gpu_name": capacity["gpu_name"],
-                    "note": "request on demand; nothing is queued",
-                }
-            )
+        if endpoint.get("id") in delegated_ids:
             continue
         if endpoint.get("resource_kind") != "cpu_only":
             continue
@@ -763,17 +820,15 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
                 ),
             }
         )
-    if scheduler_servers:
-        result["scheduler_servers"] = scheduler_servers
     if cpu_only_servers:
         result["cpu_only_servers"] = cpu_only_servers
     summary = data.get("summary") if isinstance(data, dict) else None
-    has_scheduler_free = any(
-        isinstance(item.get("free_gpu_count"), int) and item["free_gpu_count"] > 0
-        for item in scheduler_servers
-    )
-    if not _routine_has_available_capacity(server_groups, ungrouped_servers) and not has_scheduler_free:
-        if isinstance(summary, dict) and summary.get("total_gpus") == 0 and not scheduler_servers:
+    if not _routine_has_available_capacity(server_groups, ungrouped_servers):
+        if (
+            isinstance(summary, dict)
+            and summary.get("total_gpus") == 0
+            and not _routine_has_gpu_servers(server_groups, ungrouped_servers)
+        ):
             result["message"] = "no GPUs are registered"
         else:
             total_gpus = summary.get("total_gpus") if isinstance(summary, dict) else None
@@ -922,7 +977,7 @@ async def gpu_apply(
     task: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Claim GPUs on a single server now; pass server_group_id for grouped direct hosts. Returns SSH, the remote working directory and a CUDA selector. no_capacity and group_selection_required are answers and nothing is queued."""
+    """Claim GPUs on a single server now; pass server_group_id for grouped hosts. Returns SSH, the remote working directory and a CUDA selector. no_capacity and group_selection_required are answers and nothing is queued."""
 
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
         raise ValueError("gpu_count must be a positive integer")

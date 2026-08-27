@@ -846,16 +846,27 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # The demotion that left CPU and memory as bare numbers must not come back.
     assert "emphasised" not in dashboard_source
 
-    # Static hardware inventory, peak temperature, absolute VRAM and the remote
-    # workspace path are detail-sheet facts, not row facts.  They are asserted
-    # absent from the row and present in the sheet so the split cannot drift
-    # back by accident.
+    # Static hardware inventory, peak temperature and the remote workspace path
+    # are detail-sheet facts, not row facts.  They are asserted absent from the
+    # row and present in the sheet so the split cannot drift back by accident.
     detail_body = dashboard_source.split(
         "private struct ServerDetailSheet", maxsplit=1
     )[1].split("private struct ServerGPUMemoryStatusGrid", maxsplit=1)[0]
-    for fact in ("CPU 核数", "内存总量", "最高温度", "显存合计", "远端工作区"):
+    for fact in ("CPU 核数", "内存总量", "最高温度", "远端工作区"):
         assert fact in detail_body, fact
         assert fact not in row_body, fact
+    # The split runs both ways: a fact already carried by the row must not be
+    # restated in the sheet.  A host card that repeats the row's load and model
+    # makes the reader compare the same number against itself.
+    for repeated in ("CPU 负载", "内存占用率", "GPU 型号"):
+        assert repeated not in detail_body, repeated
+    # Absolute VRAM is not lost by leaving the host card; it belongs to the card
+    # of the GPU it describes, next to that GPU's ring and percentage.
+    gpu_grid_body = dashboard_source.split(
+        "private struct ServerGPUMemoryStatusGrid", maxsplit=1
+    )[1].split("private struct GPUDetailSheet", maxsplit=1)[0]
+    assert "memoryLabel" in gpu_grid_body
+    assert "显存合计" not in dashboard_source
     # A 44 pt row prints no second line, so everything it drops stays reachable
     # through the hover tooltip.
     assert "private var tooltip: String" in row_body

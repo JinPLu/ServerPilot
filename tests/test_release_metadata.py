@@ -45,25 +45,6 @@ def test_the_cli_can_report_its_version() -> None:
     assert result.stdout.strip() == __version__
 
 
-def test_the_pypi_long_description_has_no_relative_links() -> None:
-    """pyproject points `readme` at README.md, so PyPI renders it standalone.
-
-    A relative link is fine on GitHub and a 404 on the package page, which is
-    the first thing most new readers see.
-    """
-
-    import re
-
-    project = tomllib.loads((ROOT / "pyproject.toml").read_text(encoding="utf-8"))
-    readme = ROOT / project["project"]["readme"]
-    text = readme.read_text(encoding="utf-8")
-    targets = re.findall(r"\]\(([^)]+)\)", text) + re.findall(r'href="([^"]+)"', text)
-
-    relative = [target for target in targets if not target.startswith(("http://", "https://", "#"))]
-
-    assert relative == []
-
-
 def test_both_changelogs_describe_the_same_release_history() -> None:
     """The two files drifted once: English kept a 1.5.4 that was never tagged.
 

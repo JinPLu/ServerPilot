@@ -1645,21 +1645,16 @@ private struct ResourcesDashboard: View {
 
     @ViewBuilder
     private func groupSectionHeader(_ section: EndpointOverviewSection) -> some View {
-        let summary = endpointGPUAvailabilitySummary(section.endpoints, store: store)
         switch section.kind {
         case .group(let group):
             EndpointGroupSectionHeader(
                 title: group.displayName,
-                availableGPUs: summary.available,
-                totalGPUs: summary.total,
-                isSnapshotFresh: store.freshness == .fresh
+                summary: endpointGroupCapacitySummary(section.endpoints, group: group, store: store)
             )
         case .ungrouped:
             EndpointGroupSectionHeader(
                 title: "未分组的服务器",
-                availableGPUs: summary.available,
-                totalGPUs: summary.total,
-                isSnapshotFresh: store.freshness == .fresh,
+                summary: endpointGroupCapacitySummary(section.endpoints, group: nil, store: store),
                 actionTitle: "管理服务器组",
                 action: manageGroups
             )
@@ -1689,8 +1684,8 @@ private struct ResourcesDashboard: View {
         case .availableGPU:
             comparison = compare(availableGPUCount(lhs), availableGPUCount(rhs))
         case .gpuModel:
-            let left = endpointGPUModelSummary(store.snapshot.gpus(for: lhs))
-            let right = endpointGPUModelSummary(store.snapshot.gpus(for: rhs))
+            let left = endpointGPUModelSortLabel(lhs)
+            let right = endpointGPUModelSortLabel(rhs)
             comparison = left.localizedStandardCompare(right)
         case .gpuUtilization:
             let left = endpointOverviewGPUUtilizationFraction(endpoint: lhs, gpus: store.snapshot.gpus(for: lhs)) ?? -1
@@ -1732,9 +1727,19 @@ private struct ResourcesDashboard: View {
         return (endpointNeedsAttention(endpoint) ? 3 : 0) + gpuRank + pressureRank
     }
 
+    /// Sort key only.  Must not feed “N 张空闲” copy — pool `free_gpu_count`
+    /// is not one-apply capacity, and the page total uses `allocatableGPUCount`.
     private func availableGPUCount(_ endpoint: EndpointRecord) -> Int {
         guard store.freshness == .fresh, endpoint.monitorStatus == "ONLINE" else { return 0 }
-        return store.snapshot.gpus(for: endpoint).filter(\.isPubliclyAvailable).count
+        let local = store.snapshot.gpus(for: endpoint).filter(\.isPubliclyAvailable).count
+        if local > 0 { return local }
+        return endpoint.schedulerCapacity?.freeGPUCount ?? 0
+    }
+
+    private func endpointGPUModelSortLabel(_ endpoint: EndpointRecord) -> String {
+        let gpus = store.snapshot.gpus(for: endpoint)
+        if !gpus.isEmpty { return endpointGPUModelSummary(gpus) }
+        return endpoint.schedulerCapacity?.gpuName ?? "无 GPU"
     }
 
     private var allocatableGPUSummary: String {
@@ -1913,9 +1918,7 @@ private struct EndpointOverviewSection: Identifiable {
 /// A band that cuts the server table by group without turning rows into cards.
 private struct EndpointGroupSectionHeader: View {
     let title: String
-    let availableGPUs: Int
-    let totalGPUs: Int
-    let isSnapshotFresh: Bool
+    let summary: String
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
 
@@ -1949,12 +1952,6 @@ private struct EndpointGroupSectionHeader: View {
             combined: action == nil
         ))
         .accessibilityIdentifier(action == nil ? "server-group-header" : "ungrouped-server-header")
-    }
-
-    private var summary: String {
-        if totalGPUs == 0 { return "无 GPU" }
-        if !isSnapshotFresh { return "空闲未确认 · \(totalGPUs) 张" }
-        return "\(availableGPUs)/\(totalGPUs) 空闲"
     }
 }
 
@@ -2154,7 +2151,7 @@ private struct EndpointTableRow: View {
     private var gpuModelCell: some View {
         Text(gpuModelLine)
             .font(Typography.identity)
-            .foregroundStyle(gpus.isEmpty ? DesignTokens.mutedInk : DesignTokens.ink)
+            .foregroundStyle(gpus.isEmpty && endpoint.schedulerCapacity == nil ? DesignTokens.mutedInk : DesignTokens.ink)
             .lineLimit(1)
             .truncationMode(.tail)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -2216,19 +2213,29 @@ private struct EndpointTableRow: View {
         assignmentTitle == "—" ? "—" : "\(assignmentTitle) · \(assignmentDetail)"
     }
 
-    /// A GPU host names its hardware.  A CPU node names how much machine it is,
-    /// because "无 GPU" would only repeat the status word beside the command.
+    /// A GPU host names its hardware.  A scheduler endpoint names the pool
+    /// model, not a local inventory count.  A CPU node names how much machine
+    /// it is, because "无 GPU" would only repeat the status word beside the command.
     private var gpuModelLine: String {
-        guard !gpus.isEmpty else { return hostScale }
-        return "\(gpuModelSummary) × \(gpus.count)"
+        if !gpus.isEmpty { return "\(gpuModelSummary) × \(gpus.count)" }
+        if let name = endpoint.schedulerCapacity?.gpuName { return name }
+        return hostScale
     }
 
     private var reachable: Bool { endpoint.monitorStatus == "ONLINE" && isSnapshotFresh }
 
     /// First match wins.  A free card outranks a busy sibling: the contract's
     /// fault-isolation rule says one conflicted GPU must never hide the rest.
+    /// Scheduler-backed endpoints have no local GPU inventory; they are not
+    /// CPU nodes.
     private var statusWord: String {
         if !reachable { return "无响应" }
+        if isOnDemandEndpoint {
+            if let limit = onDemandApplyLimit {
+                return "按需申请 · 一次最多 \(limit) 卡"
+            }
+            return "按需申请"
+        }
         if gpus.isEmpty { return "CPU 节点" }
         if availableGPUCount > 0 { return "空闲" }
         if gpus.contains(where: { $0.state == "BUSY_UNMANAGED" || $0.state == "ORPHANED_BUSY" }) { return "未归属占用" }
@@ -2238,10 +2245,31 @@ private struct EndpointTableRow: View {
 
     private var statusColor: Color {
         if !reachable { return DesignTokens.danger }
+        if isOnDemandEndpoint {
+            return onDemandHasCapacity ? DesignTokens.success : DesignTokens.mutedInk
+        }
         if gpus.isEmpty { return DesignTokens.mutedInk }
         if availableGPUCount > 0 { return DesignTokens.success }
         if gpus.contains(where: { $0.state == "HELD" || $0.state == "LEASED_IDLE" || $0.state == "KEEPALIVE" }) { return DesignTokens.hold }
         return DesignTokens.warning
+    }
+
+    private var isOnDemandEndpoint: Bool {
+        endpoint.schedulerCapacity != nil || group?.allocation == .delegated
+    }
+
+    /// One-apply cap, never the pool's remaining total.
+    private var onDemandApplyLimit: Int? {
+        group?.largestAllocatableBlock
+            ?? group?.limits?.maxGPUsPerLease
+            ?? endpoint.schedulerCapacity?.maxGPUsPerLease
+            ?? endpoint.schedulerCapacity?.largestFreeBlock
+    }
+
+    private var onDemandHasCapacity: Bool {
+        if let free = endpoint.schedulerCapacity?.freeGPUCount { return free > 0 }
+        if let block = group?.largestAllocatableBlock { return block > 0 }
+        return false
     }
 
     private var primaryLease: LeaseRecord? {
@@ -2311,12 +2339,16 @@ private struct EndpointTableRow: View {
     }
 
     private var gpuCaption: String {
-        guard !gpus.isEmpty else { return "无 GPU" }
-        return isSnapshotFresh ? "\(availableGPUCount)/\(gpus.count) 空闲" : "状态未确认"
+        if !gpus.isEmpty {
+            return isSnapshotFresh ? "\(availableGPUCount)/\(gpus.count) 空闲" : "状态未确认"
+        }
+        return isOnDemandEndpoint ? "按需申请" : "无 GPU"
     }
 
     private var availabilityLabel: String {
-        guard !gpus.isEmpty else { return "—" }
+        if gpus.isEmpty {
+            return isOnDemandEndpoint ? "按需" : "—"
+        }
         guard isSnapshotFresh, endpoint.monitorStatus == "ONLINE" else { return "未确认" }
         return "\(availableGPUCount)/\(gpus.count)"
     }
@@ -2338,9 +2370,12 @@ private struct EndpointTableRow: View {
     }
 
     private var gpuModelDetail: String {
-        guard !gpus.isEmpty else { return "未检测到 GPU" }
-        let groups = Dictionary(grouping: gpus, by: \.name)
-        return groups.keys.sorted().map { "\($0) × \(groups[$0]?.count ?? 0)" }.joined(separator: "\n")
+        if !gpus.isEmpty {
+            let groups = Dictionary(grouping: gpus, by: \.name)
+            return groups.keys.sorted().map { "\($0) × \(groups[$0]?.count ?? 0)" }.joined(separator: "\n")
+        }
+        if let name = endpoint.schedulerCapacity?.gpuName { return name }
+        return "未检测到 GPU"
     }
 
     /// A CPU node's identity: how much machine it is.
@@ -2561,6 +2596,9 @@ private struct EndpointTelemetryHistoryChart: View, Equatable {
                         emptyMessage: prepared.gpuSeries.isEmpty ? "无 GPU" : "无显存历史数据"
                     )
                 }
+                if prepared.gpuUtilizationSeries.count > 1 {
+                    EndpointTelemetryGPULegend(series: prepared.gpuUtilizationSeries)
+                }
             }
         }
         .accessibilityElement(children: .contain)
@@ -2630,8 +2668,6 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
                     .frame(maxWidth: .infinity, minHeight: 178, alignment: .leading)
 #endif
             }
-
-            if series.count > 1 { legend }
         }
         .padding(7)
         .background(DesignTokens.glassSmoke, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
@@ -2651,20 +2687,6 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
             return "\(line.label)：最新 \(historyPercent(latest.value))，最低 \(historyPercent(minimum))，最高 \(historyPercent(maximum))"
         }
         return summaries.isEmpty ? emptyMessage : summaries.joined(separator: "；")
-    }
-
-    private var legend: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 7)], alignment: .leading, spacing: 4) {
-            ForEach(series) { line in
-                HStack(spacing: 4) {
-                    Capsule().fill(line.color).frame(width: 12, height: 3)
-                    Text(line.label).lineLimit(1)
-                }
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(DesignTokens.mutedInk)
-            }
-        }
-        .accessibilityHidden(true)
     }
 
 #if canImport(Charts)
@@ -2700,6 +2722,7 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
                 }
             }
         }
+        .chartLegend(.hidden)
         .chartOverlay { proxy in
             EndpointTelemetryChartHoverOverlay(proxy: proxy, items: hoverItems)
         }
@@ -2710,6 +2733,24 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
         .accessibilityHint("将指针悬停在图表上可检查最近的观测样本。")
     }
 #endif
+}
+
+private struct EndpointTelemetryGPULegend: View {
+    let series: [EndpointTelemetryLineSeries]
+
+    var body: some View {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 7)], alignment: .leading, spacing: 4) {
+            ForEach(series) { line in
+                HStack(spacing: 4) {
+                    Capsule().fill(line.color).frame(width: 12, height: 3)
+                    Text(line.label).lineLimit(1)
+                }
+                .font(.caption2.weight(.semibold))
+                .foregroundStyle(DesignTokens.mutedInk)
+            }
+        }
+        .accessibilityHidden(true)
+    }
 }
 
 #if canImport(Charts)
@@ -3156,6 +3197,32 @@ private func historyElapsedDescription(_ value: TimeInterval) -> String {
     return "\(seconds / 3_600) 小时 \((seconds % 3_600) / 60) 分钟"
 }
 
+private func durationLabel(_ seconds: Int) -> String {
+    if seconds <= 0 { return "\(seconds) 秒" }
+    if seconds % 3_600 == 0 {
+        let hours = seconds / 3_600
+        return hours == 1 ? "1 小时" : "\(hours) 小时"
+    }
+    if seconds % 60 == 0 {
+        let minutes = seconds / 60
+        return minutes == 1 ? "1 分钟" : "\(minutes) 分钟"
+    }
+    if seconds > 3_600 {
+        let hours = seconds / 3_600
+        let minutes = (seconds % 3_600) / 60
+        if minutes == 0 { return hours == 1 ? "1 小时" : "\(hours) 小时" }
+        return "\(hours) 小时 \(minutes) 分钟"
+    }
+    return "\(seconds) 秒"
+}
+
+private func memoryMiBLabel(_ mib: Int) -> String {
+    if mib > 0, mib % 1024 == 0 {
+        return "\(mib / 1024) GB"
+    }
+    return "\(mib) MiB"
+}
+
 @MainActor
 private func endpointGPUAvailabilitySummary(
     _ endpoints: [EndpointRecord],
@@ -3170,6 +3237,59 @@ private func endpointGPUAvailabilitySummary(
             .count
         : 0
     return (available, gpus.count)
+}
+
+/// Inventory counts stay on per-card rows.  Delegated capacity uses the
+/// one-apply cap, never pool `free_gpu_count`.  `limits` and
+/// `largest_allocatable_block` exist on every group; they are not a
+/// delegated signal — only `allocation == delegated` or a member
+/// `schedulerCapacity` is.
+@MainActor
+private func endpointGroupCapacitySummary(
+    _ endpoints: [EndpointRecord],
+    group: ServerGroupRecord?,
+    store: BrokerStore
+) -> String {
+    let inventory = endpointGPUAvailabilitySummary(endpoints, store: store)
+    let inventoryPart: String?
+    if inventory.total > 0 {
+        inventoryPart = store.freshness == .fresh
+            ? "\(inventory.available)/\(inventory.total) 空闲"
+            : "空闲未确认 · \(inventory.total) 张"
+    } else {
+        inventoryPart = nil
+    }
+    let hasOnDemand = group?.allocation == .delegated
+        || endpoints.contains { $0.schedulerCapacity != nil }
+    let onDemandPart: String?
+    if hasOnDemand {
+        if let limit = onDemandApplyLimit(group: group, endpoints: endpoints) {
+            onDemandPart = "按需申请 · 一次最多 \(limit) 卡"
+        } else {
+            onDemandPart = "按需申请"
+        }
+    } else {
+        onDemandPart = nil
+    }
+    switch (inventoryPart, onDemandPart) {
+    case (let inventory?, let onDemand?):
+        return "\(inventory) · \(onDemand)"
+    case (let inventory?, nil):
+        return inventory
+    case (nil, let onDemand?):
+        return onDemand
+    case (nil, nil):
+        return "无 GPU"
+    }
+}
+
+private func onDemandApplyLimit(group: ServerGroupRecord?, endpoints: [EndpointRecord]) -> Int? {
+    if let block = group?.largestAllocatableBlock { return block }
+    if let leaseMax = group?.limits?.maxGPUsPerLease { return leaseMax }
+    let endpointLimits = endpoints.compactMap { endpoint -> Int? in
+        endpoint.schedulerCapacity?.maxGPUsPerLease ?? endpoint.schedulerCapacity?.largestFreeBlock
+    }
+    return endpointLimits.max()
 }
 
 private func endpointGPUModelSummary(_ gpus: [GPURecord]) -> String {
@@ -3480,7 +3600,21 @@ private struct ServerDetailSheet: View {
     }
 
     private var canApplyForGPU: Bool {
-        availableGPUCount > 0 && store.allowsMutations && !isMutating
+        (availableGPUCount > 0 || schedulerApplyAvailable) && store.allowsMutations && !isMutating
+    }
+
+    private var schedulerApplyAvailable: Bool {
+        guard let endpoint, endpoint.monitorStatus == "ONLINE" else { return false }
+        if let free = endpoint.schedulerCapacity?.freeGPUCount { return free > 0 }
+        if let block = store.snapshot.serverGroup(for: endpoint)?.largestAllocatableBlock { return block > 0 }
+        return false
+    }
+
+    private var showsApplyAction: Bool {
+        if !gpus.isEmpty { return true }
+        guard let endpoint else { return false }
+        if endpoint.schedulerCapacity != nil { return true }
+        return store.snapshot.serverGroup(for: endpoint)?.allocation == .delegated
     }
 
     private var occupancyActionStarts: Bool {
@@ -3600,10 +3734,14 @@ private struct ServerDetailSheet: View {
                             InlineValidation(message: error)
                         }
 
-                        hostFactsCard(endpoint)
+                        if !hostFacts(endpoint).isEmpty {
+                            hostFactsCard(endpoint)
+                        }
 
                         if let group = store.snapshot.serverGroup(for: endpoint) {
                             groupMetadataCard(group, endpoint: endpoint)
+                        } else if shouldShowUngroupedMetadata(endpoint) {
+                            ungroupedMetadataCard(endpoint: endpoint)
                         }
 
                         if !gpus.isEmpty {
@@ -3657,20 +3795,15 @@ private struct ServerDetailSheet: View {
         return "\(endpoint.displayName)，服务器组 \(groupName)，\(endpoint.monitorLabel)，\(gpus.count) 块 GPU\(occupancy)"
     }
 
-    /// Everything the tile deliberately stopped showing.
-    ///
-    /// Core count, total RAM and GPU model are static inventory; peak
-    /// temperature and host CPU/RAM pressure qualify an allocation rather than
-    /// decide it; absolute VRAM restates the percentage the tile already
-    /// carries.  None of it is worth a band on every tile, and all of it is
-    /// worth one card here.
+    /// Facts the table row deliberately leaves out: core count, total RAM, and
+    /// peak temperature.  CPU load, memory pressure, and GPU model already
+    /// live on the row.  Workspace lives on the group card, or on the
+    /// ungrouped metadata card when there is no group.
     private func hostFactsCard(_ endpoint: EndpointRecord) -> some View {
         HomeCard(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 CardSectionLabel(text: "主机")
                 LazyVGrid(
-                    // 152 truncated the GPU model — the most consequential
-                    // fact in this card — to "NVIDIA A10...SXM4-80GB".
                     columns: [GridItem(.adaptive(minimum: 170, maximum: 280), spacing: 12)],
                     alignment: .leading,
                     spacing: 12
@@ -3699,36 +3832,14 @@ private struct ServerDetailSheet: View {
 
     private func hostFacts(_ endpoint: EndpointRecord) -> [(String, String)] {
         var facts: [(String, String)] = []
-        if !gpus.isEmpty {
-            facts.append(("GPU 型号", endpointGPUModelSummary(gpus)))
-        }
-        let used = gpus.compactMap(\.memoryUsedMiB)
-        let totalVRAM = gpus.reduce(0) { $0 + $1.totalVRAMMiB }
-        if !used.isEmpty, totalVRAM > 0 {
-            facts.append((
-                "显存合计",
-                String(
-                    format: "%.0f / %.0f GB",
-                    Double(used.reduce(0, +)) / 1024,
-                    Double(totalVRAM) / 1024
-                )
-            ))
-        }
         if let cores = endpoint.cpuCount {
             facts.append(("CPU 核数", "\(cores) 核"))
         }
         if let total = endpoint.memoryTotalMiB, total > 0 {
             facts.append(("内存总量", "\(Int((Double(total) / 1024).rounded())) GB"))
         }
-        facts.append(("CPU 负载", percentageLabel(endpointOverviewCPULoadFraction(endpoint: endpoint))))
-        facts.append(("内存占用率", percentageLabel(endpointOverviewMemoryFraction(endpoint: endpoint))))
         if let peak = gpus.compactMap(\.temperature).max() {
             facts.append(("最高温度", "\(peak) °C"))
-        }
-        facts.append(("服务器组", store.snapshot.serverGroup(for: endpoint)?.displayName ?? "未分组"))
-        facts.append(("远端工作区", endpoint.workspacePath ?? "未设置"))
-        if store.snapshot.serverGroup(for: endpoint) != nil {
-            facts.append(("路径来源", endpoint.inheritsGroupWorkspacePath ? "继承组默认" : "本机覆盖"))
         }
         return facts
     }
@@ -3738,6 +3849,9 @@ private struct ServerDetailSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 CardSectionLabel(text: "服务器组")
                 groupFact(label: "显示名称", value: group.displayName)
+                ForEach(applyConstraintFacts(group: group, endpoint: endpoint), id: \.0) { fact in
+                    groupFact(label: fact.0, value: fact.1, allowWrap: fact.0 == "申请说明")
+                }
                 groupFact(label: "组默认工作区", value: group.workspacePath)
                 let override = endpoint.workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
                 groupFact(
@@ -3754,6 +3868,92 @@ private struct ServerDetailSheet: View {
         }
         .accessibilityElement(children: .contain)
         .accessibilityIdentifier("server-group-metadata")
+    }
+
+    private func shouldShowUngroupedMetadata(_ endpoint: EndpointRecord) -> Bool {
+        !applyConstraintFacts(group: nil, endpoint: endpoint).isEmpty
+            || ungroupedWorkspacePath(endpoint) != nil
+    }
+
+    private func ungroupedWorkspacePath(_ endpoint: EndpointRecord) -> String? {
+        guard let path = endpoint.workspacePath?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !path.isEmpty else { return nil }
+        return path
+    }
+
+    private func ungroupedMetadataCard(endpoint: EndpointRecord) -> some View {
+        let constraints = applyConstraintFacts(group: nil, endpoint: endpoint)
+        let workspace = ungroupedWorkspacePath(endpoint)
+        return HomeCard(padding: 16) {
+            VStack(alignment: .leading, spacing: 12) {
+                CardSectionLabel(text: constraints.isEmpty ? "工作区" : "申请约束")
+                if let workspace {
+                    groupFact(label: "远端工作区", value: workspace)
+                }
+                ForEach(constraints, id: \.0) { fact in
+                    groupFact(label: fact.0, value: fact.1, allowWrap: fact.0 == "申请说明")
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+        .accessibilityIdentifier("ungrouped-endpoint-metadata")
+    }
+
+    private func applyConstraintFacts(group: ServerGroupRecord?, endpoint: EndpointRecord) -> [(String, String)] {
+        var facts: [(String, String)] = []
+        if let allocation = group?.allocation {
+            facts.append(("分配方式", allocation == .direct ? "本机直接分配" : "调度器按需申请"))
+        } else if endpoint.schedulerCapacity != nil {
+            facts.append(("分配方式", "调度器按需申请"))
+        }
+        let leaseEnds = group?.limits?.leaseEnds
+        let maxLeaseSeconds = group?.limits?.maxLeaseSeconds
+        if let leaseEnds {
+            switch leaseEnds {
+            case .onRelease:
+                facts.append(("租约结束", "直到显式释放"))
+                if let maxLeaseSeconds {
+                    facts.append(("租约时限", durationLabel(maxLeaseSeconds)))
+                }
+            case .hardKillAtTimeLimit:
+                if let maxLeaseSeconds {
+                    facts.append(("租约时限", "\(durationLabel(maxLeaseSeconds))，到期硬杀"))
+                } else {
+                    facts.append(("租约时限", "到期硬杀"))
+                }
+            }
+        } else if let maxLeaseSeconds {
+            facts.append(("租约时限", durationLabel(maxLeaseSeconds)))
+        }
+        let onceMax = group?.largestAllocatableBlock
+            ?? group?.limits?.maxGPUsPerLease
+            ?? endpoint.schedulerCapacity?.maxGPUsPerLease
+        if let onceMax {
+            facts.append(("一次最多", "\(onceMax) 卡"))
+        }
+        if let leaseMax = group?.limits?.maxGPUsPerLease,
+           let block = group?.largestAllocatableBlock,
+           leaseMax != block {
+            facts.append(("单次租约上限", "\(leaseMax) 卡"))
+        }
+        let cpuPerGPU = group?.limits?.cpuCoresPerGPU ?? endpoint.schedulerCapacity?.cpuCoresPerGPU
+        let memoryPerGPU = group?.limits?.memoryMiBPerGPU ?? endpoint.schedulerCapacity?.memoryMiBPerGPU
+        if let cpuPerGPU {
+            facts.append(("每卡 CPU", "\(cpuPerGPU) 核"))
+        }
+        if let memoryPerGPU {
+            facts.append(("每卡内存", memoryMiBLabel(memoryPerGPU)))
+        }
+        if let applyMax = group?.limits?.applyMaxSeconds {
+            facts.append(("申请等待上限", durationLabel(applyMax)))
+        }
+        if let queues = group?.limits?.queues {
+            facts.append(("排队", queues ? "会排队" : "不排队"))
+        }
+        if let note = endpoint.schedulerCapacity?.note {
+            facts.append(("申请说明", note))
+        }
+        return facts
     }
 
     private func groupFact(label: String, value: String, allowWrap: Bool = false) -> some View {
@@ -3805,7 +4005,7 @@ private struct ServerDetailSheet: View {
     @ViewBuilder
     private func primaryServerActions(_ endpoint: EndpointRecord) -> some View {
         HStack(spacing: 9) {
-            if !gpus.isEmpty {
+            if showsApplyAction {
                 Button {
                     dismiss()
                     DispatchQueue.main.async { claim() }
@@ -3858,8 +4058,8 @@ private struct ServerDetailSheet: View {
     private var unavailableReason: String {
         if !store.allowsMutations { return store.mutationUnavailableReason }
         if isMutating { return "服务器操作正在处理中。" }
-        if gpus.isEmpty { return "这台服务器没有 GPU。" }
-        if availableGPUCount == 0 { return "当前没有可申请的 GPU。" }
+        if !showsApplyAction { return "这台服务器没有 GPU。" }
+        if availableGPUCount == 0, !schedulerApplyAvailable { return "当前没有可申请的 GPU。" }
         return "当前不可申请。"
     }
 
@@ -3977,9 +4177,10 @@ private struct ServerGPUMemoryStatusGrid: View {
                 Spacer(minLength: 0)
             }
 
-            // A GPU card carries a 40pt ring, an index, a status pill, an
-            // absolute memory figure, a task line, and a percentage.  At the
-            // old 132pt minimum every one of those was clipped mid-word.
+            // A GPU card carries a 40pt ring, an index, a non-idle status
+            // pill, an absolute memory figure, a task line, and a percentage.
+            // Idle is already counted on the chips above.  At the old 132pt
+            // minimum every one of those was clipped mid-word.
             LazyVGrid(
                 columns: [GridItem(.adaptive(minimum: 258, maximum: 340), spacing: 10)],
                 alignment: .leading,
@@ -4035,14 +4236,16 @@ private struct GPUMemoryStatusRow: View {
                     Text("GPU \(gpu.index)")
                         .font(Typography.rowValue.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
-                    Label(status.label, systemImage: status.icon)
-                        .font(Typography.metricLabel.weight(.semibold))
-                        .foregroundStyle(status.tint)
-                        .lineLimit(1)
-                        .fixedSize()
-                        .padding(.horizontal, 7)
-                        .frame(height: 20)
-                        .background(status.tint.opacity(DesignTokens.Alpha.fill), in: Capsule())
+                    if status != .available {
+                        Label(status.label, systemImage: status.icon)
+                            .font(Typography.metricLabel.weight(.semibold))
+                            .foregroundStyle(status.tint)
+                            .lineLimit(1)
+                            .fixedSize()
+                            .padding(.horizontal, 7)
+                            .frame(height: 20)
+                            .background(status.tint.opacity(DesignTokens.Alpha.fill), in: Capsule())
+                    }
                 }
                 Text(gpu.memoryLabel)
                     .font(Typography.command)
@@ -4760,14 +4963,10 @@ private struct ClaimGroupPicker: View {
             LazyVStack(spacing: 7) {
                 ForEach(groups) { group in
                     let members = store.snapshot.endpoints(inGroup: group.id)
-                    let summary = endpointGPUAvailabilitySummary(members, store: store)
-                    let notes = group.environmentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
                     option(
                         id: group.id,
                         title: group.displayName,
-                        detail: notes.isEmpty
-                            ? "\(summary.available)/\(summary.total) 空闲 · \(group.workspacePath)"
-                            : "\(summary.available)/\(summary.total) 空闲 · \(group.workspacePath) · \(notes)"
+                        detail: claimGroupDetail(group, members: members)
                     )
                 }
                 if includeUngrouped {
@@ -4789,6 +4988,26 @@ private struct ClaimGroupPicker: View {
     private var selectedGroupDescription: String {
         if selection == ungroupedClaimToken { return "未分组的服务器" }
         return groups.first(where: { $0.id == selection })?.displayName ?? "未选择"
+    }
+
+    private func claimGroupDetail(_ group: ServerGroupRecord, members: [EndpointRecord]) -> String {
+        let notes = group.environmentNotes.trimmingCharacters(in: .whitespacesAndNewlines)
+        var parts = [endpointGroupCapacitySummary(members, group: group, store: store)]
+        if let ends = group.limits?.leaseEnds {
+            switch ends {
+            case .onRelease:
+                parts.append("直到显式释放")
+            case .hardKillAtTimeLimit:
+                if let seconds = group.limits?.maxLeaseSeconds {
+                    parts.append("\(durationLabel(seconds))，到期硬杀")
+                } else {
+                    parts.append("到期硬杀")
+                }
+            }
+        }
+        parts.append(group.workspacePath)
+        if !notes.isEmpty { parts.append(notes) }
+        return parts.joined(separator: " · ")
     }
 
     private func option(id: String, title: String, detail: String) -> some View {
@@ -5086,7 +5305,7 @@ private struct ManageServerGroupsSheet: View {
 
     private func groupRow(_ group: ServerGroupRecord) -> some View {
         let members = store.snapshot.endpoints(inGroup: group.id)
-        let summary = endpointGPUAvailabilitySummary(members, store: store)
+        let summary = endpointGroupCapacitySummary(members, group: group, store: store)
         return VStack(alignment: .leading, spacing: 8) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Text(group.displayName)
@@ -5094,7 +5313,7 @@ private struct ManageServerGroupsSheet: View {
                     .foregroundStyle(DesignTokens.ink)
                     .lineLimit(1)
                 Spacer(minLength: 8)
-                Text("\(summary.available)/\(summary.total) 空闲")
+                Text(summary)
                     .font(Typography.rowValue)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
@@ -5132,7 +5351,7 @@ private struct ManageServerGroupsSheet: View {
         )
         .accessibilityElement(children: .contain)
         .accessibilityLabel("服务器组 \(group.displayName)")
-        .accessibilityValue("\(summary.available)/\(summary.total) 空闲，路径 \(group.workspacePath)")
+        .accessibilityValue("\(summary)，路径 \(group.workspacePath)")
     }
 
     @ViewBuilder

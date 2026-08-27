@@ -630,6 +630,103 @@ class BrokerService:
             "updated_at": _iso(group.updated_at),
         }
 
+    def _project_server_group(
+        self,
+        group: ServerGroup,
+        *,
+        endpoints: list[Endpoint],
+        gpu_payloads: list[dict[str, Any]],
+        endpoint_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        payload = self._server_group_dict(group)
+        members = [endpoint for endpoint in endpoints if endpoint.server_group_id == group.id]
+        payload.update(
+            self._server_group_allocation_fields(
+                members,
+                gpu_payloads=gpu_payloads,
+                endpoint_payloads=endpoint_payloads,
+            )
+        )
+        return payload
+
+    @staticmethod
+    def _server_group_allocation_fields(
+        members: list[Endpoint],
+        *,
+        gpu_payloads: list[dict[str, Any]],
+        endpoint_payloads: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        from serverpilot.plugins import DIRECT_PROFILE_LIMITS, get_plugin, is_plugin_profile
+
+        delegated_endpoint: Endpoint | None = None
+        delegated_plugin = None
+        for endpoint in members:
+            if not is_plugin_profile(endpoint.observation_profile):
+                continue
+            plugin = get_plugin(endpoint.observation_profile)
+            if plugin is not None and "apply" in plugin.capabilities:
+                delegated_endpoint = endpoint
+                delegated_plugin = plugin
+                break
+        if delegated_plugin is not None and delegated_endpoint is not None:
+            limits = {
+                "max_gpus_per_lease": None,
+                "max_lease_seconds": delegated_plugin.limits.get("max_lease_seconds"),
+                "lease_ends": delegated_plugin.limits.get("lease_ends"),
+                "cpu_cores_per_gpu": None,
+                "memory_mib_per_gpu": None,
+                "apply_max_seconds": delegated_plugin.limits.get("apply_max_seconds"),
+                "queues": delegated_plugin.limits.get("queues", False),
+            }
+            capacity = next(
+                (
+                    item.get("scheduler_capacity")
+                    for item in endpoint_payloads
+                    if item.get("id") == delegated_endpoint.id
+                ),
+                None,
+            )
+            largest: int | None = None
+            if isinstance(capacity, dict):
+                for key in ("max_gpus_per_lease", "cpu_cores_per_gpu", "memory_mib_per_gpu"):
+                    if key in capacity:
+                        limits[key] = capacity[key]
+                largest = capacity.get("largest_free_block")
+                if largest is None:
+                    free = capacity.get("free_gpu_count")
+                    cap = limits.get("max_gpus_per_lease")
+                    if isinstance(free, int) and isinstance(cap, int):
+                        largest = min(free, cap)
+            return {
+                "allocation": "delegated",
+                "limits": limits,
+                "largest_allocatable_block": largest,
+            }
+
+        registered_by_host: dict[str, int] = defaultdict(int)
+        allocatable_by_host: dict[str, int] = defaultdict(int)
+        member_ids = {endpoint.id for endpoint in members}
+        for gpu in gpu_payloads:
+            endpoint_id = gpu.get("endpoint_id")
+            if endpoint_id not in member_ids or gpu.get("present") is False:
+                continue
+            registered_by_host[endpoint_id] += 1
+            if gpu.get("publicly_available") is True:
+                allocatable_by_host[endpoint_id] += 1
+        max_registered = max(registered_by_host.values(), default=0)
+        max_allocatable = max(allocatable_by_host.values(), default=0)
+        limits = {
+            **dict(DIRECT_PROFILE_LIMITS),
+            "max_gpus_per_lease": max_registered,
+            "cpu_cores_per_gpu": None,
+            "memory_mib_per_gpu": None,
+        }
+        return {
+            "allocation": "direct",
+            "limits": limits,
+            "largest_allocatable_block": max_allocatable,
+        }
+
     def _endpoint_effective_workspace(
         self,
         session: Session,
@@ -1129,13 +1226,34 @@ class BrokerService:
 
     @staticmethod
     def _encode_plugin_capacity(capacity: Mapping[str, Any]) -> str:
-        count = int(capacity["free_gpu_count"])
-        name = str(capacity["gpu_name"]).replace("|", "/")[:200]
-        return f"{count}|{name}"
+        payload: dict[str, Any] = {}
+        for key in (
+            "free_gpu_count",
+            "gpu_name",
+            "largest_free_block",
+            "vram_mib",
+            "max_gpus_per_lease",
+            "cpu_cores_per_gpu",
+            "memory_mib_per_gpu",
+            "note",
+        ):
+            if key in capacity:
+                payload[key] = capacity[key]
+        return json_dump(payload)
 
     @staticmethod
     def _decode_plugin_capacity(value: str | None) -> dict[str, Any] | None:
-        if not value or "|" not in value:
+        if not value:
+            return None
+        if value.startswith("{"):
+            try:
+                payload = json_load(value)
+            except ValueError:
+                return None
+            if not isinstance(payload, dict):
+                return None
+            return BrokerService._validated_plugin_capacity(payload)
+        if "|" not in value:
             return None
         count_text, name = value.split("|", 1)
         try:
@@ -1145,6 +1263,51 @@ class BrokerService:
         if count < 0 or not name:
             return None
         return {"free_gpu_count": count, "gpu_name": name}
+
+    @staticmethod
+    def _validated_plugin_capacity(payload: Mapping[str, Any]) -> dict[str, Any] | None:
+        allowed = {
+            "free_gpu_count",
+            "gpu_name",
+            "largest_free_block",
+            "vram_mib",
+            "max_gpus_per_lease",
+            "cpu_cores_per_gpu",
+            "memory_mib_per_gpu",
+            "note",
+        }
+        if set(payload) - allowed:
+            return None
+        count = payload.get("free_gpu_count")
+        name = payload.get("gpu_name")
+        if type(count) is not int or isinstance(count, bool) or count < 0:
+            return None
+        if not isinstance(name, str) or not name:
+            return None
+        result: dict[str, Any] = {"free_gpu_count": count, "gpu_name": name}
+        if "largest_free_block" in payload:
+            largest = payload["largest_free_block"]
+            if type(largest) is not int or isinstance(largest, bool) or largest < 0 or largest > count:
+                return None
+            result["largest_free_block"] = largest
+        for key, minimum in (
+            ("vram_mib", 1),
+            ("max_gpus_per_lease", 1),
+            ("cpu_cores_per_gpu", 1),
+            ("memory_mib_per_gpu", 1),
+        ):
+            if key not in payload:
+                continue
+            value = payload[key]
+            if type(value) is not int or isinstance(value, bool) or value < minimum:
+                return None
+            result[key] = value
+        if "note" in payload:
+            note = payload["note"]
+            if not isinstance(note, str) or not note:
+                return None
+            result["note"] = note
+        return result
 
     def _persist_plugin_capacity(
         self,
@@ -4101,7 +4264,15 @@ class BrokerService:
                 "resource_projection": resource_projection,
                 "data_age_seconds": round(max(ages), 1) if ages else None,
                 "endpoints": endpoint_payloads,
-                "server_groups": [self._server_group_dict(group) for group in groups.values()],
+                "server_groups": [
+                    self._project_server_group(
+                        group,
+                        endpoints=endpoints,
+                        gpu_payloads=all_gpu_payloads,
+                        endpoint_payloads=endpoint_payloads,
+                    )
+                    for group in groups.values()
+                ],
                 "gpus": gpu_payloads,
                 "absent_gpu_ids": absent_gpu_ids,
                 "leases": visible_lease_payloads,

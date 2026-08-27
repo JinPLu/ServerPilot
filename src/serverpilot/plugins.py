@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import sys
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
 
@@ -29,11 +29,30 @@ PLUGIN_INFO_TIMEOUT_SECONDS = 8
 PLUGIN_OBSERVE_TIMEOUT_SECONDS = 45
 PLUGIN_MUTATION_TIMEOUT_SECONDS = 60
 MAX_PLUGIN_OUTPUT_BYTES = MAX_RAW_SSH_STDOUT_BYTES
-PLUGIN_SCHEMA_VERSION = 2
+PLUGIN_SCHEMA_VERSION = 3
 # An `apply` that found nothing free right now exits with this instead of the
 # generic failure code, so the outcome is machine-readable rather than inferred
 # from whatever the scheduler happened to print.
 PLUGIN_NO_CAPACITY_EXIT_CODE = 3
+
+# How a lease on this profile ends.  A cluster that kills the job at a time
+# limit and a cluster that holds it until release are not interchangeable for
+# the same experiment, so the difference is declared rather than inferred.
+PROFILE_LEASE_ENDS = frozenset({"on_release", "hard_kill_at_time_limit"})
+PROFILE_LIMIT_KEYS = frozenset(
+    {"lease_ends", "max_lease_seconds", "apply_max_seconds", "queues"}
+)
+MAX_PROFILE_LEASE_SECONDS = 30 * 24 * 3600
+MAX_PROFILE_APPLY_SECONDS = 3600
+
+# ServerPilot's own per-card allocator: it holds the cards until the caller
+# releases them, it answers immediately, and it never queues.
+DIRECT_PROFILE_LIMITS: dict[str, Any] = {
+    "lease_ends": "on_release",
+    "max_lease_seconds": None,
+    "apply_max_seconds": None,
+    "queues": False,
+}
 
 BUILTIN_OBSERVATION_PROFILES: tuple[str, ...] = (
     "linux-nvidia",
@@ -48,6 +67,7 @@ BUILTIN_PROFILE_CATALOG: tuple[dict[str, Any], ...] = (
         "description": "使用内置、只读的 Linux NVIDIA 观测配置。",
         "source": "builtin",
         "capabilities": ["observe"],
+        "limits": dict(DIRECT_PROFILE_LIMITS),
     },
     {
         "id": "linux-host",
@@ -55,6 +75,7 @@ BUILTIN_PROFILE_CATALOG: tuple[dict[str, Any], ...] = (
         "description": "使用内置、只读的 Linux 主机容量观测配置。",
         "source": "builtin",
         "capabilities": ["observe"],
+        "limits": dict(DIRECT_PROFILE_LIMITS),
     },
     {
         "id": "server-script-v1",
@@ -62,6 +83,7 @@ BUILTIN_PROFILE_CATALOG: tuple[dict[str, Any], ...] = (
         "description": "使用远端密封只读采集脚本；不能输入命令或容器参数。",
         "source": "builtin",
         "capabilities": ["observe"],
+        "limits": dict(DIRECT_PROFILE_LIMITS),
     },
 )
 
@@ -90,6 +112,7 @@ class PluginInfo:
     path: Path
     source: PluginSource
     description: str = ""
+    limits: dict[str, Any] = field(default_factory=lambda: dict(DIRECT_PROFILE_LIMITS))
 
 
 def bundled_plugin_dir() -> Path:
@@ -162,6 +185,7 @@ def list_observation_profiles(
                 or f"本地插件 {plugin.plugin_id}，来源 {plugin.source}。",
                 "source": plugin.source,
                 "capabilities": list(plugin.capabilities),
+                "limits": dict(plugin.limits),
             }
         )
     return profiles
@@ -208,6 +232,66 @@ def require_plugin(plugin_id: str) -> PluginInfo:
     return plugin
 
 
+def profile_limits(
+    profile_id: str,
+    *,
+    home: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
+    """Return the declared lease/apply limits for a builtin or plugin profile."""
+
+    if profile_id in BUILTIN_OBSERVATION_PROFILES:
+        return dict(DIRECT_PROFILE_LIMITS)
+    plugin = get_plugin(profile_id, home=home, environment=environment)
+    if plugin is None:
+        raise PluginError(f"unknown observation profile: {profile_id}")
+    return dict(plugin.limits)
+
+
+def parse_plugin_limits(value: Any) -> dict[str, Any]:
+    """Validate schema v3 ``info.limits``. Unknown keys and inconsistent pairs fail."""
+
+    if not isinstance(value, dict):
+        raise PluginError("plugin info limits must be an object")
+    extra = sorted(set(value) - PROFILE_LIMIT_KEYS)
+    if extra:
+        raise PluginError(f"plugin info limits has unknown keys: {extra}")
+    missing = sorted(PROFILE_LIMIT_KEYS - set(value))
+    if missing:
+        raise PluginError(f"plugin info limits is missing keys: {missing}")
+    lease_ends = value["lease_ends"]
+    if lease_ends not in PROFILE_LEASE_ENDS:
+        raise PluginError("plugin info limits.lease_ends is invalid")
+    max_lease_seconds = value["max_lease_seconds"]
+    apply_max_seconds = value["apply_max_seconds"]
+    queues = value["queues"]
+    if queues is not False:
+        raise PluginError("plugin info limits.queues must be false")
+    if lease_ends == "hard_kill_at_time_limit":
+        if (
+            type(max_lease_seconds) is not int
+            or isinstance(max_lease_seconds, bool)
+            or max_lease_seconds < 1
+            or max_lease_seconds > MAX_PROFILE_LEASE_SECONDS
+        ):
+            raise PluginError("plugin info limits.max_lease_seconds must be a positive integer")
+    elif max_lease_seconds is not None:
+        raise PluginError("plugin info limits.max_lease_seconds must be null")
+    if apply_max_seconds is not None and (
+        type(apply_max_seconds) is not int
+        or isinstance(apply_max_seconds, bool)
+        or apply_max_seconds < 1
+        or apply_max_seconds > MAX_PROFILE_APPLY_SECONDS
+    ):
+        raise PluginError("plugin info limits.apply_max_seconds must be a positive integer")
+    return {
+        "lease_ends": lease_ends,
+        "max_lease_seconds": max_lease_seconds,
+        "apply_max_seconds": apply_max_seconds,
+        "queues": False,
+    }
+
+
 def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
     raw = invoke_plugin(path, ["info"], timeout_seconds=PLUGIN_INFO_TIMEOUT_SECONDS)
     payload = _strict_object(raw, label="plugin info")
@@ -223,7 +307,7 @@ def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
     if not isinstance(display_name, str) or not display_name.strip() or len(display_name) > 120:
         raise PluginError("plugin info display_name is invalid")
     if schema_version != PLUGIN_SCHEMA_VERSION:
-        raise PluginError("plugin info schema_version must be 2")
+        raise PluginError(f"plugin info schema_version must be {PLUGIN_SCHEMA_VERSION}")
     if not isinstance(capabilities, list) or not capabilities:
         raise PluginError("plugin info capabilities must be a non-empty list")
     if any(item not in PLUGIN_CAPABILITIES or not isinstance(item, str) for item in capabilities):
@@ -234,6 +318,7 @@ def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
         description = ""
     if not isinstance(description, str) or len(description) > 500:
         raise PluginError("plugin info description is invalid")
+    limits = parse_plugin_limits(payload.get("limits"))
     return PluginInfo(
         plugin_id=plugin_id,
         display_name=display_name.strip(),
@@ -242,6 +327,7 @@ def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
         path=path.resolve(),
         source=source,
         description=description.strip(),
+        limits=limits,
     )
 
 

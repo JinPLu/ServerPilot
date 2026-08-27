@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """Assert a built wheel carries every asset the installed package needs at runtime.
 
-The package reaches users three ways (PyPI, the macOS app, the Windows archive)
-and each one has already shipped a wheel that imported fine and then failed on
-first use: a missing Alembic script directory takes the database down, and a
-bundled plugin that arrives without its executable bit is silently invisible to
-discovery rather than failing loudly. Both release workflows call this so the
-two cannot drift apart.
+The package reaches users as a Git install, the macOS app, and the Windows
+archive, and each one has already shipped a wheel that imported fine and then
+failed on first use: a missing Alembic script directory takes the database
+down, and a bundled plugin that arrives without its executable bit is silently
+invisible to discovery rather than failing loudly.
 """
 
 from __future__ import annotations

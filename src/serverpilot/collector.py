@@ -475,7 +475,14 @@ def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
         value,
         label="scheduler",
         keys={"free_gpu_count", "gpu_name"},
-        optional_keys={"note"},
+        optional_keys={
+            "note",
+            "largest_free_block",
+            "vram_mib",
+            "max_gpus_per_lease",
+            "cpu_cores_per_gpu",
+            "memory_mib_per_gpu",
+        },
     )
     free_gpu_count = _integer(
         scheduler["free_gpu_count"], label="scheduler.free_gpu_count", minimum=0, maximum=100_000
@@ -484,6 +491,50 @@ def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
     note = _text(scheduler.get("note"), label="scheduler.note", maximum=200, nullable=True)
     assert free_gpu_count is not None and gpu_name is not None
     payload: dict[str, Any] = {"free_gpu_count": free_gpu_count, "gpu_name": gpu_name}
+    if "largest_free_block" in scheduler:
+        largest_free_block = _integer(
+            scheduler["largest_free_block"],
+            label="scheduler.largest_free_block",
+            minimum=0,
+            maximum=100_000,
+        )
+        assert largest_free_block is not None
+        if largest_free_block > free_gpu_count:
+            raise CollectionError("server collector scheduler.largest_free_block exceeds free_gpu_count")
+        payload["largest_free_block"] = largest_free_block
+    if "vram_mib" in scheduler:
+        vram_mib = _integer(
+            scheduler["vram_mib"], label="scheduler.vram_mib", minimum=1, maximum=10_000_000
+        )
+        assert vram_mib is not None
+        payload["vram_mib"] = vram_mib
+    if "max_gpus_per_lease" in scheduler:
+        max_gpus_per_lease = _integer(
+            scheduler["max_gpus_per_lease"],
+            label="scheduler.max_gpus_per_lease",
+            minimum=1,
+            maximum=100_000,
+        )
+        assert max_gpus_per_lease is not None
+        payload["max_gpus_per_lease"] = max_gpus_per_lease
+    if "cpu_cores_per_gpu" in scheduler:
+        cpu_cores_per_gpu = _integer(
+            scheduler["cpu_cores_per_gpu"],
+            label="scheduler.cpu_cores_per_gpu",
+            minimum=1,
+            maximum=10_000,
+        )
+        assert cpu_cores_per_gpu is not None
+        payload["cpu_cores_per_gpu"] = cpu_cores_per_gpu
+    if "memory_mib_per_gpu" in scheduler:
+        memory_mib_per_gpu = _integer(
+            scheduler["memory_mib_per_gpu"],
+            label="scheduler.memory_mib_per_gpu",
+            minimum=1,
+            maximum=10_000_000,
+        )
+        assert memory_mib_per_gpu is not None
+        payload["memory_mib_per_gpu"] = memory_mib_per_gpu
     if note is not None:
         payload["note"] = note
     return payload

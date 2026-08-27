@@ -460,6 +460,18 @@ def test_no_cross_group_allocation_and_within_group_best_fit(tmp_path: Path) -> 
     )
     assert whole["lease"]["resources"][0]["endpoint"]["id"] == "large-a"
     assert len(whole["lease"]["gpu_ids"]) == 8
+    snapshot = service.snapshot(admin)
+    small = next(item for item in snapshot["data"]["server_groups"] if item["id"] == "group-small")
+    large = next(item for item in snapshot["data"]["server_groups"] if item["id"] == "group-large")
+    assert small["allocation"] == "direct"
+    assert small["limits"]["lease_ends"] == "on_release"
+    assert small["limits"]["max_lease_seconds"] is None
+    assert small["limits"]["queues"] is False
+    assert small["limits"]["max_gpus_per_lease"] == 2
+    assert small["largest_allocatable_block"] == 2
+    assert large["allocation"] == "direct"
+    assert large["limits"]["max_gpus_per_lease"] == 8
+    assert large["largest_allocatable_block"] == 0
 
 
 def test_one_card_claim_on_eight_card_grouped_host_leaves_remaining_capacity(

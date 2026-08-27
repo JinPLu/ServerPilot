@@ -491,7 +491,7 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
     }
 
 
-def test_routine_status_projects_scheduler_servers_without_no_capacity() -> None:
+def test_routine_status_projects_ungrouped_delegated_server_without_no_capacity() -> None:
     status = mcp_server._routine_gpu_status(
         {
             "data": {
@@ -499,10 +499,15 @@ def test_routine_status_projects_scheduler_servers_without_no_capacity() -> None
                 "endpoints": [
                     {
                         "id": "slurm-login-p22",
+                        "workspace_path": "/home/alice/work",
+                        "host": "login.example.test",
+                        "port": 22,
+                        "ssh_user": "alice",
                         "resource_kind": "cpu_only",
                         "scheduler_capacity": {
                             "free_gpu_count": 30,
                             "gpu_name": "NVIDIA A100-SXM4-80GB",
+                            "vram_mib": 81920,
                         },
                     }
                 ],
@@ -513,12 +518,24 @@ def test_routine_status_projects_scheduler_servers_without_no_capacity() -> None
     )
 
     assert status == {
-        "scheduler_servers": [
+        "ungrouped_servers": [
             {
                 "server_id": "slurm-login-p22",
-                "free_gpu_count": 30,
-                "gpu_name": "NVIDIA A100-SXM4-80GB",
-                "note": "request on demand; nothing is queued",
+                "workspace_path": "/home/alice/work",
+                "workspace": {
+                    "path": "/home/alice/work",
+                    "kind": "working_directory",
+                    "use_as_cwd": True,
+                    "code_location": "not_provided",
+                },
+                "ssh": {"host": "login.example.test", "port": 22, "user": "alice"},
+                "gpus": [
+                    {
+                        "name": "NVIDIA A100-SXM4-80GB",
+                        "vram_mib": 81920,
+                        "available_count": 30,
+                    }
+                ],
             }
         ],
     }

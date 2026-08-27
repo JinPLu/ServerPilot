@@ -313,7 +313,16 @@ def test_blank_server_group_id_is_rejected_before_contacting_broker(
         tools.gpu_apply(server_group_id="   ", task="训练")
 
 
-def test_scheduler_and_cpu_only_projections_stay_outside_server_groups() -> None:
+def test_delegated_cluster_appears_inside_its_server_group() -> None:
+    limits = {
+        "max_gpus_per_lease": 8,
+        "max_lease_seconds": 3600,
+        "lease_ends": "hard_kill_at_time_limit",
+        "cpu_cores_per_gpu": 8,
+        "memory_mib_per_gpu": 16384,
+        "apply_max_seconds": 33,
+        "queues": False,
+    }
     status = mcp_server._routine_gpu_status(
         {
             "data": {
@@ -321,20 +330,29 @@ def test_scheduler_and_cpu_only_projections_stay_outside_server_groups() -> None
                 "server_groups": [
                     {
                         "id": "group-a",
-                        "display_name": "Unused",
+                        "display_name": "瀚海 22",
                         "workspace_path": "/srv/shared",
                         "environment_notes": None,
                         "description": None,
+                        "allocation": "delegated",
+                        "limits": limits,
+                        "largest_allocatable_block": 8,
                     }
                 ],
                 "endpoints": [
                     {
                         "id": "slurm-login-p22",
                         "server_group_id": "group-a",
+                        "workspace_path": "/srv/shared",
+                        "host": "login.example.test",
+                        "port": 22,
+                        "ssh_user": "alice",
                         "resource_kind": "cpu_only",
                         "scheduler_capacity": {
-                            "free_gpu_count": 30,
+                            "free_gpu_count": 27,
                             "gpu_name": "NVIDIA A100-SXM4-80GB",
+                            "vram_mib": 81920,
+                            "largest_free_block": 8,
                         },
                     },
                     {
@@ -353,15 +371,39 @@ def test_scheduler_and_cpu_only_projections_stay_outside_server_groups() -> None
         lease_id=None,
     )
 
-    assert "server_groups" not in status
+    assert "scheduler_servers" not in status
     assert "ungrouped_servers" not in status
     assert "gpus" not in status
-    assert status["scheduler_servers"] == [
+    assert status["server_groups"] == [
         {
-            "server_id": "slurm-login-p22",
-            "free_gpu_count": 30,
-            "gpu_name": "NVIDIA A100-SXM4-80GB",
-            "note": "request on demand; nothing is queued",
+            "id": "group-a",
+            "display_name": "瀚海 22",
+            "workspace_path": "/srv/shared",
+            "environment_notes": None,
+            "description": None,
+            "allocation": "delegated",
+            "limits": limits,
+            "largest_allocatable_block": 8,
+            "servers": [
+                {
+                    "server_id": "slurm-login-p22",
+                    "workspace_path": "/srv/shared",
+                    "workspace": {
+                        "path": "/srv/shared",
+                        "kind": "working_directory",
+                        "use_as_cwd": True,
+                        "code_location": "not_provided",
+                    },
+                    "ssh": {"host": "login.example.test", "port": 22, "user": "alice"},
+                    "gpus": [
+                        {
+                            "name": "NVIDIA A100-SXM4-80GB",
+                            "vram_mib": 81920,
+                            "available_count": 27,
+                        }
+                    ],
+                }
+            ],
         }
     ]
     assert status["cpu_only_servers"] == [

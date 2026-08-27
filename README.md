@@ -145,8 +145,9 @@ to exist there first. On each Linux GPU server you administer, install the same
 version of this package for the user you will SSH in as:
 
 ```bash
-# ServerPilot is not on PyPI; install the same tag you run locally.
-uv tool install --force "git+https://github.com/JinPLu/ServerPilot.git@v1.8.0"
+# ServerPilot is not on PyPI. Install the version your control plane runs;
+# `serverpilot --version` prints it there.
+uv tool install --force "git+https://github.com/JinPLu/ServerPilot.git@v<version>"
 serverpilot-collect --schema-version 2       # must print JSON
 ```
 

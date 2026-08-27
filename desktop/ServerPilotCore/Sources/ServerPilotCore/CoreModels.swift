@@ -363,12 +363,100 @@ public struct HostTelemetryRecentAverage: Equatable, Sendable {
     }
 }
 
+public enum ServerGroupAllocation: String, Equatable, Sendable {
+    case direct
+    case delegated
+}
+
+public enum ServerGroupLeaseEnds: String, Equatable, Sendable {
+    case onRelease = "on_release"
+    case hardKillAtTimeLimit = "hard_kill_at_time_limit"
+}
+
+public struct ServerGroupLimits: Equatable, Sendable {
+    public let maxGPUsPerLease: Int?
+    public let maxLeaseSeconds: Int?
+    public let leaseEnds: ServerGroupLeaseEnds?
+    public let cpuCoresPerGPU: Int?
+    public let memoryMiBPerGPU: Int?
+    public let applyMaxSeconds: Int?
+    public let queues: Bool?
+
+    public init?(raw: [String: Any]) {
+        if raw["lease_ends"] == nil || raw["lease_ends"] is NSNull {
+            leaseEnds = nil
+        } else if let value = raw.string("lease_ends"),
+                  let parsed = ServerGroupLeaseEnds(rawValue: value) {
+            leaseEnds = parsed
+        } else {
+            return nil
+        }
+        maxGPUsPerLease = raw.optionalInt("max_gpus_per_lease")
+        maxLeaseSeconds = raw.optionalInt("max_lease_seconds")
+        cpuCoresPerGPU = raw.optionalInt("cpu_cores_per_gpu")
+        memoryMiBPerGPU = raw.optionalInt("memory_mib_per_gpu")
+        applyMaxSeconds = raw.optionalInt("apply_max_seconds")
+        queues = raw.optionalBool("queues")
+    }
+
+    public init(
+        maxGPUsPerLease: Int? = nil,
+        maxLeaseSeconds: Int? = nil,
+        leaseEnds: ServerGroupLeaseEnds? = nil,
+        cpuCoresPerGPU: Int? = nil,
+        memoryMiBPerGPU: Int? = nil,
+        applyMaxSeconds: Int? = nil,
+        queues: Bool? = nil
+    ) {
+        self.maxGPUsPerLease = maxGPUsPerLease
+        self.maxLeaseSeconds = maxLeaseSeconds
+        self.leaseEnds = leaseEnds
+        self.cpuCoresPerGPU = cpuCoresPerGPU
+        self.memoryMiBPerGPU = memoryMiBPerGPU
+        self.applyMaxSeconds = applyMaxSeconds
+        self.queues = queues
+    }
+}
+
+public struct SchedulerCapacity: Equatable, Sendable {
+    public let freeGPUCount: Int
+    public let gpuName: String
+    public let largestFreeBlock: Int?
+    public let vramMiB: Int?
+    public let maxGPUsPerLease: Int?
+    public let cpuCoresPerGPU: Int?
+    public let memoryMiBPerGPU: Int?
+    public let note: String?
+
+    public init?(raw: [String: Any]) {
+        guard
+            let freeGPUCount = raw.optionalInt("free_gpu_count"),
+            let gpuName = raw.string("gpu_name")?.trimmingCharacters(in: .whitespacesAndNewlines),
+            !gpuName.isEmpty
+        else {
+            return nil
+        }
+        self.freeGPUCount = freeGPUCount
+        self.gpuName = gpuName
+        largestFreeBlock = raw.optionalInt("largest_free_block")
+        vramMiB = raw.optionalInt("vram_mib")
+        maxGPUsPerLease = raw.optionalInt("max_gpus_per_lease")
+        cpuCoresPerGPU = raw.optionalInt("cpu_cores_per_gpu")
+        memoryMiBPerGPU = raw.optionalInt("memory_mib_per_gpu")
+        let note = raw.string("note")?.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.note = (note?.isEmpty == false) ? note : nil
+    }
+}
+
 public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
     public let id: String
     public let displayName: String
     public let workspacePath: String
     public let environmentNotes: String
     public let description: String
+    public let allocation: ServerGroupAllocation?
+    public let limits: ServerGroupLimits?
+    public let largestAllocatableBlock: Int?
 
     public init?(raw: [String: Any]) {
         guard let id = raw.string("id"), !id.isEmpty else { return nil }
@@ -384,6 +472,29 @@ public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
         }
         let workspacePath = raw.string("workspace_path") ?? ""
         guard CoreFieldValidation.isAbsoluteWorkspacePath(workspacePath) else { return nil }
+        if raw["allocation"] == nil || raw["allocation"] is NSNull {
+            allocation = nil
+        } else if let value = raw.string("allocation"),
+                  let parsed = ServerGroupAllocation(rawValue: value) {
+            allocation = parsed
+        } else {
+            return nil
+        }
+        if raw["limits"] == nil || raw["limits"] is NSNull {
+            limits = nil
+        } else if let payload = raw["limits"] as? [String: Any] {
+            guard let parsed = ServerGroupLimits(raw: payload) else { return nil }
+            limits = parsed
+        } else {
+            return nil
+        }
+        if raw["largest_allocatable_block"] == nil || raw["largest_allocatable_block"] is NSNull {
+            largestAllocatableBlock = nil
+        } else if let value = raw.optionalInt("largest_allocatable_block") {
+            largestAllocatableBlock = value
+        } else {
+            return nil
+        }
         self.id = id
         self.displayName = raw.string("display_name") ?? id
         self.workspacePath = workspacePath
@@ -396,13 +507,19 @@ public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
         displayName: String,
         workspacePath: String,
         environmentNotes: String = "",
-        description: String = ""
+        description: String = "",
+        allocation: ServerGroupAllocation? = nil,
+        limits: ServerGroupLimits? = nil,
+        largestAllocatableBlock: Int? = nil
     ) {
         self.id = id
         self.displayName = displayName
         self.workspacePath = workspacePath
         self.environmentNotes = environmentNotes
         self.description = description
+        self.allocation = allocation
+        self.limits = limits
+        self.largestAllocatableBlock = largestAllocatableBlock
     }
 }
 
@@ -432,6 +549,7 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let memoryLimitMiB: Int?
     public let memoryCurrentMiB: Int?
     public let recentTelemetryAverage: HostTelemetryRecentAverage?
+    public let schedulerCapacity: SchedulerCapacity?
 
     public init?(raw: [String: Any]) {
         guard let id = raw.string("id"), let host = raw.string("host"), let sshUser = raw.string("ssh_user") else {
@@ -472,6 +590,11 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.recentTelemetryAverage = HostTelemetryRecentAverage(
             raw: hostTelemetry["recent_average"] as? [String: Any] ?? [:]
         )
+        if let payload = raw["scheduler_capacity"] as? [String: Any] {
+            self.schedulerCapacity = SchedulerCapacity(raw: payload)
+        } else {
+            self.schedulerCapacity = nil
+        }
     }
 
     public var sshCommand: String {
@@ -1577,8 +1700,12 @@ public extension Dictionary where Key == String, Value == Any {
     }
 
     func bool(_ key: String, default fallback: Bool) -> Bool {
+        optionalBool(key) ?? fallback
+    }
+
+    func optionalBool(_ key: String) -> Bool? {
         if let value = self[key] as? Bool { return value }
         if let value = self[key] as? NSNumber { return value.boolValue }
-        return fallback
+        return nil
     }
 }

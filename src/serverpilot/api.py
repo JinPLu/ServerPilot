@@ -858,13 +858,29 @@ def create_app(
         )
 
         endpoint_ids = request_data.constraints.endpoint_ids
-        if len(endpoint_ids) != 1:
+        group_ids = request_data.constraints.server_group_ids
+        endpoint = None
+        if len(endpoint_ids) == 1:
+            try:
+                endpoint = service.collector_endpoint(endpoint_ids[0])
+            except BrokerError:
+                return None
+        elif not endpoint_ids and len(group_ids) == 1:
+            matches = []
+            for item in service.collector_endpoints():
+                if item.server_group_id != group_ids[0]:
+                    continue
+                if not is_plugin_profile(item.observation_profile):
+                    continue
+                candidate = get_plugin(item.observation_profile)
+                if candidate is not None and "apply" in candidate.capabilities:
+                    matches.append(item)
+            if len(matches) != 1:
+                return None
+            endpoint = matches[0]
+        else:
             return None
-        try:
-            endpoint = service.collector_endpoint(endpoint_ids[0])
-        except BrokerError:
-            return None
-        if not is_plugin_profile(endpoint.observation_profile):
+        if endpoint is None or not is_plugin_profile(endpoint.observation_profile):
             return None
         plugin = get_plugin(endpoint.observation_profile)
         if plugin is None or "apply" not in plugin.capabilities:

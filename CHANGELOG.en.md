@@ -6,168 +6,174 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## 2.0.0 - 2026-08-28
 
-**Source is now the daily product: a local daemon, the desktop apps, and five MCP tools. The browser UI and the scheduler/planning surfaces are gone; the claim loop you were using is not.**
+**Source is now the daily product: a local daemon, the desktop apps, and five MCP tools. The browser UI and the scheduler/planning surfaces are gone; the claim loop you were using is not. And there is one kind of cluster — a plugin-adapted cluster is no longer a parallel concept, so the same experiment can finally be compared across both.**
 
-- Routine MCP apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`. `gpu_count` is exact job parallelism from the launch script or config. The safe default is 1. It is never inferred from free capacity — a one-card job on an eight-card machine therefore takes one card.
-- `gpu_status` projects allocatable capacity group → server → SKU (`name` / `vram_mib` / `total_count` / `available_count`), not one row per free card.
-- A group carries a workspace plus environment and data/weight notes; a member inherits that workspace or overrides it. Environment notes are descriptive only — they are not executed or injected.
-- Grouped routine direct claims select a group, then one best-fit host inside it. Ungrouped hosts and plugin-adapted clusters still use `server_id`.
-- External scheduler submission (targets, jobs, transfers, and their MCP tools), generic resource planning, workload-profile presets, and every `/ui` browser page are gone. Those were never the path an agent used to take cards; `gpu_status → gpu_apply → gpu_release` remains. A Slurm-style cluster is adapted through a local plugin (bundled `slurm-immediate`) instead of a parallel scheduler codebase.
-- Routine MCP is exactly five tools: the three above, plus `gpu_add_server` and `gpu_update_server`. Deleting a server stays in the app and REST; it is not an MCP tool, and it refuses while that server holds active leases.
-- There is no browser UI. Humans watch state, correct ownership, and remove servers in the macOS or Windows app, still from the same local snapshot.
+- **Routine MCP apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`.** `gpu_count` is exact job parallelism from the launch script or config. The safe default is 1. It is never inferred from free capacity — a one-card job on an eight-card machine therefore takes one card.
+- **`gpu_status` projects allocatable capacity group → server → SKU (`name` / `vram_mib` / `total_count` / `available_count`), not one row per free card.**
+- **A group carries a workspace plus environment and data/weight notes.** A member inherits that workspace or overrides it. Environment notes are descriptive only — they are not executed or injected.
+- **A plugin-adapted cluster (Slurm, for example) appears in `gpu_status` as an ordinary group.** It has its name, shared workspace, GPU model, and SSH, in the same shape as a bare-metal group. There is no parallel `scheduler_servers` bucket. Such a cluster used to be one flat row that dropped the name and workspace you set in the app, so an agent could not even tell what it was called.
+- **Every cluster carries the same apply constraints.** Whether a lease ends on release or is killed at a time limit, how long it may run, how many cards one apply can take, how much CPU and memory each card comes with, how long an apply may block, and whether it queues. These used to live only inside plugin source, invisible to the agent — a three-hour training run placed on a cluster with a one-hour limit died at minute 60.
+- **The largest block one apply can take and what is left in the pool are two different numbers.** A partition with 27 free cards spread across nodes may not open a single 8-card job when the job must land on one node. When the one-apply ceiling is unknown, the number is withheld rather than filled in from the remaining total.
+- **A routine claim selects a group first, then the scheduler best-fits one host inside it.** A plugin-adapted group can be claimed by group as well. `server_id` remains available for ungrouped hosts.
+- **External scheduler submission (targets, jobs, transfers, and their MCP tools), generic resource planning, workload-profile presets, and every `/ui` browser page are gone.** Those were never the path an agent used to take cards; `gpu_status → gpu_apply → gpu_release` remains. A Slurm-style cluster is adapted through a local plugin (bundled `slurm-immediate`) instead of a parallel scheduler codebase.
+- **Routine MCP is exactly five tools.** The three above, plus `gpu_add_server` and `gpu_update_server`. Deleting a server stays in the app and REST; it is not an MCP tool, and it refuses while that server holds active leases.
+- **There is no browser UI.** Humans watch state, correct ownership, and remove servers in the macOS or Windows app, still from the same local snapshot.
+- **The desktop app no longer shows a plugin cluster as a CPU node, and its group heading no longer reads "no GPU".** It reads as on-demand with the one-apply ceiling, and the detail sheet shows the apply constraints, including the lease time limit.
+- **The desktop detail sheet stopped repeating itself.** The host card keeps only facts the table row leaves out, group name and workspace each appear once, and the history panel draws a single shared GPU colour legend instead of one per chart.
+- **Plugin authors: the plugin contract is `schema_version 3`, and a plugin still on v2 is not discovered.** `info` must declare `limits`. The bundled `slurm-immediate` is on v3.
 
 ## 1.9.1 - 2026-08-27
 
 **ServerPilot 1.9.1 makes the new MCP entry panel work on an ordinary installation.**
 
-- The Settings page reported no MCP entry at all after `uv tool install`, which is the ordinary macOS layout. The lookup followed the interpreter symlink before looking beside it, which walks out of the directory that holds `serverpilot-mcp` and into the base interpreter's own. The daemon runs from launchd with no PATH of its own, so nothing else could find it either.
-- Backing up the database works on Windows. Each SQLite connection is now closed before the finished copy is published, instead of being left open by a context manager that only ends the transaction — Windows refuses to replace a file that still has a handle. The copy is flushed through a writable handle: Windows cannot fsync a file opened only for reading, so after the connections were closed the backup still failed there while working everywhere else.
-- A Slurm submission that really went through is no longer reported as a failure. `sbatch` does not drain its stdin on the paths where it exits early, which killed the process feeding it the script and turned that signal into the pipeline's exit status. Its own verdict was lost: a quota refusal or a bad partition arrived as a meaningless 141, and a job that had actually been accepted was left running with nothing here pointing at it.
-- The `mcpServers` block you copy out of the App shows the executable path as it is, instead of escaping every slash into `\/`.
-- A GPU row that marks itself unavailable while its own status text still claims the card is free is rejected again. Keying that check on the state code alone let the contradiction through whenever the state was something other than allocatable.
+- **The Settings page finds the MCP entry after `uv tool install`.** That is the ordinary macOS layout. The lookup followed the interpreter symlink before looking beside it, which walks out of the directory that holds `serverpilot-mcp` and into the base interpreter's own. The daemon runs from launchd with no PATH of its own, so nothing else could find it either.
+- **Backing up the database works on Windows.** Each SQLite connection is now closed before the finished copy is published, instead of being left open by a context manager that only ends the transaction — Windows refuses to replace a file that still has a handle. The copy is flushed through a writable handle: Windows cannot fsync a file opened only for reading, so after the connections were closed the backup still failed there while working everywhere else.
+- **A Slurm submission that really went through is no longer reported as a failure.** `sbatch` does not drain its stdin on the paths where it exits early, which killed the process feeding it the script and turned that signal into the pipeline's exit status. Its own verdict was lost: a quota refusal or a bad partition arrived as a meaningless 141, and a job that had actually been accepted was left running with nothing here pointing at it.
+- **The `mcpServers` block you copy out of the App shows the executable path as it is.** It no longer escapes every slash into `\/`.
+- **A GPU row that marks itself unavailable while its own status text still claims the card is free is rejected again.** Keying that check on the state code alone let the contradiction through whenever the state was something other than allocatable.
 
 ## 1.9.0 - 2026-08-27
 
 **ServerPilot 1.9.0 lets an agent reach it from a Windows machine and read everything it says, and stops the allocator breaking up your fleet one card at a time.**
 
-- Connecting an agent is one command: `serverpilot mcp install --client codex|claude|cursor` registers through each client's own mechanism, and merges into `~/.cursor/mcp.json` without disturbing servers already there. `serverpilot mcp config` prints the registration instead of writing it, and the README and agent guide now carry the standard `mcpServers` block.
-- The desktop app Settings page now shows this installation's MCP entry as an absolute path and a pasteable `mcpServers` block, so you can copy them into Codex, Claude, or Cursor without reconstructing the command. If the executable is missing, the same panel says so and tells you how to install it.
-- The Windows archive ships `serverpilot-mcp.exe` next to the app. The download previously contained only the GUI, so there was no MCP entry point on the machine at all and the documented registration commands only ever worked from a source install.
-- The MCP instructions, the three tool descriptions, and every value ServerPilot sends back are English. An allocatable card reports `available`; a busy one reports why in a stable code such as `running`, `held_idle`, or `busy_unmanaged`. The desktop app stays in Chinese — the two are separate surfaces now, so changing one no longer disturbs the other.
-- `gpu_apply` takes the server with the fewest free GPUs that can still serve the whole request, and one lease always lands on a single machine. This is the difference between a fleet that keeps working and one that fills with holes: cards used to be taken in alphabetical server order, so a single-card request landed on the first eight-GPU machine, and a few of those left nothing able to start an eight-GPU run. An eight-GPU request could also come back as 5+3 across two machines — useless for a single-node job, while holding all eight away from someone who could use them.
-- `no_capacity` comes back as data rather than an error string, so an agent can tell a full fleet from a broken connection instead of retrying an answer. Releasing a lease that is already released confirms it instead of failing.
-- Shared scheduler clusters register through a local plugin instead of as bare metal. The plugin registers only the cards in your own jobs; `gpu_status` reports cluster headroom as `scheduler_servers` before you request anything, real GPU identities appear after, and idle reclaim cancels the job. A Slurm reference plugin, `slurm-immediate`, ships with the package.
-- A cluster that refused you no longer looks like a cluster that is merely full. A quota refusal, an unreachable scheduler, or a broken plugin reaches you as a failure with its reason, instead of `no_capacity` for an agent to wait out.
-- Two ways a cluster job could be left running are fixed: ServerPilot no longer asks a plugin to allocate again after the cards are already assigned, and on a lease spanning several machines every job is now recorded, so releasing leaves nothing behind. Requesting or releasing cluster resources also no longer blocks everything else — other local work previously waited up to a minute.
-- A cluster job ServerPilot could not cancel while reclaiming an idle lease is now recorded in the audit trail. It used to vanish silently, leaving the job running against your quota with nothing here pointing at it. Releasing a lease yourself still refuses outright rather than reporting a success it did not achieve.
-- When the control plane is unreachable, `serverpilot keepalive inspect` and `serverpilot keepalive stop` report and stop the workers still holding cards, and `serverpilot daemon reclaim` takes the port back. None of them needs the daemon running. The port-ownership error now names the process holding it and its command line instead of only saying the port is foreign.
-- The MCP handshake reports ServerPilot's own version rather than the MCP SDK's, and each tool declares its effect, so a client can tell a read from a lease mutation instead of gating all three the same way.
-- The standalone Windows app can create its database again. The packaged build was dropping the migration scripts, which left a source deployment as the only working option.
-- ServerPilot installs from PyPI. A release refuses to publish when the tag and the package version disagree, or when the wheel is missing its migration scripts or arrives with a bundled plugin that is not executable — a plugin without that bit is invisible to discovery rather than failing loudly.
-- `serverpilot --version` exists.
-- The security documentation matches the implementation: the control plane has no authentication, ServerPilot manages its own occupancy processes and plugin-side allocations but never your workloads, and fail-closed admission trusts the SSH user and the remote collector. Keepalive workers keep holding GPUs after the control plane stops, until it returns and reconciles or someone stops them on the server.
-- A slow or hanging local daemon call no longer stalls every other MCP tool on the same connection, and each tool now advertises a real input schema instead of free-form arguments.
+- **Connecting an agent is one command.** `serverpilot mcp install --client codex|claude|cursor` registers through each client's own mechanism, and merges into `~/.cursor/mcp.json` without disturbing servers already there. `serverpilot mcp config` prints the registration instead of writing it, and the README and agent guide now carry the standard `mcpServers` block.
+- **The desktop app Settings page now shows this installation's MCP entry as an absolute path and a pasteable `mcpServers` block.** You can copy them into Codex, Claude, or Cursor without reconstructing the command. If the executable is missing, the same panel says so and tells you how to install it.
+- **The Windows archive ships `serverpilot-mcp.exe` next to the app.** The download previously contained only the GUI, so there was no MCP entry point on the machine at all and the documented registration commands only ever worked from a source install.
+- **The MCP instructions, the three tool descriptions, and every value ServerPilot sends back are English.** An allocatable card reports `available`; a busy one reports why in a stable code such as `running`, `held_idle`, or `busy_unmanaged`. The desktop app stays in Chinese — the two are separate surfaces now, so changing one no longer disturbs the other.
+- **`gpu_apply` takes the server with the fewest free GPUs that can still serve the whole request, and one lease always lands on a single machine.** This is the difference between a fleet that keeps working and one that fills with holes: cards used to be taken in alphabetical server order, so a single-card request landed on the first eight-GPU machine, and a few of those left nothing able to start an eight-GPU run. An eight-GPU request could also come back as 5+3 across two machines — useless for a single-node job, while holding all eight away from someone who could use them.
+- **`no_capacity` comes back as data rather than an error string.** An agent can tell a full fleet from a broken connection instead of retrying an answer. Releasing a lease that is already released confirms it instead of failing.
+- **Shared scheduler clusters register through a local plugin instead of as bare metal.** The plugin registers only the cards in your own jobs; `gpu_status` reports cluster headroom as `scheduler_servers` before you request anything, real GPU identities appear after, and idle reclaim cancels the job. A Slurm reference plugin, `slurm-immediate`, ships with the package.
+- **A cluster that refused you no longer looks like a cluster that is merely full.** A quota refusal, an unreachable scheduler, or a broken plugin reaches you as a failure with its reason, instead of `no_capacity` for an agent to wait out.
+- **Two ways a cluster job could be left running are fixed.** ServerPilot no longer asks a plugin to allocate again after the cards are already assigned, and on a lease spanning several machines every job is now recorded, so releasing leaves nothing behind. Requesting or releasing cluster resources also no longer blocks everything else — other local work previously waited up to a minute.
+- **A cluster job ServerPilot could not cancel while reclaiming an idle lease is now recorded in the audit trail.** It used to vanish silently, leaving the job running against your quota with nothing here pointing at it. Releasing a lease yourself still refuses outright rather than reporting a success it did not achieve.
+- **When the control plane is unreachable, `serverpilot keepalive inspect` and `serverpilot keepalive stop` report and stop the workers still holding cards, and `serverpilot daemon reclaim` takes the port back.** None of them needs the daemon running. The port-ownership error now names the process holding it and its command line instead of only saying the port is foreign.
+- **The MCP handshake reports ServerPilot's own version rather than the MCP SDK's.** Each tool declares its effect, so a client can tell a read from a lease mutation instead of gating all three the same way.
+- **The standalone Windows app can create its database again.** The packaged build was dropping the migration scripts, which left a source deployment as the only working option.
+- **A release stops a wheel that installs cleanly and only breaks on first use.** The build fails when the tag and the package version disagree, or when the wheel is missing its migration scripts or arrives with a bundled plugin that is not executable — a plugin without that bit is invisible to discovery rather than failing loudly.
+- **`serverpilot --version` exists.**
+- **The security documentation matches the implementation.** The control plane has no authentication, ServerPilot manages its own occupancy processes and plugin-side allocations but never your workloads, and fail-closed admission trusts the SSH user and the remote collector. Keepalive workers keep holding GPUs after the control plane stops, until it returns and reconciles or someone stops them on the server.
+- **A slow or hanging local daemon call no longer stalls every other MCP tool on the same connection.** Each tool now advertises a real input schema instead of free-form arguments.
 
 ## 1.8.0 - 2026-08-24
 
 **ServerPilot 1.8.0 publishes telemetry only where the occupancy belongs to the caller: a free card reports capacity, and your own lease reports per-GPU utilisation and the card lagging behind.**
 
-- `gpu_status` now answers three questions in three groups: an allocatable card reports capacity only (model, VRAM, available), a busy card reports who holds it, and telemetry appears only on cards the caller holds. Free cards used to carry telemetry too — and every bit of load observable on a free card comes from ServerPilot's own keepalive hold (80% of VRAM, released only when the card is actually allocated), so a machine with eight free cards read as eight-tenths full and an agent that checked availability against it concluded there was nothing to claim.
-- New `gpu_status(lease_id=…)` returns your own lease: per-GPU rolling ten-minute averages and the latest sample, plus a lease summary — average utilisation, the smallest free VRAM across the lease, and on multi-GPU leases the utilisation spread and the card lagging behind. These are the numbers behind "is my job using these cards well, can I raise the batch size, is one card holding the rest back"; a card you held previously fell into the compact `busy_gpus` list with nothing but its task name.
-- `gpu_status` no longer takes `include_busy`: busy cards always come back in `busy_gpus` with their task, and your own cards come from `lease_id`. Allocatable cards report a single status instead of exposing keepalive's internal variants. A `gpu_status` response for an eight-GPU machine went from 5,957 to 1,749 bytes.
+- **`gpu_status` now answers three questions in three groups.** An allocatable card reports capacity only (model, VRAM, available), a busy card reports who holds it, and telemetry appears only on cards the caller holds. Free cards used to carry telemetry too — and every bit of load observable on a free card comes from ServerPilot's own keepalive hold (80% of VRAM, released only when the card is actually allocated), so a machine with eight free cards read as eight-tenths full and an agent that checked availability against it concluded there was nothing to claim.
+- **New `gpu_status(lease_id=…)` returns your own lease.** Per-GPU rolling ten-minute averages and the latest sample, plus a lease summary — average utilisation, the smallest free VRAM across the lease, and on multi-GPU leases the utilisation spread and the card lagging behind. These are the numbers behind "is my job using these cards well, can I raise the batch size, is one card holding the rest back"; a card you held previously fell into the compact `busy_gpus` list with nothing but its task name.
+- **`gpu_status` no longer takes `include_busy`.** Busy cards always come back in `busy_gpus` with their task, and your own cards come from `lease_id`. Allocatable cards report a single status instead of exposing keepalive's internal variants. A `gpu_status` response for an eight-GPU machine went from 5,957 to 1,749 bytes.
 
 ## 1.7.0 - 2026-08-23
 
 **ServerPilot 1.7.0 turns the servers page back into a table you can compare down a column, with a pressure bar on all four metrics, and makes idle reclaim per GPU.**
 
-- The servers page is a table again, one 44pt row per machine: GPU utilisation, VRAM, CPU load and memory are all drawn the same way — a percentage and a bar, equal width, equal weight — so the eye can compare them straight down a column. CPU and memory previously carried a number with no bar, while the sort control still offered to sort by CPU load, which left the resulting order with nothing visible behind it.
-- Narrow windows fold columns from the right instead of switching to a different layout: the full SSH command is never truncated at any width, and none of the four bars ever folds. `GPU model` drops at 1280 and `project / task` below that; both stay in the row's tooltip and in the detail sheet.
-- Column headers are the sort controls: click one to sort by it, click again to reverse, and the active column darkens and carries an arrow. The headers now have accessibility names too, so screen readers no longer meet a row of unnamed buttons.
-- Rows no longer print the absence of a task, and a host with no GPUs shows its core count and total memory where a GPU model would go — that is what that machine actually is.
-- Idle reclaim is now per GPU: a claim that takes eight cards and uses one returns the other seven individually as each idle window elapses, while the working card keeps its claim. Previously a single running process protected every other GPU in the same claim.
-- CPU cores, total memory, peak temperature, absolute VRAM and the full remote workspace path move into a new "host" card in the detail sheet. The workspace path could only ever render as `…workspace/tmp/user` in a row, which carries no information; all of it also stays in the row's tooltip.
-- The usage and settings pages now speak the same card language as the servers page: a group of facts sits in one white card, rows are separated by hairlines instead of each carrying its own fill and border. Usage detail gains a "resource total" card, and settings gains a "data state" card (connection, snapshot freshness and revision, server / GPU / lease counts, and whether resource changes can run).
-- The server detail sheet drops its translucent material for the same plane as every other page, and the per-GPU grid's minimum column width now fits its whole contents, so mid-word truncations like `4 / 8…`, `32 / …` and `task: …` are gone.
-- Turning on the system Increase Contrast setting now actually changes the interface: cards gain an outline, hairlines deepen, status colours re-solve to 7:1, and bar tracks darken — applied immediately, with no restart.
-- Settings cards align to the left margin instead of centring in a wide window, and the connection fact no longer claims a live local service while the read-only test fixture is in use.
-- The usage page and the server detail sheet used to collapse into a single element, leaving screen reader users with one summary sentence and no access to any button or value inside; both are now readable item by item.
-- Status colour is rebuilt as two tiers: a deep mark tier (`#00832F` / `#B05A00` / `#E40021`) for dots, bars and status words, and a luminous area tier (`#E7F8EB` / `#FFF1E5` / `#FFE7E8`) that carries the brightness. Darkening the whole palette so a small dot could clear contrast on its own had left the green muddy and the amber mustard.
-- The interface drops from three background planes to two (white content over `#E9ECF1`); the old three differed by only 1.06-1.09 each, which reads as a rendering fault rather than as depth.
-- The type ramp gains a 26pt display step, lifting the largest-to-smallest ratio from 1.70 to 2.60 so something can finally lead, and every numeral is now tabular so columns stop twitching on refresh.
-- Every font size across the interface now comes from a six-step Apple semantic ramp (previously 19 sizes including half-pixel steps), so the interface follows the system text size.
-- Settings drops a third "Settings" heading that repeated the sidebar and page title, and the filter control's duplicate label no longer stacks vertically in wide windows.
+- **The servers page is a table again, one 44pt row per machine.** GPU utilisation, VRAM, CPU load and memory are all drawn the same way — a percentage and a bar, equal width, equal weight — so the eye can compare them straight down a column. CPU and memory previously carried a number with no bar, while the sort control still offered to sort by CPU load, which left the resulting order with nothing visible behind it.
+- **Narrow windows fold columns from the right instead of switching to a different layout.** The full SSH command is never truncated at any width, and none of the four bars ever folds. `GPU model` drops at 1280 and `project / task` below that; both stay in the row's tooltip and in the detail sheet.
+- **Column headers are the sort controls.** Click one to sort by it, click again to reverse, and the active column darkens and carries an arrow. The headers now have accessibility names too, so screen readers no longer meet a row of unnamed buttons.
+- **Rows no longer print the absence of a task.** A host with no GPUs shows its core count and total memory where a GPU model would go — that is what that machine actually is.
+- **Idle reclaim is now per GPU.** A claim that takes eight cards and uses one returns the other seven individually as each idle window elapses, while the working card keeps its claim. Previously a single running process protected every other GPU in the same claim.
+- **CPU cores, total memory, peak temperature, absolute VRAM and the full remote workspace path move into a new "host" card in the detail sheet.** The workspace path could only ever render as `…workspace/tmp/user` in a row, which carries no information; all of it also stays in the row's tooltip.
+- **The usage and settings pages now speak the same card language as the servers page.** A group of facts sits in one white card, rows are separated by hairlines instead of each carrying its own fill and border. Usage detail gains a "resource total" card, and settings gains a "data state" card (connection, snapshot freshness and revision, server / GPU / lease counts, and whether resource changes can run).
+- **The server detail sheet drops its translucent material for the same plane as every other page.** The per-GPU grid's minimum column width now fits its whole contents, so mid-word truncations like `4 / 8…`, `32 / …` and `task: …` are gone.
+- **Turning on the system Increase Contrast setting now actually changes the interface.** Cards gain an outline, hairlines deepen, status colours re-solve to 7:1, and bar tracks darken — applied immediately, with no restart.
+- **Settings cards align to the left margin instead of centring in a wide window.** The connection fact no longer claims a live local service while the read-only test fixture is in use.
+- **The usage page and the server detail sheet are now readable item by item.** They used to collapse into a single element, leaving screen reader users with one summary sentence and no access to any button or value inside.
+- **Status colour is rebuilt as two tiers.** A deep mark tier (`#00832F` / `#B05A00` / `#E40021`) for dots, bars and status words, and a luminous area tier (`#E7F8EB` / `#FFF1E5` / `#FFE7E8`) that carries the brightness. Darkening the whole palette so a small dot could clear contrast on its own had left the green muddy and the amber mustard.
+- **The interface drops from three background planes to two (white content over `#E9ECF1`).** The old three differed by only 1.06-1.09 each, which reads as a rendering fault rather than as depth.
+- **The type ramp gains a 26pt display step so something can finally lead.** The largest-to-smallest ratio lifts from 1.70 to 2.60, and every numeral is now tabular so columns stop twitching on refresh.
+- **Every font size across the interface now comes from a six-step Apple semantic ramp.** Previously 19 sizes including half-pixel steps, so the interface follows the system text size.
+- **Settings drops a third "Settings" heading that repeated the sidebar and page title.** The filter control's duplicate label no longer stacks vertically in wide windows.
 
 ## 1.6.0 - 2026-08-21
 
 **ServerPilot 1.6.0 cuts about seventy percent of the context an agent spends reading GPU status, and returns idle-but-claimed GPUs to the pool on their own.**
 
-- Agents spend far less context reading GPU status: connection details and the remote working directory are now returned once per server instead of repeated on every GPU, and `gpu_status` also lists busy cards with the task holding each one — so deciding where to place work takes a single call instead of two. On one 8-GPU server that decision path dropped from roughly 21,800 to 6,700 characters.
-- `gpu_status` accepts a `server_id` argument to narrow the response to one server.
-- `gpu_release` now echoes the released lease id and its settled state, so an agent holding several leases can confirm them one by one instead of assuming one release finished everything.
-- The desktop App refreshes more cheaply: it no longer fetches the generic-resource and external-scheduler projections it never displays, cutting the measured state payload from roughly 77,000 to 59,700 characters (-22.4%) per refresh. Everything the interface actually renders — servers, GPUs, leases, resource usage — is byte-for-byte unchanged.
-- Three desktop details now match the design contract: the server column header uses the `server.rack` icon, the setting reads "data collection interval" (distinct from "refresh", which only re-reads local state), and the usage page's empty state reads "no current resource allocation".
-- Status colors now meet the accessibility floor: the normal green and caution amber darken to `#339653` and `#AA7C00` (lightness only, hues unchanged), lifting status dots and pressure bars from as low as 1.53 to at least 3.01 against both the content surface and the page background — the WCAG threshold for non-text graphics. The error red already passed and is unchanged.
-- Idle GPUs come back on their own: when a lease's GPUs show no compute process across observations the collector can actually see, ServerPilot raises a warning first and then releases the lease back into the allocatable pool. An agent that forgets to release, or a job that finished without cleanup, no longer locks the cards indefinitely. The idle clock resets whenever telemetry goes stale, so a collector outage never reclaims a job that is merely unobserved.
-- GPU status no longer collapses into "task in use": it now distinguishes a running task, a claim with no observed task, an unmanaged process, and an attribution conflict — so a card that is claimed but idle is visible at a glance.
-- Upgrade note: an external agent's global rules are a static copy on disk. After upgrading, re-run `python3 scripts/install_agent_policy.py all --install` (Cursor: `--print` then paste), otherwise the rules describe the old response shape.
+- **Agents spend far less context reading GPU status.** Connection details and the remote working directory are now returned once per server instead of repeated on every GPU, and `gpu_status` also lists busy cards with the task holding each one — so deciding where to place work takes a single call instead of two. On one 8-GPU server that decision path dropped from roughly 21,800 to 6,700 characters.
+- **`gpu_status` accepts a `server_id` argument.** It narrows the response to one server.
+- **`gpu_release` now echoes the released lease id and its settled state.** An agent holding several leases can confirm them one by one instead of assuming one release finished everything.
+- **The desktop App refreshes more cheaply.** It no longer fetches the generic-resource and external-scheduler projections it never displays, cutting the measured state payload from roughly 77,000 to 59,700 characters (-22.4%) per refresh. Everything the interface actually renders — servers, GPUs, leases, resource usage — is byte-for-byte unchanged.
+- **Three desktop details now match the design contract.** The server column header uses the `server.rack` icon, the setting reads "data collection interval" (distinct from "refresh", which only re-reads local state), and the usage page's empty state reads "no current resource allocation".
+- **Status colors now meet the accessibility floor.** The normal green and caution amber darken to `#339653` and `#AA7C00` (lightness only, hues unchanged), lifting status dots and pressure bars from as low as 1.53 to at least 3.01 against both the content surface and the page background — the WCAG threshold for non-text graphics. The error red already passed and is unchanged.
+- **Idle GPUs come back on their own.** When a lease's GPUs show no compute process across observations the collector can actually see, ServerPilot raises a warning first and then releases the lease back into the allocatable pool. An agent that forgets to release, or a job that finished without cleanup, no longer locks the cards indefinitely. The idle clock resets whenever telemetry goes stale, so a collector outage never reclaims a job that is merely unobserved.
+- **GPU status no longer collapses into "task in use".** It now distinguishes a running task, a claim with no observed task, an unmanaged process, and an attribution conflict — so a card that is claimed but idle is visible at a glance.
+- **Upgrade note: an external agent's global rules are a static copy on disk.** After upgrading, re-run `python3 scripts/install_agent_policy.py all --install` (Cursor: `--print` then paste), otherwise the rules describe the old response shape.
 
 ## 1.5.12 - 2026-08-17
 
 **ServerPilot 1.5.12 lets you remove a server from the local control plane, and drops unused pause/resume and web reservation submit entry points.**
 
-- The macOS Edit or Remove Server sheet can remove a server from the local control plane. A stale local service missing this capability is replaced by the app-bundled backend, and a deleted YAML-seeded server is not resurrected on restart. Active leases or resource allocations are rejected, and remote processes are not stopped.
-- Unused desktop views and non-working pause/resume or web reservation/maintenance submit forms are gone. Reservation and maintenance pages remain available as read-only lists.
+- **The macOS Edit or Remove Server sheet can remove a server from the local control plane.** A stale local service missing this capability is replaced by the app-bundled backend, and a deleted YAML-seeded server is not resurrected on restart. Active leases or resource allocations are rejected, and remote processes are not stopped.
+- **Unused desktop views and non-working pause/resume or web reservation/maintenance submit forms are gone.** Reservation and maintenance pages remain available as read-only lists.
 
 ## 1.5.11 - 2026-08-17
 
 **ServerPilot 1.5.11 raises idle occupancy to about 80% memory and GPU utilization per card, and keeps long-running tasks correctly attributed across worker turnover.**
 
-- Idle occupancy now holds about 80% of each GPU’s CUDA-visible memory and raises GPU utilization to about 80%.
-- Multi-GPU tasks now remain shown as “task in use” while workers restart, child processes change, or stages hand off; PID turnover no longer turns an entire task into a false ownership warning.
-- An upgraded service clears legacy workload-attribution errors, while genuine keepalive-helper identity errors remain explicit and are never presented as ordinary tasks.
-- The desktop app shows the task assignment alongside process-observation changes and makes clear that cleanup is only for a finished task; it never stops the remote workload.
+- **Idle occupancy now holds about 80% of each GPU’s CUDA-visible memory and raises GPU utilization to about 80%.**
+- **Multi-GPU tasks now remain shown as “task in use” while workers restart, child processes change, or stages hand off.** PID turnover no longer turns an entire task into a false ownership warning.
+- **An upgraded service clears legacy workload-attribution errors.** Genuine keepalive-helper identity errors remain explicit and are never presented as ordinary tasks.
+- **The desktop app shows the task assignment alongside process-observation changes.** It makes clear that cleanup is only for a finished task; it never stops the remote workload.
 
 ## 1.5.10 - 2026-08-15
 
 **ServerPilot 1.5.10 fixes cross-platform release validation so the Windows x64 desktop App is built automatically on GitHub and published as a downloadable asset.**
 
-- The Windows build check now accepts Windows and POSIX path separators. A release asset is uploaded only after the Windows runner completes its desktop UI, WebView2 host, and packaging checks.
+- **The Windows build check now accepts Windows and POSIX path separators.** A release asset is uploaded only after the Windows runner completes its desktop UI, WebView2 host, and packaging checks.
 
 ## 1.5.9 - 2026-08-15
 
 **ServerPilot 1.5.9 provides Windows users with a complete desktop App that follows the same resource workflow as macOS.**
 
-- The Windows app uses a system WebView2 desktop window rather than opening an external browser. Overview, search, filters, header sorting, GPU claims, server registration, occupancy control, and collector settings use a narrow local bridge to the same loopback control plane.
-- The server table fills the available window width, keeps GPU Configuration toward the left, and displays and sorts GPU utilization, memory utilization, CPU load, and system-memory utilization with the same rolling ten-minute basis.
-- Windows server details reuse the macOS per-GPU memory rings and free / occupancy / busy / error labels, plus a 2×2 CPU, memory, GPU utilization, and memory-history layout.
-- Each GitHub Release is built on a Windows runner and receives a `ServerPilot-*-windows-x64.zip` asset, so Windows users do not need to install Python or uv.
+- **The Windows app uses a system WebView2 desktop window rather than opening an external browser.** Overview, search, filters, header sorting, GPU claims, server registration, occupancy control, and collector settings use a narrow local bridge to the same loopback control plane.
+- **The server table fills the available window width.** It keeps GPU Configuration toward the left, and displays and sorts GPU utilization, memory utilization, CPU load, and system-memory utilization with the same rolling ten-minute basis.
+- **Windows server details reuse the macOS per-GPU memory rings and free / occupancy / busy / error labels.** They also use a 2×2 CPU, memory, GPU utilization, and memory-history layout.
+- **Each GitHub Release is built on a Windows runner and receives a `ServerPilot-*-windows-x64.zip` asset.** Windows users do not need to install Python or uv.
 
 ## 1.5.8 - 2026-08-15
 
 **ServerPilot 1.5.8 makes server resource summaries and desktop GPU details more consistent and readable.**
 
-- GPU utilization, memory utilization, normalized CPU load, and system-memory utilization in the server overview now use the same rolling ten-minute observation window. Endpoint snapshots add `host_telemetry.recent_average`, and an older local service is no longer treated as compatible.
-- The resource table fills its available width: Project / Current Task absorbs the spare space, GPU Configuration stays toward the left, and the four resource columns use full professional labels and one shared ten-minute sort basis.
-- Server details return to compact horizontal per-GPU cards. Each ring shows current memory use, while a small state label distinguishes free, occupancy, busy, and error; resource history remains a fixed 2×2 chart layout.
+- **GPU utilization, memory utilization, normalized CPU load, and system-memory utilization in the server overview now use the same rolling ten-minute observation window.** Endpoint snapshots add `host_telemetry.recent_average`, and an older local service is no longer treated as compatible.
+- **The resource table fills its available width.** Project / Current Task absorbs the spare space, GPU Configuration stays toward the left, and the four resource columns use full professional labels and one shared ten-minute sort basis.
+- **Server details return to compact horizontal per-GPU cards.** Each ring shows current memory use, while a small state label distinguishes free, occupancy, busy, and error; resource history remains a fixed 2×2 chart layout.
 
 ## 1.5.7 - 2026-08-15
 
 **ServerPilot 1.5.7 makes GPU and CPU-only server resource states appear consistently from one live snapshot.**
 
-- `gpu_status` returns each GPU's latest observation and a rolling ten-minute average of memory, GPU/memory-controller utilization, and temperature, alongside a summary of the visible cards to distinguish sustained load from a momentary spike.
-- The GUI and MCP share the daemon REST snapshot rather than collecting over SSH separately; the GPU detail view displays that same per-GPU average.
-- A new server's first read-only collection identifies it as GPU, CPU-only, or unconfirmed. Confirmed CPU-only servers retain CPU/memory monitoring and are explicitly shown in the GUI and `gpu_status.cpu_only_servers`, but are never GPU allocation targets.
+- **`gpu_status` returns each GPU's latest observation and a rolling ten-minute average of memory, GPU/memory-controller utilization, and temperature.** It also gives a summary of the visible cards to distinguish sustained load from a momentary spike.
+- **The GUI and MCP share the daemon REST snapshot rather than collecting over SSH separately.** The GPU detail view displays that same per-GPU average.
+- **A new server's first read-only collection identifies it as GPU, CPU-only, or unconfirmed.** Confirmed CPU-only servers retain CPU/memory monitoring and are explicitly shown in the GUI and `gpu_status.cpu_only_servers`, but are never GPU allocation targets.
 
 ## 1.5.6 - 2026-08-15
 
 **ServerPilot 1.5.6 fixes idle keepalive workers being misreported as running workloads after a task releases its GPU lease.**
 
-- The routine Agent contract is unchanged: a finished task calls `gpu_release`; ServerPilot restores idle keepalive itself and the Agent never turns the policy off.
-- The helper now provides read-only proof for its own recorded v3 workers, including the sole driver-visible PID on the target GPU. The Broker rebinds a worker only when that sealed proof matches a fresh collector PID/boot observation, covering worker and daemon restarts without adopting arbitrary processes.
-- Mismatched proof, damaged state, or an additional workload process remain fail-closed. Agents see a precise occupancy-verification failure rather than the misleading “task in use” label.
-- A verified keeper stop clears its previous process identity so the next worker cannot be compared to a stale PID.
+- **The routine Agent contract is unchanged.** A finished task calls `gpu_release`; ServerPilot restores idle keepalive itself and the Agent never turns the policy off.
+- **The helper now provides read-only proof for its own recorded v3 workers, including the sole driver-visible PID on the target GPU.** The Broker rebinds a worker only when that sealed proof matches a fresh collector PID/boot observation, covering worker and daemon restarts without adopting arbitrary processes.
+- **Mismatched proof, damaged state, or an additional workload process remain fail-closed.** Agents see a precise occupancy-verification failure rather than the misleading “task in use” label.
+- **A verified keeper stop clears its previous process identity.** The next worker cannot be compared to a stale PID.
 
 ## 1.5.5 - 2026-08-14
 
 **ServerPilot 1.5.5 upgrades the keepalive protocol to v3 and tightens device selection and control-plane reliability across GPU and driver environments.**
 
-- The keepalive adapter performs a read-only `--protocol-info` preflight before every mutation and requires v3, pidfd identity, and PCI bus ID capabilities; incompatible helpers return `keepalive_helper_incompatible` without receiving a mutation payload.
-- Keepalive wire/state use v3 and `workers.v3.json`; v2 payloads/state are rejected fail-closed and are never adopted, deleted, or signaled.
+- **The keepalive adapter performs a read-only `--protocol-info` preflight before every mutation.** It requires v3, pidfd identity, and PCI bus ID capabilities; incompatible helpers return `keepalive_helper_incompatible` without receiving a mutation payload.
+- **Keepalive wire/state use v3 and `workers.v3.json`.** v2 payloads/state are rejected fail-closed and are never adopted, deleted, or signaled.
 
-- `gpu_index` remains the server's display index, while collector schema v2 derives a separate PCI-bus-ordered `cuda_ordinal`. `gpu_apply` returns `cuda_device_order=PCI_BUS_ID`, a lease-wide ordinal set, and per-GPU ordinals instead of placing GPU UUIDs in `CUDA_VISIBLE_DEVICES`.
-- GPUs without a current CUDA ordinal are not allocated. Old collector schemas and PID-only occupancy state fail closed instead of being adopted or downgraded.
-- Occupancy workers persist PID, Linux boot ID, process start ticks, and a fixed marker. Stops pin the process with pidfd; endpoints whose Python lacks pidfd wrappers use the Linux pidfd syscalls and never fall back to signaling a bare PID.
-- The release also fixes actual request-body limiting and disconnect forwarding, concurrent rate limiting, Web CSRF, CSV field projection, and atomic SQLite backup. Routine reassignment remains lease-owner-only, with a separate App operator correction route.
-- CPU and memory admission accounts for both direct GPU commitments and generic host claims. Routine MCP transport retries use a process-scoped call namespace without collapsing later same-parameter claims into an old lease.
+- **`gpu_index` remains the server's display index.** Collector schema v2 derives a separate PCI-bus-ordered `cuda_ordinal`. `gpu_apply` returns `cuda_device_order=PCI_BUS_ID`, a lease-wide ordinal set, and per-GPU ordinals instead of placing GPU UUIDs in `CUDA_VISIBLE_DEVICES`.
+- **GPUs without a current CUDA ordinal are not allocated.** Old collector schemas and PID-only occupancy state fail closed instead of being adopted or downgraded.
+- **Occupancy workers persist PID, Linux boot ID, process start ticks, and a fixed marker.** Stops pin the process with pidfd; endpoints whose Python lacks pidfd wrappers use the Linux pidfd syscalls and never fall back to signaling a bare PID.
+- **The release also fixes actual request-body limiting and disconnect forwarding, concurrent rate limiting, Web CSRF, CSV field projection, and atomic SQLite backup.** Routine reassignment remains lease-owner-only, with a separate App operator correction route.
+- **CPU and memory admission accounts for both direct GPU commitments and generic host claims.** Routine MCP transport retries use a process-scoped call namespace without collapsing later same-parameter claims into an old lease.
 
 ## 1.5.3 - 2026-08-14
 
 **ServerPilot 1.5.3 lets Agents connect directly without conflating a working directory with a code path.**
 
-- Routine `gpu_status` and `gpu_apply` return structured `ssh {host, port, user}` data. After allocation, Agents use direct SSH for the workload instead of treating a missing Codex saved host as a missing server.
-- Clarified that `workspace_path` is the remote working directory for post-SSH operations, not a source repository path. Agents enter it first, then run commands and synchronize code or artifacts beneath it.
-- Added machine-readable `workspace {path, kind=working_directory, use_as_cwd=true, code_location=not_provided}` data, separating connection details, the working directory, code location, and CUDA selectors while retaining legacy `workspace_path`.
-- Agent guidance now distinguishes normal SSH execution from bypassing ServerPilot for GPU discovery, selection, allocation, or release.
+- **Routine `gpu_status` and `gpu_apply` return structured `ssh {host, port, user}` data.** After allocation, Agents use direct SSH for the workload instead of treating a missing Codex saved host as a missing server.
+- **`workspace_path` is the remote working directory for post-SSH operations, not a source repository path.** Agents enter it first, then run commands and synchronize code or artifacts beneath it.
+- **Added machine-readable `workspace {path, kind=working_directory, use_as_cwd=true, code_location=not_provided}` data.** It separates connection details, the working directory, code location, and CUDA selectors while retaining legacy `workspace_path`.
+- **Agent guidance now distinguishes normal SSH execution from bypassing ServerPilot for GPU discovery, selection, allocation, or release.**
 
 ## 1.5.2 - 2026-08-13
 
@@ -212,35 +218,35 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 **ServerPilot 1.3.0 removes server- and cluster-specific behavior from runtime policy.**
 
-- Endpoints use fixed `observation_profile` values, while external schedulers use constrained transport and inspection profiles.
-- A local administrator maps profiles to trusted absolute-path wrappers; the API, App, and MCP cannot submit arbitrary shell, argv, or environment values.
-- Unknown or missing profiles fail closed. Legacy scheduler command configuration is disabled during upgrade until an administrator selects a safe profile.
-- Documentation and runtime guidance now describe a generic adapter model instead of naming one cluster.
+- **Endpoints use fixed `observation_profile` values, while external schedulers use constrained transport and inspection profiles.**
+- **A local administrator maps profiles to trusted absolute-path wrappers.** The API, App, and MCP cannot submit arbitrary shell, argv, or environment values.
+- **Unknown or missing profiles fail closed.** Legacy scheduler command configuration is disabled during upgrade until an administrator selects a safe profile.
+- **Documentation and runtime guidance now describe a generic adapter model instead of naming one cluster.**
 
 ## 1.2.0 - 2026-08-10
 
 **GPU Broker becomes ServerPilot.**
 
-- The GitHub repository, macOS and Windows Apps, Web UI, documentation, and public API title adopt the ServerPilot name.
-- New `serverpilot` and `serverpilot-mcp` command entry points are available.
-- The old `gpu-broker`, `gpu-broker-mcp`, `GPU_BROKER_*`, daemon identity, and data directories remain compatible, preserving inventory, history, leases, and MCP registrations across the upgrade.
-- `/api/v1/state` and existing scheduler semantics remain compatible.
+- **The GitHub repository, macOS and Windows Apps, Web UI, documentation, and public API title adopt the ServerPilot name.**
+- **New `serverpilot` and `serverpilot-mcp` command entry points are available.**
+- **The old `gpu-broker`, `gpu-broker-mcp`, `GPU_BROKER_*`, daemon identity, and data directories remain compatible.** They preserve inventory, history, leases, and MCP registrations across the upgrade.
+- **`/api/v1/state` and existing scheduler semantics remain compatible.**
 
 ## 1.1.0 - 2026-08-10
 
 **GPU Broker 1.1.0 expands server telemetry and native resource monitoring.**
 
-- Sealed observation and scheduler adapter boundaries are introduced without opening another authentication or remote-command control plane.
-- CPU, memory, GPU, claim, and availability projections fail closed, while CPU-only endpoints remain observable without fabricated GPU capacity.
-- Bounded endpoint telemetry history includes stable per-GPU UUID series.
-- The macOS resource workflow adds on-demand CPU, memory, GPU utilization, and GPU-memory charts with lower-cost hover rendering.
-- `/api/v1/state` remains the authoritative allocation snapshot, preserving existing leases, CLI, MCP, and Slurm semantics.
+- **Sealed observation and scheduler adapter boundaries are introduced.** They do not open another authentication or remote-command control plane.
+- **CPU, memory, GPU, claim, and availability projections fail closed.** CPU-only endpoints remain observable without fabricated GPU capacity.
+- **Bounded endpoint telemetry history includes stable per-GPU UUID series.**
+- **The macOS resource workflow adds on-demand CPU, memory, GPU utilization, and GPU-memory charts.** Hover rendering is lower-cost.
+- **`/api/v1/state` remains the authoritative allocation snapshot.** Existing leases, CLI, MCP, and Slurm semantics remain compatible.
 
 ## 1.0.0 - 2026-08-06
 
 **The first stable GPU Broker release.**
 
-- The App, CLI, and MCP share the authoritative `/api/v1/state` snapshot.
-- The native macOS App coordinates servers, projects, and resource state by stable ID; removing a server updates related views together.
-- Revisions and resource usage come from one committed control-plane snapshot, reducing divergence between views and clients.
-- Loopback REST and the domain service are the only public business path.
+- **The App, CLI, and MCP share the authoritative `/api/v1/state` snapshot.**
+- **The native macOS App coordinates servers, projects, and resource state by stable ID.** Removing a server updates related views together.
+- **Revisions and resource usage come from one committed control-plane snapshot.** This reduces divergence between views and clients.
+- **Loopback REST and the domain service are the only public business path.**

@@ -97,9 +97,8 @@ def test_an_ambiguous_directory_is_refused(tmp_path: Path) -> None:
         verify_wheel._resolve(tmp_path)
 
 
-def test_both_release_workflows_call_the_one_script() -> None:
-    """Two inline copies of this check drifted apart once already."""
+def test_ci_calls_the_one_script() -> None:
+    """An inline copy of this check drifted from the script once already."""
 
-    workflows = ROOT / ".github" / "workflows"
-    for name in ("ci.yml", "pypi-release.yml"):
-        assert "scripts/verify_wheel.py" in (workflows / name).read_text(encoding="utf-8")
+    workflow = ROOT / ".github" / "workflows" / "ci.yml"
+    assert "scripts/verify_wheel.py" in workflow.read_text(encoding="utf-8")
