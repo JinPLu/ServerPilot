@@ -102,8 +102,13 @@ class Database:
                 integrity = copied_db.execute("PRAGMA integrity_check").fetchone()
             if integrity is None or integrity[0] != "ok":
                 raise ValueError("backup integrity check failed")
-            with temporary.open("rb") as handle:
-                os.fsync(handle.fileno())
+            # Windows FlushFileBuffers (os.fsync → CRT _commit) requires
+            # GENERIC_WRITE; a read-only handle raises EBADF there.
+            descriptor = os.open(temporary, os.O_RDWR)
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
             os.replace(temporary, destination)
             # Only POSIX can open a directory to fsync the rename itself; on
             # Windows os.replace is the durability boundary available.

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -98,6 +100,32 @@ def test_backup_atomically_replaces_prior_output_and_refuses_live_database(
     assert list(destination.parent.glob(f".{destination.name}.*.tmp")) == []
     with pytest.raises(ValueError, match="must differ"):
         database.backup(source)
+
+
+def test_backup_fsyncs_the_copy_through_a_writable_handle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    root = Path(__file__).resolve().parents[1]
+    database = Database(f"sqlite:///{tmp_path / 'source.sqlite3'}", root)
+    database.migrate()
+    real_fsync = os.fsync
+    writable_regular: list[int] = []
+
+    def recording_fsync(descriptor: int) -> None:
+        if stat.S_ISREG(os.fstat(descriptor).st_mode):
+            if os.name == "posix":
+                import fcntl
+
+                access = fcntl.fcntl(descriptor, fcntl.F_GETFL) & os.O_ACCMODE
+                assert access != os.O_RDONLY
+            writable_regular.append(descriptor)
+        real_fsync(descriptor)
+
+    monkeypatch.setattr("serverpilot.database.os.fsync", recording_fsync)
+    backup = database.backup(tmp_path / "backups" / "snapshot.sqlite3")
+
+    assert writable_regular
+    assert backup.is_file()
 
 
 def test_migration_upgrades_existing_schema_to_endpoint_telemetry(tmp_path: Path) -> None:

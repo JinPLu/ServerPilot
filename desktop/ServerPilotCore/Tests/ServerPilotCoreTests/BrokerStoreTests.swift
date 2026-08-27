@@ -635,7 +635,11 @@ final class BrokerStoreTests: XCTestCase {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
-        let snapshot = try Self.snapshot(named: "1")
+        var snapshot = try Self.snapshot(named: "1")
+        // Mutations raise a snapshot_revision floor from their response. A
+        // repeating snapshot that stays behind that floor fail-closes the
+        // store, so later mutations never reach the network.
+        snapshot.snapshotRevision = 102
         let endpoint = try XCTUnwrap(snapshot.endpoints.first)
         let capabilities: Set<String> = ["endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup"]
         let serviceInfo = ServiceInfo(schemaVersion: "v1", capabilities: capabilities)
@@ -667,6 +671,7 @@ final class BrokerStoreTests: XCTestCase {
             updateRecorder.message = message
         }
         try await waitUntil { updateRecorder.success != nil }
+        XCTAssertEqual(updateRecorder.success, true)
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1")
         let updateBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
@@ -681,6 +686,7 @@ final class BrokerStoreTests: XCTestCase {
             keepaliveRecorder.message = message
         }
         try await waitUntil { keepaliveRecorder.success != nil }
+        XCTAssertEqual(keepaliveRecorder.success, true)
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1/keepalive")
         let keepaliveBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
@@ -697,6 +703,7 @@ final class BrokerStoreTests: XCTestCase {
             conflictRecorder.message = message
         }
         try await waitUntil { conflictRecorder.success != nil }
+        XCTAssertEqual(conflictRecorder.success, true)
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
         XCTAssertEqual(
             StateRouteURLProtocol.lastRequest?.url?.path,
@@ -709,6 +716,7 @@ final class BrokerStoreTests: XCTestCase {
             deleteRecorder.message = message
         }
         try await waitUntil { deleteRecorder.success != nil }
+        XCTAssertEqual(deleteRecorder.success, true)
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "DELETE")
         XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1")
 
@@ -1558,6 +1566,8 @@ private actor CancellationIgnoringClient: BrokerSnapshotClient {
 /// reloads after each one, and with `refreshIntervalSeconds: 0` the poller
 /// drains the script, after which failing refreshes disconnect the store and
 /// the next mutation is refused before it ever reaches the network.
+/// The repeating snapshot's revision must also meet the mutation response's
+/// `snapshot_revision` floor; a behind snapshot fail-closes the same way.
 private actor RepeatingClient: BrokerSnapshotClient {
     private let stored: BrokerSnapshot
 
