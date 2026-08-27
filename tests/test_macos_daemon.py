@@ -504,12 +504,14 @@ def test_probe_owned_ready_rejects_unrelated_child_process(
 def _message(output: str) -> str:
     """Reduce a Click error box to its words.
 
-    The box colours the message and wraps it to the terminal width, so the exact
-    sentence is split by border characters at a width that differs between a
-    developer's terminal and CI.
+    Rich styles an option name from the inside, so with colour enabled the raw
+    output holds escapes between the two dashes of `--db`. Those have to be
+    removed rather than replaced by a space, or the sentence reads `- -db`. The
+    box also wraps the message to a terminal width that differs between a
+    developer's terminal and CI, so its borders become separators.
     """
 
-    plain = re.sub(r"\x1b\[[0-9;]*m", " ", output)
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
     return " ".join(re.sub(r"[│╭╮╰╯─]", " ", plain).split())
 
 
