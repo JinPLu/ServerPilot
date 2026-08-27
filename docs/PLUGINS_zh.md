@@ -10,12 +10,33 @@
 
 | 动词 | 谁调用 | 作用 | 输出 |
 | --- | --- | --- | --- |
-| `info` | 发现 / `plugin list` | 自述 | `{plugin_id, display_name, schema_version, capabilities}` |
+| `info` | 发现 / `plugin list` | 自述 | `{plugin_id, display_name, schema_version, capabilities, limits}`，可选 `description` |
 | `observe` | 采集器 | 读取当前用户可见容量 | schema v2 JSON，与 `serverpilot-collect` 相同 |
 | `apply --gpu-count N --task-ref REF` | `BrokerService` 在分配前 | 立即申请 | `{allocation_ref, gpus[], ssh{host,port,user}, workspace_path, cuda_visible_devices}` |
 | `release --allocation-ref REF` | `BrokerService` 在释放租约时 | 释放该次分配 | `{state: "released"}` |
 
-`schema_version` 必须是 `2`。`plugin_id` 必须匹配 `^[a-z][a-z0-9-]{1,39}$`，并与文件名一致。`capabilities` 取 `observe` / `apply` / `release` 的子集，声明了的动词才会被调用。排队式集群做不到「立即拿到」时只声明 `observe`。
+`info.schema_version` 必须是 `3`（`PLUGIN_SCHEMA_VERSION`）。`plugin_id` 必须匹配 `^[a-z][a-z0-9-]{1,39}$`，并与文件名一致。`capabilities` 取 `observe` / `apply` / `release` 的子集，声明了的动词才会被调用。排队式集群做不到「立即拿到」时只声明 `observe`。
+
+`observe` 的采集 JSON 仍是 schema v2，和 `serverpilot-collect` 同一份合同；变的是插件 `info` 契约，不要把两个版本号混成一个。
+
+### `info.limits`
+
+v3 的 `info` **必须**带 `limits` 对象，四键齐全、不许多键。缺块、缺键、多未知键，都和错误的 `schema_version` 一样：`probe_plugin` 失败。
+
+| 字段 | 含义 | 取值 |
+| --- | --- | --- |
+| `lease_ends` | 这次分配怎么结束。集群到点杀作业，和持有到调用方 `release`，对同一实验不可互换，所以必须声明，不能靠推断。 | `on_release` 或 `hard_kill_at_time_limit` |
+| `max_lease_seconds` | 硬时限秒数。`hard_kill_at_time_limit` 时必填正整数（1–2592000，即最多 30 天）；`on_release` 时必须是 `null`。 | 正整数或 `null` |
+| `apply_max_seconds` | 这次 `apply` 最多等多久。不声明等待窗口就写 `null`。 | 正整数（1–3600）或 `null` |
+| `queues` | 当前契约不接受排队。 | 必须是 `false` |
+
+内置观测 profile（`linux-nvidia` / `linux-host` / `server-script-v1`）等价于 `on_release`、两个时限 `null`、`queues: false`。随包 `slurm-immediate` 声明 `hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、`queues: false`。
+
+### 停留在 v2 会怎样
+
+已经放进插件目录、但仍返回 `schema_version: 2` 或缺少合法 `limits` 的可执行文件，**不会在发现时打出错误**。`discover_plugins` 对 `probe_plugin` 的失败直接 `continue`，`plugin list` 里看不到它，控制面当它不存在。文件还在目录里，人容易以为「已经装好了」。
+
+`serverpilot plugin add` 走同一套 `probe_plugin`，会当场拒绝并报 `schema_version must be 3` 或 `limits` 校验失败。坑在已经就位、只靠发现的那条路径：升级控制面之后，旧插件会静默从列表里消失，对应集群不再被观测或申请。
 
 坏输出、超时或超长 stdout 一律失败，不降级。`apply` 失败时释放掉已拿到的部分。
 
@@ -29,7 +50,7 @@
 2. 仓库检出目录：仓库根目录 `plugins/`（若存在；给本地开发用，不随发行版分发）
 3. 用户目录：macOS `~/Library/Application Support/ServerPilot/plugins`，Windows `%LOCALAPPDATA%\ServerPilot\plugins`
 
-发现时会对每个可执行文件跑一次 `info`；跑失败的文件直接忽略，不影响整个列表。`info` 不依赖集群配置，没配置好的参考插件也能被列出来。
+发现时会对每个可执行文件跑一次 `info`；跑失败的文件直接忽略，不影响整个列表——包括仍停留在 v2、或 v3 但 `limits` 不合法的文件。`info` 不依赖集群配置，没配置好的参考插件也能被列出来。
 
 ## 安装
 

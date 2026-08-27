@@ -39,15 +39,32 @@ struct HomeCard<Content: View>: View {
 }
 
 /// Group label above a run of rows inside a card.
+///
+/// `accessory` is a quiet chip for a fact that would otherwise occupy a
+/// whole field — allocation mode next to「服务器组」, for example.
 struct CardSectionLabel: View {
     let text: String
+    var accessory: String? = nil
 
     var body: some View {
-        Text(text)
-            .font(Typography.metricLabel)
-            .foregroundStyle(DesignTokens.mutedInk)
-            .textCase(nil)
-            .accessibilityAddTraits(.isHeader)
+        HStack(alignment: .center, spacing: 8) {
+            Text(text)
+                .font(Typography.metricLabel)
+                .foregroundStyle(DesignTokens.mutedInk)
+                .textCase(nil)
+                .accessibilityAddTraits(.isHeader)
+            if let accessory, !accessory.isEmpty {
+                Text(accessory)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .padding(.horizontal, 7)
+                    .frame(height: 20)
+                    .background(
+                        DesignTokens.ink.opacity(0.045),
+                        in: Capsule()
+                    )
+            }
+        }
     }
 }
 

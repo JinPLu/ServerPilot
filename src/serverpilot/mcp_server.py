@@ -19,7 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from serverpilot import __version__
-from serverpilot.client import BrokerClient, BrokerClientError
+from serverpilot.client import BrokerClient, BrokerClientError, control_plane_async_httpx_client
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
 # The agent surface reports the GPU state code, not the control plane's
@@ -181,8 +181,11 @@ async def _client_call(target: Any, method: str, *args: Any, **kwargs: Any) -> A
 @asynccontextmanager
 async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     global _http_client
+    # Starts the macOS LaunchAgent when needed, then refuses a control plane
+    # from another release on every platform — including Windows, where
+    # ensure_broker_ready_for_mcp does not start a daemon.
     await anyio.to_thread.run_sync(ensure_broker_ready_for_mcp)
-    async with httpx.AsyncClient(timeout=20.0, trust_env=False) as client:
+    async with control_plane_async_httpx_client(timeout=20.0) as client:
         _http_client = client
         try:
             yield {}
@@ -780,10 +783,12 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
     for record in catalog:
         group_id = record["id"]
         servers = grouped_servers.get(group_id, [])
+        if not servers:
+            continue
         server_groups.append(_routine_group_projection(record, servers))
         emitted_group_ids.add(group_id)
     for group_id, servers in grouped_servers.items():
-        if group_id in emitted_group_ids:
+        if group_id in emitted_group_ids or not servers:
             continue
         record = catalog_by_id.get(group_id, {"id": group_id})
         server_groups.append(_routine_group_projection(record, servers))

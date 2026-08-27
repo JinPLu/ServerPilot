@@ -22,6 +22,8 @@ from urllib.parse import urlparse
 
 import httpx
 
+from . import API_CAPABILITIES, __version__
+from .client import control_plane_http_request
 from .config import ConfigurationError, load_inventory
 
 try:
@@ -33,22 +35,12 @@ except ImportError:  # pragma: no cover - the first implementation is macOS-only
 DAEMON_LABEL = "local.serverpilot.daemon"
 LEGACY_DAEMON_LABEL = "local.gpu-broker.daemon"
 # A daemon can keep the same semantic version while still running an older
-# in-memory module after ``uv tool install --force`` or an app rebuild.  Keep a
-# small capability floor for the lifecycle probe so ``ensure`` treats that
-# process as stale and restarts the owned LaunchAgent.  This is deliberately a
-# feature capability (rather than a timestamp or package version): it is
-# stable across installs and cannot be spoofed by an unchanged semver.
-EXPECTED_CAPABILITIES = frozenset(
-    {
-        "endpoint_conflict_cleanup",
-        "endpoint_delete",
-        "operator_lease_release",
-        "cuda_ordinal_selectors",
-        "keepalive_protocol_v3",
-        "keepalive_worker_attestation",
-        "telemetry_recent_averages",
-    }
-)
+# in-memory module after ``uv tool install --force``. Capabilities (rather
+# than a timestamp) are the stable floor: they cannot be spoofed by an
+# unchanged semver. The running ``/health/live`` version is the second check,
+# so ``ensure`` also restarts an owned LaunchAgent that still advertises every
+# current capability but has not been replaced into this release.
+EXPECTED_CAPABILITIES = frozenset(API_CAPABILITIES)
 DAEMON_PROTOCOL = "macos-launchagent-v1"
 
 
@@ -157,10 +149,10 @@ def daemon_instance_id(config: DaemonConfig) -> str:
 
 def _probe_json(url: str, path: str, timeout_seconds: float = 0.8) -> dict[str, Any] | None:
     try:
-        response = httpx.get(
+        response = control_plane_http_request(
+            "GET",
             f"{url}{path}",
             timeout=timeout_seconds,
-            trust_env=False,
         )
     except httpx.HTTPError:
         return None
@@ -190,6 +182,11 @@ def probe_live(config: DaemonConfig) -> dict[str, Any] | None:
     ):
         raise DaemonError(
             f"{config.base_url} is occupied by an incompatible ServerPilot service"
+        )
+    if payload.get("version") != __version__:
+        raise DaemonError(
+            f"{config.base_url} is running ServerPilot {payload.get('version')}, "
+            f"expected {__version__}"
         )
     return payload
 
@@ -684,6 +681,9 @@ class MacOSDaemonManager:
     ) -> dict[str, Any]:
         self._bootout_legacy_if_loaded()
         try:
+            # Stale means the owned process is missing a declared capability or
+            # is not this release's ``version``. ``probe_live`` raises in both
+            # cases; if we still own the LaunchAgent, fall through and replace it.
             if self._probe_owned_ready() is not None:
                 return self.status()
         except DaemonError:
@@ -702,12 +702,35 @@ class MacOSDaemonManager:
             return self.status()
 
 
+def assert_control_plane_matches_release(*, base_url: str | None = None) -> None:
+    """Refuse an MCP session whose loopback service is not this release."""
+
+    url = (base_url or os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787")).rstrip(
+        "/"
+    )
+    payload = _probe_json(url, "/health/live")
+    if payload is None:
+        raise DaemonError(
+            f"{url} is not reachable. Start the ServerPilot control plane and retry."
+        )
+    capabilities = payload.get("capabilities")
+    cap_list = capabilities if isinstance(capabilities, list) else []
+    missing = sorted(EXPECTED_CAPABILITIES.difference(cap_list))
+    running = payload.get("version")
+    if running != __version__ or missing:
+        missing_text = f" and is missing capabilities {missing}" if missing else ""
+        raise DaemonError(
+            f"this MCP is ServerPilot {__version__}, but the control plane at {url} "
+            f"is {running}{missing_text}. Restart the ServerPilot control plane so both match."
+        )
+
+
 def ensure_broker_ready_for_mcp() -> None:
-    if sys.platform != "darwin":
-        return
-    if os.environ.get("SERVERPILOT_AUTOSTART", "1").lower() in {"0", "false", "no"}:
-        return
-    MacOSDaemonManager().ensure()
+    if sys.platform == "darwin" and os.environ.get(
+        "SERVERPILOT_AUTOSTART", "1"
+    ).lower() not in {"0", "false", "no"}:
+        MacOSDaemonManager().ensure()
+    assert_control_plane_matches_release()
 
 
 def format_status(value: dict[str, Any], *, as_json: bool) -> str:

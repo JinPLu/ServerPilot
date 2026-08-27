@@ -28,21 +28,7 @@ jobs:
           python-version: "3.12"
       - name: Refuse to build a version the tag does not name
         shell: bash
-        run: |
-          python - <<'PY'
-          import os
-          import re
-          from pathlib import Path
-
-          source = Path("src/serverpilot/__init__.py").read_text(encoding="utf-8")
-          match = re.search(r'^__version__ = "([^"]+)"$', source, re.MULTILINE)
-          if match is None:
-              raise SystemExit("cannot read __version__ from src/serverpilot/__init__.py")
-          version = match.group(1)
-          tag = os.environ["RELEASE_TAG"]
-          if tag != f"v{version}":
-              raise SystemExit(f"tag {tag} does not match __version__ {version}")
-          PY
+        run: python scripts/release_metadata.py check-tag
       - name: Verify Windows launcher contract
         run: uv run --extra dev --extra windows pytest tests/test_windows_launcher.py -q
       - name: Build Windows desktop app

@@ -5,18 +5,23 @@ script_dir=${0:A:h}
 project_root=${script_dir:h}
 app_bundle="${1:-${project_root}/ServerPilot.app}"
 frontend="${app_bundle}/Contents/MacOS/ServerPilot"
+inventory="${app_bundle}/Contents/Resources/configs/inventory.yaml"
 runtime_root="${app_bundle}/Contents/Resources/ServerPilotRuntime"
-backend="${runtime_root}/serverpilot"
-inventory="${runtime_root}/configs/inventory.yaml"
 
-for required in "${frontend}" "${backend}" "${inventory}"; do
-  if [[ ! -e "${required}" ]]; then
-    print -u2 "Missing standalone app resource: ${required}"
-    exit 1
-  fi
-done
-if [[ ! -x "${frontend}" || ! -x "${backend}" ]]; then
-  print -u2 "Bundled frontend/backend is not executable"
+if [[ ! -e "${frontend}" ]]; then
+  print -u2 "Missing standalone app resource: ${frontend}"
+  exit 1
+fi
+if [[ ! -e "${inventory}" ]]; then
+  print -u2 "Missing bundled inventory seed: ${inventory}"
+  exit 1
+fi
+if [[ ! -x "${frontend}" ]]; then
+  print -u2 "Bundled frontend is not executable"
+  exit 1
+fi
+if [[ -e "${runtime_root}" ]]; then
+  print -u2 "App must not bundle ServerPilotRuntime; the installed CLI is the only backend"
   exit 1
 fi
 
@@ -30,7 +35,6 @@ xattr -d 'com.apple.fileprovider.fpfs#P' "${app_bundle}" 2>/dev/null || true
   xattr -cr "${signature_check_bundle}"
   codesign --verify --deep --strict "${signature_check_bundle}"
 )
-"${backend}" --help >/dev/null
 
 external_links="$(otool -L "${frontend}" | tail -n +2 | awk '{print $1}' | grep -Ev '^(/System/|/usr/lib/)' || true)"
 if [[ -n "${external_links}" ]]; then
@@ -39,60 +43,33 @@ if [[ -n "${external_links}" ]]; then
   exit 1
 fi
 
-smoke_dir="$(mktemp -d /tmp/serverpilot-standalone-smoke.XXXXXX)"
-smoke_pid=""
-cleanup() {
-  if [[ -n "${smoke_pid}" ]] && kill -0 "${smoke_pid}" 2>/dev/null; then
-    kill "${smoke_pid}" 2>/dev/null || true
-    wait "${smoke_pid}" 2>/dev/null || true
+resolve_installed_cli() {
+  local candidates=()
+  if [[ -n "${SERVERPILOT_CLI:-}" ]]; then
+    candidates+=("${SERVERPILOT_CLI}")
   fi
-  rm -rf "${smoke_dir}"
+  candidates+=("${HOME}/.local/share/uv/tools/serverpilot/bin/serverpilot")
+  local from_path
+  from_path="$(command -v serverpilot || true)"
+  if [[ -n "${from_path}" ]]; then
+    candidates+=("${from_path}")
+  fi
+  candidates+=("/opt/homebrew/bin/serverpilot" "/usr/local/bin/serverpilot")
+  local candidate
+  for candidate in "${candidates[@]}"; do
+    if [[ -x "${candidate}" ]]; then
+      print -- "${candidate}"
+      return 0
+    fi
+  done
+  return 1
 }
-trap cleanup EXIT
 
-smoke_port="$(python3 -c 'import socket; s=socket.socket(); s.bind(("127.0.0.1", 0)); print(s.getsockname()[1]); s.close()')"
-(
-  cd /tmp
-  exec "${backend}" serve \
-    --db "${smoke_dir}/serverpilot.sqlite3" \
-    --inventory "${inventory}" \
-    --host 127.0.0.1 \
-    --port "${smoke_port}"
-) >"${smoke_dir}/server.log" 2>&1 &
-smoke_pid=$!
-
-ready=false
-for _attempt in {1..150}; do
-  if curl --fail --silent "http://127.0.0.1:${smoke_port}/health/ready" >"${smoke_dir}/ready.json"; then
-    ready=true
-    break
-  fi
-  if ! kill -0 "${smoke_pid}" 2>/dev/null; then
-    print -u2 "Bundled backend exited during standalone smoke test"
-    sed -n '1,200p' "${smoke_dir}/server.log" >&2
-    exit 1
-  fi
-  sleep 0.1
-done
-if [[ "${ready}" != true ]]; then
-  print -u2 "Bundled backend did not become ready"
-  sed -n '1,200p' "${smoke_dir}/server.log" >&2
+cli="$(resolve_installed_cli || true)"
+if [[ -z "${cli}" ]]; then
+  print -u2 "No installed ServerPilot CLI found. Install or upgrade with: uv tool install --force ."
   exit 1
 fi
-
-curl --fail --silent \
-  -H 'X-ServerPilot-Actor: standalone-smoke' \
-  "http://127.0.0.1:${smoke_port}/api/v1/snapshot" \
-  >"${smoke_dir}/snapshot.json"
-python3 - "${smoke_dir}/snapshot.json" <<'PY'
-import json
-import pathlib
-import sys
-
-payload = json.loads(pathlib.Path(sys.argv[1]).read_text(encoding="utf-8"))
-assert payload["schema_version"] == "v1"
-assert payload["data"]["summary"]["total_servers"] == 0
-assert payload["data"]["summary"]["total_gpus"] == 0
-PY
+"${cli}" --help >/dev/null
 
 print "Standalone macOS app verification: PASS"

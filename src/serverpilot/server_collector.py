@@ -22,6 +22,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
+from serverpilot import __version__
 from serverpilot.collector_protocol import SERVER_SCRIPT_SCHEMA_VERSION
 
 GPU_QUERY = (
@@ -330,6 +331,7 @@ def collect_snapshot() -> dict[str, Any]:
     gpu_probe_status, gpus, processes = _gpu_snapshot()
     return {
         "schema_version": SERVER_SCRIPT_SCHEMA_VERSION,
+        "implementation_version": __version__,
         "identity": {
             "hostname": socket.gethostname(),
             "boot_id": _read_required("/proc/sys/kernel/random/boot_id").strip(),

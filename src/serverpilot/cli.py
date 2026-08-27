@@ -477,7 +477,105 @@ def history(as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotat
 
 @app.command("doctor")
 def doctor(as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None, actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None) -> None:
-    _print(_call(lambda: _client(url, actor).get("/api/v1/doctor")), as_json)
+    payload = _call(lambda: _client(url, actor).get("/api/v1/doctor"))
+    if isinstance(payload, dict):
+        data = payload.get("data")
+        if isinstance(data, dict):
+            versions = data.setdefault("versions", {})
+            if isinstance(versions, dict):
+                versions["cli"] = __version__
+    if as_json:
+        _print(payload, True)
+        return
+    _print_doctor_report(payload)
+
+
+def _print_doctor_report(payload: Any) -> None:
+    data = payload.get("data", payload) if isinstance(payload, dict) else payload
+    if not isinstance(data, dict):
+        _print(payload, False)
+        return
+    versions = data.get("versions") if isinstance(data.get("versions"), dict) else {}
+    control_plane = versions.get("control_plane")
+    cli_version = versions.get("cli") or __version__
+    mcp = versions.get("mcp") if isinstance(versions.get("mcp"), dict) else {}
+    collectors = versions.get("collectors") if isinstance(versions.get("collectors"), list) else []
+    rows: list[tuple[str, str, str]] = [
+        (
+            "控制面 daemon",
+            _doctor_version_text(control_plane),
+            _doctor_compare_status(control_plane, cli_version, present=True),
+        ),
+        ("本机 CLI", _doctor_version_text(cli_version), "当前安装"),
+        (
+            "MCP 入口",
+            _doctor_version_text(mcp.get("version") if mcp.get("available") else None),
+            (
+                _doctor_compare_status(mcp.get("version"), cli_version, present=bool(mcp.get("available")))
+                if mcp.get("available")
+                else "未找到"
+            ),
+        ),
+    ]
+    for item in collectors:
+        if not isinstance(item, dict):
+            continue
+        endpoint_id = str(item.get("endpoint_id") or "")
+        applies = bool(item.get("applies"))
+        reported = item.get("implementation_version")
+        if applies:
+            status = _doctor_compare_status(reported, cli_version, present=bool(item.get("reported")))
+        else:
+            status = "不适用（内置探针）"
+        rows.append((f"collector {endpoint_id}", _doctor_version_text(reported), status))
+    typer.echo("组件版本")
+    component_width = max(8, *(len(row[0]) for row in rows))
+    version_width = max(4, *(len(row[1]) for row in rows))
+    typer.echo(
+        f"{'组件'.ljust(component_width)}  {'版本'.ljust(version_width)}  状态"
+    )
+    typer.echo(
+        f"{'-' * component_width}  {'-' * version_width}  ----"
+    )
+    for component, version, status in rows:
+        typer.echo(f"{component.ljust(component_width)}  {version.ljust(version_width)}  {status}")
+    failures = data.get("plugin_discovery_failures")
+    typer.echo("")
+    typer.echo("插件发现失败")
+    if not failures:
+        typer.echo("无")
+    else:
+        for failure in failures:
+            if not isinstance(failure, dict):
+                continue
+            label = failure.get("plugin_id") or failure.get("path") or "unknown"
+            source = failure.get("source") or "unknown"
+            error = failure.get("error") or ""
+            typer.echo(f"- {label} ({source}): {error}")
+    next_steps = list(data.get("next_steps") or [])
+    if control_plane and control_plane != cli_version:
+        next_steps.insert(0, "本机 CLI 与控制面版本不一致，请重启控制面后再运行 doctor")
+    typer.echo("")
+    typer.echo("下一步")
+    if not next_steps:
+        typer.echo("- 各组件版本一致，无需操作")
+        return
+    for step in next_steps:
+        typer.echo(f"- {step}")
+
+
+def _doctor_version_text(value: Any) -> str:
+    if value is None or value == "":
+        return "未报告"
+    return str(value)
+
+
+def _doctor_compare_status(actual: Any, expected: Any, *, present: bool) -> str:
+    if not present or actual is None or actual == "":
+        return "未报告"
+    if actual == expected:
+        return "一致"
+    return "不一致"
 
 
 @collect_app.command("once")

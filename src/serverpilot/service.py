@@ -6,7 +6,7 @@ import hashlib
 import re
 import secrets
 import threading
-from collections import defaultdict
+from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -16,7 +16,7 @@ from typing import Any, TypeVar
 from sqlalchemy import delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
-from serverpilot import SCHEMA_VERSION
+from serverpilot import SCHEMA_VERSION, __version__
 from serverpilot.config import RESERVED_SYSTEM_ID, EndpointConfig, InventoryConfig
 from serverpilot.database import Database
 from serverpilot.models import (
@@ -83,6 +83,8 @@ MUTATING_ROLES = {"allocator", "operator", "admin"}
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
 COLLECTOR_INTERVAL_SETTING_KEY = "collector_interval_seconds"
 PLUGIN_CAPACITY_SETTING_PREFIX = "pc:"
+COLLECTOR_VERSION_SETTING_PREFIX = "civ:"
+REMOTE_COLLECTOR_PROFILES = frozenset({"server-script-v1"})
 # Routine coordination is cooperative, not an administrative workflow.
 # Endpoint inventory is shared on loopback; owner_project_id is attribution,
 # not an endpoint-management permission boundary. Lease/request ownership still
@@ -128,6 +130,15 @@ def _as_utc(value: datetime | None) -> datetime | None:
 
 def _iso(value: datetime | None) -> str | None:
     return _as_utc(value).isoformat() if value is not None else None
+
+
+def _gpu_history_series_label(*, gpu_index: int, gpu_uuid: str, index_count: int) -> str:
+    """Keep the usual ``GPU N`` label unless two present cards share an index."""
+
+    label = f"GPU {gpu_index}"
+    if index_count > 1:
+        return f"{label} ({gpu_uuid})"
+    return label
 
 
 def _external_datetime(value: str | None) -> datetime | None:
@@ -1223,6 +1234,31 @@ class BrokerService:
     def _plugin_capacity_key(endpoint_id: str) -> str:
         digest = hashlib.sha256(endpoint_id.encode("utf-8")).hexdigest()[:60]
         return f"{PLUGIN_CAPACITY_SETTING_PREFIX}{digest}"
+
+    @staticmethod
+    def _collector_version_key(endpoint_id: str) -> str:
+        digest = hashlib.sha256(endpoint_id.encode("utf-8")).hexdigest()[:60]
+        return f"{COLLECTOR_VERSION_SETTING_PREFIX}{digest}"
+
+    def _persist_collector_implementation_version(
+        self,
+        session: Session,
+        endpoint_id: str,
+        version: str | None,
+        *,
+        now: datetime,
+    ) -> None:
+        key = self._collector_version_key(endpoint_id)
+        setting = session.get(RuntimeSetting, key)
+        if version is None:
+            if setting is not None:
+                session.delete(setting)
+            return
+        if setting is None:
+            session.add(RuntimeSetting(key=key, value=version, updated_at=now))
+            return
+        setting.value = version
+        setting.updated_at = now
 
     @staticmethod
     def _encode_plugin_capacity(capacity: Mapping[str, Any]) -> str:
@@ -4267,11 +4303,15 @@ class BrokerService:
                 "server_groups": [
                     self._project_server_group(
                         group,
-                        endpoints=endpoints,
+                        endpoints=visible_endpoints,
                         gpu_payloads=all_gpu_payloads,
                         endpoint_payloads=endpoint_payloads,
                     )
                     for group in groups.values()
+                    if endpoint_id is None
+                    or any(
+                        endpoint.server_group_id == group.id for endpoint in visible_endpoints
+                    )
                 ],
                 "gpus": gpu_payloads,
                 "absent_gpu_ids": absent_gpu_ids,
@@ -4485,7 +4525,10 @@ class BrokerService:
             devices = list(
                 session.scalars(
                     select(GPUDevice)
-                    .where(GPUDevice.endpoint_id == endpoint.id)
+                    .where(
+                        GPUDevice.endpoint_id == endpoint.id,
+                        GPUDevice.present.is_(True),
+                    )
                     .order_by(GPUDevice.gpu_index, GPUDevice.id)
                 ).all()
             )
@@ -4522,9 +4565,14 @@ class BrokerService:
                     ):
                         history.append(reading)
 
+            sampled = [
+                (device, readings_by_gpu[device.id])
+                for device in devices
+                if readings_by_gpu[device.id]
+            ]
+            index_counts = Counter(device.gpu_index for device, _readings in sampled)
             gpu_series = []
-            for device in devices:
-                readings = readings_by_gpu[device.id]
+            for device, readings in sampled:
                 series_points = []
                 for bucket in buckets_for(readings):
                     memory_used = average(bucket, "memory_used_mib")
@@ -4546,7 +4594,11 @@ class BrokerService:
                         "gpu_id": device.id,
                         "gpu_uuid": device.gpu_uuid,
                         "gpu_index": device.gpu_index,
-                        "label": f"GPU {device.gpu_index}",
+                        "label": _gpu_history_series_label(
+                            gpu_index=device.gpu_index,
+                            gpu_uuid=device.gpu_uuid,
+                            index_count=index_counts[device.gpu_index],
+                        ),
                         "points": series_points,
                     }
                 )
@@ -4677,13 +4729,23 @@ class BrokerService:
         return revision
 
     def ingest_observation(
-        self, observation: EndpointObservation, *, provider: str = "raw-ssh"
+        self,
+        observation: EndpointObservation,
+        *,
+        provider: str = "raw-ssh",
+        implementation_version: str | None = None,
     ) -> dict[str, Any]:
         """Persist one all-or-nothing read-only endpoint observation.
 
         Collector data is accepted only from an internal collector call in the
         pilot. The HTTP layer never exposes arbitrary remote command execution.
         """
+
+        from serverpilot.collector_protocol import take_collector_implementation_version
+
+        resolved_version = implementation_version
+        if resolved_version is None:
+            resolved_version = take_collector_implementation_version(observation)
 
         def operation(session: Session) -> dict[str, Any]:
             now = utcnow()
@@ -4720,6 +4782,9 @@ class BrokerService:
                 endpoint.updated_at = now
             self._persist_plugin_capacity(
                 session, endpoint, observation.scheduler, now=now
+            )
+            self._persist_collector_implementation_version(
+                session, endpoint.id, resolved_version, now=now
             )
             host_cpu_total_ticks = observation.host.cpu_total_ticks
             host_cpu_idle_ticks = observation.host.cpu_idle_ticks
@@ -8968,6 +9033,9 @@ class BrokerService:
         self._require_role(actor, {"viewer", "allocator", "operator", "admin"})
 
         def operation(session: Session) -> dict[str, Any]:
+            from serverpilot.mcp_entry import mcp_entry_status
+            from serverpilot.plugins import discover_plugins_with_failures
+
             now = utcnow()
             gpus = session.scalars(select(GPUDevice)).all()
             present_gpus = [gpu for gpu in gpus if gpu.present]
@@ -8979,14 +9047,88 @@ class BrokerService:
             provider_states = session.scalars(
                 select(ProviderState).order_by(ProviderState.endpoint_id)
             ).all()
+            endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
+            plugins, plugin_failures = discover_plugins_with_failures()
+            plugin_ids = {plugin.plugin_id for plugin in plugins}
+            collectors = []
+            version_mismatches: list[dict[str, Any]] = []
+            next_steps: list[str] = []
+            for endpoint in endpoints:
+                applies = (
+                    endpoint.observation_profile in REMOTE_COLLECTOR_PROFILES
+                    or endpoint.observation_profile in plugin_ids
+                )
+                setting = session.get(RuntimeSetting, self._collector_version_key(endpoint.id))
+                reported = setting.value if setting is not None and setting.value else None
+                if not applies:
+                    status = "not_applicable"
+                elif reported is None:
+                    status = "unreported"
+                    version_mismatches.append(
+                        {
+                            "component": "collector",
+                            "id": endpoint.id,
+                            "expected": __version__,
+                            "actual": None,
+                            "next_step": f"在 {endpoint.id} 上重装与控制面同版本的 collector",
+                        }
+                    )
+                    next_steps.append(f"在 {endpoint.id} 上重装与控制面同版本的 collector")
+                elif reported != __version__:
+                    status = "mismatch"
+                    version_mismatches.append(
+                        {
+                            "component": "collector",
+                            "id": endpoint.id,
+                            "expected": __version__,
+                            "actual": reported,
+                            "next_step": f"在 {endpoint.id} 上重装与控制面同版本的 collector",
+                        }
+                    )
+                    next_steps.append(f"在 {endpoint.id} 上重装与控制面同版本的 collector")
+                else:
+                    status = "ok"
+                collectors.append(
+                    {
+                        "endpoint_id": endpoint.id,
+                        "observation_profile": endpoint.observation_profile,
+                        "implementation_version": reported,
+                        "reported": reported is not None,
+                        "applies": applies,
+                        "status": status,
+                    }
+                )
+            mcp = mcp_entry_status()
+            mcp_version = __version__ if mcp["available"] else None
+            if not mcp["available"]:
+                version_mismatches.append(
+                    {
+                        "component": "mcp",
+                        "id": None,
+                        "expected": __version__,
+                        "actual": None,
+                        "next_step": "未找到 serverpilot-mcp，请安装或检查本机 MCP 入口",
+                    }
+                )
+                next_steps.append("未找到 serverpilot-mcp，请安装或检查本机 MCP 入口")
+            failure_payload = [
+                {
+                    "path": str(failure.path),
+                    "source": failure.source,
+                    "error": failure.error,
+                    "plugin_id": failure.plugin_id,
+                }
+                for failure in plugin_failures
+            ]
+            for failure in failure_payload:
+                label = failure["plugin_id"] or failure["path"]
+                next_steps.append(f"插件 {label} 发现失败：{failure['error']}")
             return self.envelope(
                 session,
                 {
                     "database_ready": self.database.ready(),
                     "snapshot_revision": self._revision(session),
-                    "inventory_endpoints": session.scalar(
-                        select(func.count()).select_from(Endpoint)
-                    ),
+                    "inventory_endpoints": len(endpoints),
                     "discovered_gpus": len(present_gpus),
                     "historical_gpu_records": len(gpus),
                     "stale_or_recovering_gpus": stale,
@@ -9002,6 +9144,18 @@ class BrokerService:
                         }
                         for state in provider_states
                     ],
+                    "versions": {
+                        "control_plane": __version__,
+                        "mcp": {
+                            "available": mcp["available"],
+                            "command": mcp["command"],
+                            "version": mcp_version,
+                        },
+                        "collectors": collectors,
+                    },
+                    "plugin_discovery_failures": failure_payload,
+                    "version_mismatches": version_mismatches,
+                    "next_steps": next_steps,
                 },
             )
 

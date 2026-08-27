@@ -104,6 +104,14 @@ class PluginError(RuntimeError):
 
 
 @dataclass(frozen=True, slots=True)
+class PluginDiscoveryFailure:
+    path: Path
+    source: PluginSource
+    error: str
+    plugin_id: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class PluginInfo:
     plugin_id: str
     display_name: str
@@ -196,7 +204,17 @@ def discover_plugins(
     home: Path | None = None,
     environment: Mapping[str, str] | None = None,
 ) -> list[PluginInfo]:
+    plugins, _failures = discover_plugins_with_failures(home=home, environment=environment)
+    return plugins
+
+
+def discover_plugins_with_failures(
+    *,
+    home: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[list[PluginInfo], list[PluginDiscoveryFailure]]:
     found: dict[str, PluginInfo] = {}
+    failures: list[PluginDiscoveryFailure] = []
     for directory, source in plugin_search_dirs(home=home, environment=environment):
         if not directory.is_dir():
             continue
@@ -205,10 +223,18 @@ def discover_plugins(
                 continue
             try:
                 info = probe_plugin(path, source=source)
-            except PluginError:
+            except PluginError as exc:
+                failures.append(
+                    PluginDiscoveryFailure(
+                        path=path.resolve(),
+                        source=source,
+                        error=str(exc),
+                        plugin_id=path.name if is_valid_plugin_id(path.name) else None,
+                    )
+                )
                 continue
             found[info.plugin_id] = info
-    return sorted(found.values(), key=lambda item: item.plugin_id)
+    return sorted(found.values(), key=lambda item: item.plugin_id), failures
 
 
 def get_plugin(

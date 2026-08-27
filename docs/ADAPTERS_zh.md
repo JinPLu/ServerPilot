@@ -29,11 +29,13 @@ ServerPilot 传入精确的物理 UUID，helper 只能管理自己的 worker。
 
 每张 GPU 独立判断：一张 GPU 冲突不会阻断同一服务器上其他空闲 GPU 的占卡启动。
 
-adapter 在做任何启停变更前，先执行只读的 `--protocol-info` 预检，要求 helper 返回
-`kind=serverpilot-keepalive`、`schema_version=3`（helper 同时报告
-`implementation_version=1.5.7`），并具备
-`per_gpu_keepalive`、`pidfd_identity`、`pci_bus_id`、`worker_attestation` 能力；预检失败返回
-`keepalive_helper_incompatible`，不发送任何变更 payload。旧 v2 wire/state 版本直接拒绝。
+adapter 在做任何启停变更前，先执行只读的 `--protocol-info` 预检。预检真正校验的是
+`kind=serverpilot-keepalive`、`schema_version=3`（`KEEPALIVE_SCHEMA_VERSION`），以及这四个能力：
+`per_gpu_keepalive`、`pidfd_identity`、`pci_bus_id`、`worker_attestation`。
+helper 还会报告 `implementation_version`，该值等于构建它的 ServerPilot 包装版本
+（`KEEPALIVE_IMPLEMENTATION_VERSION` 直接取自 `serverpilot.__version__`，当前为 `2.0.0`）；
+adapter **不**按这个数字做兼容判断。预检失败返回 `keepalive_helper_incompatible`，不发送任何变更
+payload。旧 v2 wire/state 版本直接拒绝。
 恢复时只接受 helper 自己的 v3 状态里仍然存活、且带固定 marker 的 worker：helper 对指定物理 UUID
 做固定的 NVIDIA compute 查询，必须恰好得到一个 driver-visible PID，ServerPilot 再用这个 PID 和
 Linux boot ID 与最新一次采集观测对照。helper PID namespace 内的 `start_time_ticks` 只用于本地

@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote
-from urllib.request import Request, urlopen
+from urllib.request import ProxyHandler, Request, build_opener
 
 import uvicorn
 
@@ -46,6 +46,16 @@ projects:
     concurrency_limit: null
 endpoints: []
 """
+
+
+def urlopen(url: Any, data: Any = None, timeout: float | None = None) -> Any:
+    """Open a loopback control-plane URL without env or OS proxies.
+
+    ``urllib.request.urlopen`` still consults ``getproxies()``, which on macOS
+    and Windows reads the system proxy table even when the process has no
+    ``HTTP_PROXY`` variables. The packaged UI only talks to 127.0.0.1.
+    """
+    return build_opener(ProxyHandler({})).open(url, data=data, timeout=timeout)
 
 
 class LauncherError(RuntimeError):

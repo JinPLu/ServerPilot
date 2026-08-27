@@ -15,7 +15,7 @@ private enum DesktopError: LocalizedError {
         case .projectRootMissing:
             return "应用内置运行资源不完整。请重新安装 ServerPilot.app，或为开发构建设置 SERVERPILOT_ROOT。"
         case .brokerExecutableMissing:
-            return "应用内置后台服务不完整。请重新安装 ServerPilot.app，或为开发构建设置 SERVERPILOT_CLI。"
+            return "未找到已安装的 ServerPilot CLI。请在仓库根目录执行 `uv tool install --force .` 安装或升级命令行工具后重新打开应用。开发或测试可设置 SERVERPILOT_CLI 指向可执行文件。"
         case .commandFailed(let details):
             return details
         }
@@ -35,8 +35,7 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         if let configured = ProcessInfo.processInfo.environment["SERVERPILOT_ROOT"], !configured.isEmpty {
             return URL(fileURLWithPath: configured, isDirectory: true)
         }
-        if let bundledRoot = Bundle.main.resourceURL?
-            .appendingPathComponent("ServerPilotRuntime", isDirectory: true),
+        if let bundledRoot = Bundle.main.resourceURL,
            FileManager.default.fileExists(
                atPath: bundledRoot.appendingPathComponent("configs/inventory.yaml").path
            ) {
@@ -152,26 +151,30 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private func brokerExecutable() -> URL? {
         let environment = ProcessInfo.processInfo.environment
         let home = environment["HOME"] ?? NSHomeDirectory()
-        let candidates = [
-            environment["SERVERPILOT_CLI"],
-            Bundle.main.resourceURL?
-                .appendingPathComponent("ServerPilotRuntime/serverpilot")
-                .path,
-            "\(home)/.local/share/uv/tools/serverpilot/bin/serverpilot",
+        var candidates: [String] = []
+        if let configured = environment["SERVERPILOT_CLI"], !configured.isEmpty {
+            candidates.append(configured)
+        }
+        candidates.append("\(home)/.local/share/uv/tools/serverpilot/bin/serverpilot")
+        if let path = environment["PATH"] {
+            for directory in path.split(separator: ":") {
+                candidates.append("\(directory)/serverpilot")
+            }
+        }
+        candidates.append(contentsOf: [
             "/opt/homebrew/bin/serverpilot",
-            "/usr/local/bin/serverpilot"
-        ].compactMap { $0 }
+            "/usr/local/bin/serverpilot",
+        ])
         return candidates
             .map { URL(fileURLWithPath: $0) }
             .first(where: { FileManager.default.isExecutableFile(atPath: $0.path) })
     }
 
-    private func processEnvironment(broker: URL) -> [String: String] {
+    private func processEnvironment() -> [String: String] {
         var environment = ProcessInfo.processInfo.environment
         if let root = projectRoot {
             environment["SERVERPILOT_PROJECT_ROOT"] = root.path
         }
-        environment["SERVERPILOT_DAEMON_EXECUTABLE"] = broker.path
         return environment
     }
 
@@ -255,7 +258,7 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
             return
         }
         isStarting = true
-        let environment = processEnvironment(broker: broker)
+        let environment = processEnvironment()
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self else { return }
             do {
@@ -2738,15 +2741,24 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
 private struct EndpointTelemetryGPULegend: View {
     let series: [EndpointTelemetryLineSeries]
 
+    private static let visibleLimit = 12
+
     var body: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 70), spacing: 7)], alignment: .leading, spacing: 4) {
-            ForEach(series) { line in
-                HStack(spacing: 4) {
-                    Capsule().fill(line.color).frame(width: 12, height: 3)
-                    Text(line.label).lineLimit(1)
+        VStack(alignment: .leading, spacing: 4) {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 86), spacing: 8)], alignment: .leading, spacing: 6) {
+                ForEach(Array(series.prefix(Self.visibleLimit))) { line in
+                    HStack(spacing: 4) {
+                        Capsule().fill(line.color).frame(width: 12, height: 3)
+                        Text(line.label).lineLimit(1)
+                    }
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(DesignTokens.mutedInk)
                 }
-                .font(.caption2.weight(.semibold))
-                .foregroundStyle(DesignTokens.mutedInk)
+            }
+            if series.count > Self.visibleLimit {
+                Text("另 \(series.count - Self.visibleLimit) 张未列出")
+                    .font(.caption2.weight(.medium))
+                    .foregroundStyle(DesignTokens.mutedInk)
             }
         }
         .accessibilityHidden(true)
@@ -2939,14 +2951,21 @@ private struct EndpointTelemetryPreparedHistory: Equatable {
             )
         }
 
-        gpuSeries = history.gpuSeries.map(EndpointTelemetryPreparedGPUSeries.init).sorted { $0.index < $1.index }
-        gpuUtilizationSeries = gpuSeries.enumerated().map { offset, gpu in
+        let preparedGPUs = history.gpuSeries
+            .map(EndpointTelemetryPreparedGPUSeries.init)
+            .sorted { $0.index < $1.index }
+        gpuSeries = preparedGPUs
+        // Stale device rows linger after a container rebuild: same gpu_index,
+        // empty sample arrays in this window.  They must not occupy a chart
+        // series or a legend slot.  Color stays aligned by visible GPU.
+        let visibleGPUs = preparedGPUs.filter { !$0.samples.isEmpty }
+        gpuUtilizationSeries = visibleGPUs.enumerated().map { offset, gpu in
             EndpointTelemetryPreparedHistory.lineSeries(
                 id: gpu.id, label: gpu.label, color: EndpointTelemetryPreparedHistory.gpuColor(offset),
                 samples: gpu.samples.map { ($0.timestamp, $0.gpuUtilizationFraction) }
             )
         }
-        gpuMemorySeries = gpuSeries.enumerated().map { offset, gpu in
+        gpuMemorySeries = visibleGPUs.enumerated().map { offset, gpu in
             EndpointTelemetryPreparedHistory.lineSeries(
                 id: "\(gpu.id)-memory", label: gpu.label, color: EndpointTelemetryPreparedHistory.gpuColor(offset),
                 samples: gpu.samples.map { ($0.timestamp, $0.memoryFraction) }
@@ -2990,7 +3009,7 @@ private struct EndpointTelemetryPreparedHistory: Equatable {
     }
 
     var accessibilityValue: String {
-        "范围 \(range.rawValue)，已验证主机样本 \(hostSamples.count) 个，GPU 序列 \(gpuSeries.count) 条。\(freshnessAndTrustLabel)"
+        "范围 \(range.rawValue)，已验证主机样本 \(hostSamples.count) 个，GPU 序列 \(gpuUtilizationSeries.count) 条。\(freshnessAndTrustLabel)"
     }
 
     private var freshnessLabel: String {
@@ -3803,29 +3822,7 @@ private struct ServerDetailSheet: View {
         HomeCard(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
                 CardSectionLabel(text: "主机")
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 170, maximum: 280), spacing: 12)],
-                    alignment: .leading,
-                    spacing: 12
-                ) {
-                    ForEach(hostFacts(endpoint), id: \.0) { fact in
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(fact.0)
-                                .font(Typography.annotation)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                            Text(fact.1)
-                                .font(Typography.rowValue)
-                                .foregroundStyle(DesignTokens.ink)
-                                .lineLimit(1)
-                                .truncationMode(.middle)
-                                .textSelection(.enabled)
-                        }
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(fact.0)
-                        .accessibilityValue(fact.1)
-                    }
-                }
+                metadataFactGrid(hostFacts(endpoint))
             }
         }
     }
@@ -3845,24 +3842,19 @@ private struct ServerDetailSheet: View {
     }
 
     private func groupMetadataCard(_ group: ServerGroupRecord, endpoint: EndpointRecord) -> some View {
-        HomeCard(padding: 16) {
+        let shortFacts = groupShortFacts(group: group, endpoint: endpoint)
+        let longFacts = groupLongFacts(group: group, endpoint: endpoint)
+        return HomeCard(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
-                CardSectionLabel(text: "服务器组")
-                groupFact(label: "显示名称", value: group.displayName)
-                ForEach(applyConstraintFacts(group: group, endpoint: endpoint), id: \.0) { fact in
-                    groupFact(label: fact.0, value: fact.1, allowWrap: fact.0 == "申请说明")
-                }
-                groupFact(label: "组默认工作区", value: group.workspacePath)
-                let override = endpoint.workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                groupFact(
-                    label: "本机路径覆盖",
-                    value: override.isEmpty ? "未设置，使用组默认路径" : override
+                CardSectionLabel(
+                    text: "服务器组",
+                    accessory: allocationBadge(group: group, endpoint: endpoint)
                 )
-                if !group.environmentNotes.isEmpty {
-                    groupFact(label: "环境说明", value: group.environmentNotes, allowWrap: true)
+                if !shortFacts.isEmpty {
+                    metadataFactGrid(shortFacts)
                 }
-                if !group.description.isEmpty {
-                    groupFact(label: "说明", value: group.description, allowWrap: true)
+                ForEach(longFacts, id: \.0) { fact in
+                    groupFact(label: fact.0, value: fact.1, allowWrap: true)
                 }
             }
         }
@@ -3873,6 +3865,8 @@ private struct ServerDetailSheet: View {
     private func shouldShowUngroupedMetadata(_ endpoint: EndpointRecord) -> Bool {
         !applyConstraintFacts(group: nil, endpoint: endpoint).isEmpty
             || ungroupedWorkspacePath(endpoint) != nil
+            || endpoint.schedulerCapacity?.note != nil
+            || allocationBadge(group: nil, endpoint: endpoint) != nil
     }
 
     private func ungroupedWorkspacePath(_ endpoint: EndpointRecord) -> String? {
@@ -3883,15 +3877,17 @@ private struct ServerDetailSheet: View {
 
     private func ungroupedMetadataCard(endpoint: EndpointRecord) -> some View {
         let constraints = applyConstraintFacts(group: nil, endpoint: endpoint)
-        let workspace = ungroupedWorkspacePath(endpoint)
+        let longFacts = ungroupedLongFacts(endpoint: endpoint)
+        let badge = allocationBadge(group: nil, endpoint: endpoint)
+        let title = constraints.isEmpty && badge == nil ? "工作区" : "申请约束"
         return HomeCard(padding: 16) {
             VStack(alignment: .leading, spacing: 12) {
-                CardSectionLabel(text: constraints.isEmpty ? "工作区" : "申请约束")
-                if let workspace {
-                    groupFact(label: "远端工作区", value: workspace)
+                CardSectionLabel(text: title, accessory: badge)
+                if !constraints.isEmpty {
+                    metadataFactGrid(constraints)
                 }
-                ForEach(constraints, id: \.0) { fact in
-                    groupFact(label: fact.0, value: fact.1, allowWrap: fact.0 == "申请说明")
+                ForEach(longFacts, id: \.0) { fact in
+                    groupFact(label: fact.0, value: fact.1, allowWrap: true)
                 }
             }
         }
@@ -3899,13 +3895,54 @@ private struct ServerDetailSheet: View {
         .accessibilityIdentifier("ungrouped-endpoint-metadata")
     }
 
+    private func allocationBadge(group: ServerGroupRecord?, endpoint: EndpointRecord) -> String? {
+        if let allocation = group?.allocation {
+            return allocation == .direct ? "本机直接分配" : "调度器按需申请"
+        }
+        if endpoint.schedulerCapacity != nil {
+            return "调度器按需申请"
+        }
+        return nil
+    }
+
+    private func groupShortFacts(group: ServerGroupRecord, endpoint: EndpointRecord) -> [(String, String)] {
+        var facts: [(String, String)] = [("显示名称", group.displayName)]
+        facts.append(contentsOf: applyConstraintFacts(group: group, endpoint: endpoint))
+        return facts
+    }
+
+    private func groupLongFacts(group: ServerGroupRecord, endpoint: EndpointRecord) -> [(String, String)] {
+        var facts: [(String, String)] = []
+        facts.append(("组默认工作区", group.workspacePath))
+        let override = endpoint.workspacePathOverride?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        facts.append(("本机路径覆盖", override.isEmpty ? "未设置，使用组默认路径" : override))
+        if !group.environmentNotes.isEmpty {
+            facts.append(("环境说明", group.environmentNotes))
+        }
+        if !group.description.isEmpty {
+            facts.append(("说明", group.description))
+        }
+        if let note = endpoint.schedulerCapacity?.note {
+            facts.append(("申请说明", note))
+        }
+        return facts
+    }
+
+    private func ungroupedLongFacts(endpoint: EndpointRecord) -> [(String, String)] {
+        var facts: [(String, String)] = []
+        if let workspace = ungroupedWorkspacePath(endpoint) {
+            facts.append(("远端工作区", workspace))
+        }
+        if let note = endpoint.schedulerCapacity?.note {
+            facts.append(("申请说明", note))
+        }
+        return facts
+    }
+
+    /// Short apply-time constraints only.  Allocation is a title chip;
+    /// workspace, notes, and apply copy take a full row outside the grid.
     private func applyConstraintFacts(group: ServerGroupRecord?, endpoint: EndpointRecord) -> [(String, String)] {
         var facts: [(String, String)] = []
-        if let allocation = group?.allocation {
-            facts.append(("分配方式", allocation == .direct ? "本机直接分配" : "调度器按需申请"))
-        } else if endpoint.schedulerCapacity != nil {
-            facts.append(("分配方式", "调度器按需申请"))
-        }
         let leaseEnds = group?.limits?.leaseEnds
         let maxLeaseSeconds = group?.limits?.maxLeaseSeconds
         if let leaseEnds {
@@ -3925,16 +3962,17 @@ private struct ServerDetailSheet: View {
         } else if let maxLeaseSeconds {
             facts.append(("租约时限", durationLabel(maxLeaseSeconds)))
         }
-        let onceMax = group?.largestAllocatableBlock
-            ?? group?.limits?.maxGPUsPerLease
+        // `largest_allocatable_block` is live capacity on one machine right
+        // now; `max_gpus_per_lease` is the structural cap.  Never invent the
+        // former from the latter when the block is unknown.
+        let currentBlock = group?.largestAllocatableBlock
+        let leaseMax = group?.limits?.maxGPUsPerLease
             ?? endpoint.schedulerCapacity?.maxGPUsPerLease
-        if let onceMax {
-            facts.append(("一次最多", "\(onceMax) 卡"))
+        if let currentBlock {
+            facts.append(("现在可申请", "\(currentBlock) 卡"))
         }
-        if let leaseMax = group?.limits?.maxGPUsPerLease,
-           let block = group?.largestAllocatableBlock,
-           leaseMax != block {
-            facts.append(("单次租约上限", "\(leaseMax) 卡"))
+        if let leaseMax, leaseMax != currentBlock {
+            facts.append(("单次上限", "\(leaseMax) 卡"))
         }
         let cpuPerGPU = group?.limits?.cpuCoresPerGPU ?? endpoint.schedulerCapacity?.cpuCoresPerGPU
         let memoryPerGPU = group?.limits?.memoryMiBPerGPU ?? endpoint.schedulerCapacity?.memoryMiBPerGPU
@@ -3947,13 +3985,23 @@ private struct ServerDetailSheet: View {
         if let applyMax = group?.limits?.applyMaxSeconds {
             facts.append(("申请等待上限", durationLabel(applyMax)))
         }
-        if let queues = group?.limits?.queues {
+        // Direct groups never queue; the field is a constant, not a constraint.
+        if group?.allocation == .delegated, let queues = group?.limits?.queues {
             facts.append(("排队", queues ? "会排队" : "不排队"))
         }
-        if let note = endpoint.schedulerCapacity?.note {
-            facts.append(("申请说明", note))
-        }
         return facts
+    }
+
+    private func metadataFactGrid(_ facts: [(String, String)]) -> some View {
+        LazyVGrid(
+            columns: [GridItem(.adaptive(minimum: 170, maximum: 280), spacing: 12)],
+            alignment: .leading,
+            spacing: 12
+        ) {
+            ForEach(facts, id: \.0) { fact in
+                groupFact(label: fact.0, value: fact.1)
+            }
+        }
     }
 
     private func groupFact(label: String, value: String, allowWrap: Bool = false) -> some View {

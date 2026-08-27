@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 from typer.testing import CliRunner
 
-from serverpilot import cli, daemon, mcp_server
+from serverpilot import API_CAPABILITIES, __version__, cli, daemon, mcp_server
 from serverpilot.daemon import (
     DaemonConfig,
     DaemonError,
@@ -145,6 +145,11 @@ def test_ready_probe_requires_exact_daemon_instance(
     assert probe_ready(config) == payload
 
 
+def test_expected_capabilities_track_the_public_api_surface() -> None:
+    assert frozenset(API_CAPABILITIES) == daemon.EXPECTED_CAPABILITIES
+    assert "server_group_crud" in daemon.EXPECTED_CAPABILITIES
+
+
 def test_live_probe_rejects_daemon_missing_current_runtime_capability(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -204,6 +209,26 @@ def test_live_probe_requires_endpoint_delete_capability(
         probe_live(config)
 
 
+def test_live_probe_rejects_stale_release_version(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = _config(tmp_path)
+    monkeypatch.setattr(
+        daemon,
+        "_probe_json",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "schema_version": "v1",
+            "version": "1.9.0",
+            "capabilities": sorted(daemon.EXPECTED_CAPABILITIES),
+        },
+    )
+
+    with pytest.raises(DaemonError, match="running ServerPilot 1.9.0"):
+        probe_live(config)
+
+
 def test_ensure_restarts_when_daemon_only_missing_endpoint_delete(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -221,6 +246,38 @@ def test_ensure_restarts_when_daemon_only_missing_endpoint_delete(
             "status": "live",
             "schema_version": "v1",
             "capabilities": capabilities,
+        },
+    )
+    started: list[bool] = []
+    monkeypatch.setattr(manager, "_loaded", lambda: True)
+    monkeypatch.setattr(manager, "_bootout_legacy_if_loaded", lambda: None)
+    monkeypatch.setattr(manager, "_install_locked", lambda *_args, **_kwargs: {})
+    monkeypatch.setattr(manager, "start", lambda **_kwargs: started.append(True))
+    monkeypatch.setattr(manager, "status", lambda: {"restarted": True})
+
+    result = manager.ensure()
+
+    assert started == [True]
+    assert result["restarted"] is True
+
+
+def test_ensure_restarts_when_running_version_does_not_match(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daemon.sys, "platform", "darwin")
+    config = _config(tmp_path)
+    config.plist_path.parent.mkdir(parents=True)
+    config.plist_path.write_bytes(b"plist")
+    manager = MacOSDaemonManager(config)
+    monkeypatch.setattr(
+        daemon,
+        "_probe_json",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "schema_version": "v1",
+            "version": "1.9.0",
+            "capabilities": sorted(daemon.EXPECTED_CAPABILITIES),
         },
     )
     started: list[bool] = []
@@ -391,7 +448,8 @@ def test_ensure_is_noop_when_compatible_service_is_ready(
         lambda _config: {
             "status": "live",
             "schema_version": "v1",
-            "capabilities": ["instant_claims", "endpoint_conflict_cleanup"],
+            "version": __version__,
+            "capabilities": list(daemon.EXPECTED_CAPABILITIES),
         },
     )
     monkeypatch.setattr(
@@ -722,6 +780,32 @@ def test_macos_gui_no_longer_owns_or_terminates_server_process() -> None:
         "startServer(executable:",
     ):
         assert forbidden not in source
+
+
+def test_macos_gui_uses_installed_cli_not_bundled_runtime() -> None:
+    source = (
+        Path(__file__).resolve().parents[1] / "desktop" / "ServerPilot.swift"
+    ).read_text(encoding="utf-8")
+    build_script = (
+        Path(__file__).resolve().parents[1] / "desktop" / "build-macos-app.sh"
+    ).read_text(encoding="utf-8")
+    verify_script = (
+        Path(__file__).resolve().parents[1] / "desktop" / "verify-macos-app.sh"
+    ).read_text(encoding="utf-8")
+
+    assert "ServerPilotRuntime" not in source
+    assert "SERVERPILOT_DAEMON_EXECUTABLE" not in source
+    assert 'environment["SERVERPILOT_CLI"]' in source
+    assert "uv tool install --force ." in source
+    assert 'appendingPathComponent("configs/inventory.yaml")' in source
+    assert "pyinstaller" not in build_script
+    assert "ServerPilotRuntime" not in build_script
+    assert "ServerPilotRuntime" in verify_script
+    assert "must not bundle ServerPilotRuntime" in verify_script
+    backend_entry = (
+        Path(__file__).resolve().parents[1] / "desktop" / "backend_main.py"
+    )
+    assert not backend_entry.exists()
 
 
 def test_macos_gui_defaults_to_low_composition_surfaces() -> None:

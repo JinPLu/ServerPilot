@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 from concurrent.futures import ThreadPoolExecutor
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import pytest
 from fastapi.testclient import TestClient
@@ -15,8 +15,10 @@ from serverpilot.api import RateLimiter, RequestBodyLimitMiddleware
 from serverpilot.cli import app as cli_app
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.mcp_server import ROUTINE_MCP_TOOL_NAMES, mcp
+from serverpilot.models import GPUDevice
 from serverpilot.schemas import RequestCreate
 from serverpilot.service import BrokerError
+from serverpilot.timeutil import utcnow
 from tests.helpers import observation, process_for_gpu, tools
 
 
@@ -137,6 +139,62 @@ def test_api_gui_and_idempotency(build_app) -> None:
     assert invalid_endpoint_history.status_code == 422
     assert client.get("/").status_code == 404
     assert client.get("/ui/requests").status_code == 404
+
+
+def test_endpoint_history_omits_absent_and_empty_gpu_series(service, admin) -> None:
+    start = utcnow() - timedelta(minutes=10)
+    service.ingest_observation(
+        observation(
+            count=2,
+            gpu_uuids=["GPU-old-0", "GPU-old-1"],
+            observed_at=start,
+        )
+    )
+    service.ingest_observation(
+        observation(
+            count=2,
+            gpu_uuids=["GPU-new-0", "GPU-new-1"],
+            observed_at=start + timedelta(seconds=61),
+        )
+    )
+
+    def add_present_without_samples(session):  # type: ignore[no-untyped-def]
+        now = utcnow()
+        session.add(
+            GPUDevice(
+                id="endpoint-a:GPU-empty",
+                endpoint_id="endpoint-a",
+                gpu_uuid="GPU-empty",
+                gpu_index=9,
+                cuda_ordinal=9,
+                name="Empty GPU",
+                total_vram_mib=80_000,
+                labels_json="[]",
+                health="OK",
+                enabled=True,
+                present=True,
+                first_seen_at=now,
+                last_seen_at=now,
+                absent_at=None,
+            )
+        )
+
+    service._write(add_present_without_samples)
+    history = service.endpoint_history(admin, "endpoint-a", window_seconds=3600, max_points=120)
+    series = history["data"]["gpu_series"]
+    assert [item["gpu_uuid"] for item in series] == ["GPU-new-0", "GPU-new-1"]
+    assert [item["label"] for item in series] == ["GPU 0", "GPU 1"]
+    assert all(item["points"] for item in series)
+
+    def collide_present_indexes(session):  # type: ignore[no-untyped-def]
+        gpu = session.get(GPUDevice, "endpoint-a:GPU-new-1")
+        assert gpu is not None
+        gpu.gpu_index = 0
+
+    service._write(collide_present_indexes)
+    collided = service.endpoint_history(admin, "endpoint-a", window_seconds=3600, max_points=120)
+    labels = [item["label"] for item in collided["data"]["gpu_series"]]
+    assert labels == ["GPU 0 (GPU-new-0)", "GPU 0 (GPU-new-1)"]
 
 
 def test_operator_release_can_correct_another_agents_lease_but_generic_release_cannot(

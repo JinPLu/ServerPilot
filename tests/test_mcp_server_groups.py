@@ -417,3 +417,211 @@ def test_delegated_cluster_appears_inside_its_server_group() -> None:
     ]
     assert "message" not in status
     assert "no_capacity" not in status
+
+
+def _direct_group(
+    *,
+    max_gpus_per_lease: int,
+    largest_allocatable_block: int,
+) -> dict[str, object]:
+    return {
+        "id": "baidu-baige",
+        "display_name": "百度百舸",
+        "workspace_path": "/data/baige",
+        "allocation": "direct",
+        "limits": {
+            "lease_ends": "on_release",
+            "max_lease_seconds": None,
+            "apply_max_seconds": None,
+            "queues": False,
+            "max_gpus_per_lease": max_gpus_per_lease,
+            "cpu_cores_per_gpu": None,
+            "memory_mib_per_gpu": None,
+        },
+        "largest_allocatable_block": largest_allocatable_block,
+    }
+
+
+def _delegated_group(*, largest_allocatable_block: int | None) -> dict[str, object]:
+    return {
+        "id": "hanhai22",
+        "display_name": "瀚海 22",
+        "workspace_path": "/srv/shared",
+        "allocation": "delegated",
+        "limits": {
+            "max_gpus_per_lease": None,
+            "max_lease_seconds": 3600,
+            "lease_ends": "hard_kill_at_time_limit",
+            "cpu_cores_per_gpu": None,
+            "memory_mib_per_gpu": None,
+            "apply_max_seconds": 33,
+            "queues": False,
+        },
+        "largest_allocatable_block": largest_allocatable_block,
+    }
+
+
+def _delegated_endpoint() -> dict[str, object]:
+    return {
+        "id": "hanhai22-p22",
+        "server_group_id": "hanhai22",
+        "workspace_path": "/srv/shared",
+        "host": "hanhai22",
+        "port": 22,
+        "ssh_user": "gpu",
+        "resource_kind": "cpu_only",
+        "scheduler_capacity": {
+            "free_gpu_count": 27,
+            "gpu_name": "NVIDIA A100-SXM4-80GB",
+        },
+    }
+
+
+def test_narrowed_status_omits_groups_with_no_member_in_this_result() -> None:
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 0},
+                "server_groups": [
+                    _direct_group(max_gpus_per_lease=0, largest_allocatable_block=0),
+                    _delegated_group(largest_allocatable_block=None),
+                ],
+                "endpoints": [_delegated_endpoint()],
+                "gpus": [],
+            }
+        },
+        lease_id=None,
+    )
+
+    assert [group["id"] for group in status["server_groups"]] == ["hanhai22"]
+    assert status["server_groups"][0]["largest_allocatable_block"] is None
+    assert status["server_groups"][0]["servers"][0]["server_id"] == "hanhai22-p22"
+    assert "ungrouped_servers" not in status
+    assert "cpu_only_servers" not in status
+    assert "no_capacity" not in status
+
+
+def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 8},
+                "server_groups": [
+                    _direct_group(max_gpus_per_lease=8, largest_allocatable_block=8),
+                    _delegated_group(largest_allocatable_block=None),
+                ],
+                "endpoints": [
+                    _endpoint("baige-a", group_id="baidu-baige"),
+                    _delegated_endpoint(),
+                    {
+                        "id": "server-cpu",
+                        "resource_kind": "cpu_only",
+                        "monitor": {"status": "ONLINE"},
+                        "host_telemetry": {
+                            "cpu_count": 104,
+                            "memory_available_mib": 985_798,
+                        },
+                    },
+                    _endpoint("legacy-a"),
+                ],
+                "gpus": [
+                    *[_gpu("baige-a", f"GPU-b-{index}", index) for index in range(8)],
+                    _gpu("legacy-a", "GPU-legacy", 0),
+                ],
+            }
+        },
+        lease_id=None,
+    )
+
+    assert [group["id"] for group in status["server_groups"]] == ["baidu-baige", "hanhai22"]
+    assert status["server_groups"][0]["largest_allocatable_block"] == 8
+    assert status["server_groups"][1]["allocation"] == "delegated"
+    assert status["ungrouped_servers"][0]["server_id"] == "legacy-a"
+    assert status["cpu_only_servers"] == [
+        {
+            "server_id": "server-cpu",
+            "resource_kind": "cpu_only",
+            "monitor_status": "ONLINE",
+            "cpu_count": 104,
+            "memory_available_mib": 985_798,
+        }
+    ]
+
+
+def test_direct_group_with_members_but_no_free_card_keeps_zero_block() -> None:
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 8, "available_gpus": 0},
+                "server_groups": [
+                    _direct_group(max_gpus_per_lease=8, largest_allocatable_block=0),
+                    _delegated_group(largest_allocatable_block=None),
+                ],
+                "endpoints": [
+                    _endpoint("baige-a", group_id="baidu-baige"),
+                    _delegated_endpoint(),
+                ],
+                "gpus": [
+                    _gpu("baige-a", f"GPU-b-{index}", index, available=False)
+                    for index in range(8)
+                ],
+            }
+        },
+        lease_id=None,
+    )
+
+    assert [group["id"] for group in status["server_groups"]] == ["baidu-baige", "hanhai22"]
+    direct = status["server_groups"][0]
+    assert direct["servers"][0]["server_id"] == "baige-a"
+    assert direct["largest_allocatable_block"] == 0
+    assert direct["limits"]["max_gpus_per_lease"] == 8
+    assert direct["servers"][0]["gpus"][0]["available_count"] == 0
+    assert direct["servers"][0]["gpus"][0]["total_count"] == 8
+
+
+def test_narrowed_status_keeps_ungrouped_or_cpu_only_only_when_they_are_the_member() -> None:
+    ungrouped = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 1},
+                "server_groups": [
+                    _direct_group(max_gpus_per_lease=0, largest_allocatable_block=0),
+                    _delegated_group(largest_allocatable_block=None),
+                ],
+                "endpoints": [_endpoint("legacy-a")],
+                "gpus": [_gpu("legacy-a", "GPU-legacy", 0)],
+            }
+        },
+        lease_id=None,
+    )
+    assert "server_groups" not in ungrouped
+    assert [server["server_id"] for server in ungrouped["ungrouped_servers"]] == ["legacy-a"]
+    assert "cpu_only_servers" not in ungrouped
+
+    cpu_only = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "summary": {"total_gpus": 0},
+                "server_groups": [
+                    _direct_group(max_gpus_per_lease=0, largest_allocatable_block=0),
+                    _delegated_group(largest_allocatable_block=None),
+                ],
+                "endpoints": [
+                    {
+                        "id": "server-cpu",
+                        "resource_kind": "cpu_only",
+                        "monitor": {"status": "ONLINE"},
+                        "host_telemetry": {
+                            "cpu_count": 104,
+                            "memory_available_mib": 985_798,
+                        },
+                    }
+                ],
+                "gpus": [],
+            }
+        },
+        lease_id=None,
+    )
+    assert "server_groups" not in cpu_only
+    assert "ungrouped_servers" not in cpu_only
+    assert [server["server_id"] for server in cpu_only["cpu_only_servers"]] == ["server-cpu"]

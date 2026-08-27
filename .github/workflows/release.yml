@@ -1,0 +1,25 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  github-release:
+    runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Refuse a tag that does not name this version
+        run: python3 scripts/release_metadata.py check-tag
+      - name: Extract release notes
+        run: python3 scripts/release_metadata.py notes > "$RUNNER_TEMP/release-notes.md"
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$RELEASE_TAG" --title "$RELEASE_TAG" --notes-file "$RUNNER_TEMP/release-notes.md"

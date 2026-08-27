@@ -32,6 +32,7 @@ from serverpilot.adapters import (
 from serverpilot.collector_protocol import (
     SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
+    remember_collector_implementation_version,
 )
 from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
@@ -199,7 +200,7 @@ def parse_server_script_snapshot(
         decoded,
         label="snapshot",
         keys={"schema_version", "identity", "host", "gpu_probe_available", "gpus", "processes"},
-        optional_keys={"gpu_probe_status", "scheduler"},
+        optional_keys={"gpu_probe_status", "scheduler", "implementation_version"},
     )
     if (
         type(snapshot["schema_version"]) is not int
@@ -208,6 +209,7 @@ def parse_server_script_snapshot(
         raise CollectionError(
             f"server collector schema_version must be {SERVER_SCRIPT_SCHEMA_VERSION}"
         )
+    implementation_version = _optional_implementation_version(snapshot.get("implementation_version"))
     if type(snapshot["gpu_probe_available"]) is not bool:
         raise CollectionError("server collector gpu_probe_available must be a boolean")
     gpu_probe_status = snapshot.get("gpu_probe_status")
@@ -443,7 +445,7 @@ def parse_server_script_snapshot(
         raise CollectionError("server collector marked GPU status without GPU telemetry")
     if gpu_probe_status != "gpu" and gpu_probe_available:
         raise CollectionError("server collector GPU probe status conflicts with telemetry")
-    return EndpointObservation(
+    observation = EndpointObservation(
         endpoint_id=endpoint_id,
         observed_at=observed_at,
         boot_id=boot_id,
@@ -466,6 +468,14 @@ def parse_server_script_snapshot(
         gpu_probe_status=gpu_probe_status,
         scheduler=_scheduler_capacity(snapshot.get("scheduler")),
     )
+    remember_collector_implementation_version(observation, implementation_version)
+    return observation
+
+
+def _optional_implementation_version(value: Any) -> str | None:
+    if value is None:
+        return None
+    return _text(value, label="implementation_version", maximum=64)
 
 
 def _scheduler_capacity(value: Any) -> dict[str, Any] | None:

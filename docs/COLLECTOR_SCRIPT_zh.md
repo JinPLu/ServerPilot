@@ -68,8 +68,7 @@ uv build
 }
 ```
 
-`free_gpu_count` 和 `gpu_name` 必填，`note` 可选，只允许这三个字段。Agent 在 `gpu_status` 的
-`scheduler_servers` 里看到它，申请时才真正入账。普通单台服务器不返回这个字段。
+`free_gpu_count` 和 `gpu_name` 必填，`note` 可选，只允许这三个字段。这些容量并入该 endpoint 所属分组，Agent 在 `gpu_status` 的 `server_groups[]` 里看到它，没有平行的 `scheduler_servers` 顶层桶。申请时才真正入账。普通单台服务器不返回这个字段。
 
 `gpu_index` 保留 `nvidia-smi index` 供界面识别；`cuda_ordinal` 固定表示设置 `CUDA_DEVICE_ORDER=PCI_BUS_ID` 之后的执行 selector，由采集脚本按 `pci.bus_id` 排序算出。两者不得混用。`identity`、`host`、每个 GPU 和每个 process 的字段集合同样是固定的，不能扩展；顶层除固定字段外，只额外接受上文的可选 `scheduler`。数值必须是 JSON
 number（不能用字符串、NaN 或 Infinity），字符串不能含控制字符，`process_started_at` 必须带

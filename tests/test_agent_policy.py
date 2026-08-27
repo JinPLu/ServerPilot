@@ -169,9 +169,16 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # one 8-GPU menu.  It moved from 340 to 380 when the five-tool surface
     # became the whole MCP contract: the caller has to be told server
     # deletion and other lifecycle work happen in the app or REST, or it
-    # looks for a second MCP profile that no longer exists.
+    # looks for a second MCP profile that no longer exists.  It moved from
+    # 380 to 420 when a plugin-adapted cluster became an ordinary group: the
+    # caller has to be told that largest_allocatable_block is one apply's
+    # ceiling rather than the pool's remainder, or it asks for eight cards
+    # from a partition advertising twenty-seven free and never gets them,
+    # and that a grouped delegated cluster is claimed by server_group_id,
+    # or it pins that host with server_id and the claim never reaches the
+    # plugin.
     # Contract sentences are never cut to fit this bound.
-    assert len(adapter.split()) < 380
+    assert len(adapter.split()) < 420
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",

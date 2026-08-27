@@ -474,6 +474,25 @@ def test_no_cross_group_allocation_and_within_group_best_fit(tmp_path: Path) -> 
     assert large["largest_allocatable_block"] == 0
 
 
+def test_snapshot_endpoint_id_omits_groups_without_a_visible_member(tmp_path: Path) -> None:
+    service, admin = grouped_service(tmp_path)
+    service.ingest_observation(observation(endpoint_id="small-a", count=2))
+    service.ingest_observation(observation(endpoint_id="large-a", count=8))
+    full_ids = {item["id"] for item in service.snapshot(admin)["data"]["server_groups"]}
+    assert full_ids == {"group-small", "group-large"}
+
+    narrowed = service.snapshot(admin, endpoint_id="large-a")["data"]
+    assert {item["id"] for item in narrowed["server_groups"]} == {"group-large"}
+    assert {item["id"] for item in narrowed["endpoints"]} == {"large-a"}
+    large = narrowed["server_groups"][0]
+    assert large["limits"]["max_gpus_per_lease"] == 8
+    assert large["largest_allocatable_block"] == 8
+
+    ungrouped = service.snapshot(admin, endpoint_id="legacy-a")["data"]
+    assert ungrouped["server_groups"] == []
+    assert {item["id"] for item in ungrouped["endpoints"]} == {"legacy-a"}
+
+
 def test_one_card_claim_on_eight_card_grouped_host_leaves_remaining_capacity(
     tmp_path: Path,
 ) -> None:

@@ -394,6 +394,56 @@ def test_windows_broker_health_requires_control_plane_state(monkeypatch) -> None
     assert launcher.broker_health(8787) is False
 
 
+def test_windows_loopback_urlopen_ignores_proxy_environment(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from threading import Thread
+
+    launcher = load_launcher()
+
+    class Loopback(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            body = json.dumps(
+                {"status": "live", "capabilities": ["instant_claims", "control_plane_state"]}
+            ).encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    class Poison(BaseHTTPRequestHandler):
+        hits = 0
+
+        def do_GET(self) -> None:
+            type(self).hits += 1
+            self.send_response(502)
+            self.end_headers()
+
+        def log_message(self, format: str, *args: object) -> None:
+            del format, args
+
+    loopback = ThreadingHTTPServer(("127.0.0.1", 0), Loopback)
+    poison = ThreadingHTTPServer(("127.0.0.1", 0), Poison)
+    Thread(target=loopback.serve_forever, daemon=True).start()
+    Thread(target=poison.serve_forever, daemon=True).start()
+    try:
+        proxy = f"http://127.0.0.1:{poison.server_address[1]}"
+        monkeypatch.setenv("HTTP_PROXY", proxy)
+        monkeypatch.setenv("HTTPS_PROXY", proxy)
+        monkeypatch.setenv("ALL_PROXY", proxy)
+        monkeypatch.delenv("NO_PROXY", raising=False)
+        monkeypatch.delenv("no_proxy", raising=False)
+
+        assert launcher.broker_health(loopback.server_address[1]) is True
+        assert Poison.hits == 0
+    finally:
+        loopback.shutdown()
+        poison.shutdown()
+
+
 def test_windows_bridge_rest_paths_exist_in_api() -> None:
     root = Path(__file__).resolve().parents[1]
     launcher_source = (root / "desktop" / "windows_launcher.py").read_text(encoding="utf-8")

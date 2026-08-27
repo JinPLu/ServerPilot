@@ -91,6 +91,10 @@ serverpilot daemon reclaim                             # 端口被非 launchd �
 
 ### 1. 🧰 启动本机控制面
 
+macOS 上 **CLI 就是后端**。`uv tool install` 装的是 daemon 实际会跑的那份控制面；桌面 App 只是界面，打开 App 不会启动或替换这个进程。
+
+**macOS**，从源码安装，需要 [Python 3.12+](https://www.python.org/) 和 [uv](https://docs.astral.sh/uv/)：
+
 ```bash
 git clone https://github.com/JinPLu/ServerPilot.git
 cd ServerPilot
@@ -99,7 +103,11 @@ serverpilot daemon install --source-root "$PWD"
 serverpilot daemon status
 ```
 
-服务默认监听 `http://127.0.0.1:8787`。
+`daemon install` 注册用户 LaunchAgent，由它拉起这份 `uv tool` 安装，且只在 macOS 上可用。以后升级包装后，还要确认 `http://127.0.0.1:8787/health/live` 里的进程版本确实换了，见[升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)。
+
+**Windows**：下载下方[桌面 App](#-打开桌面-app)。它自带 Python 并自己拉起控制面，没有需要先装的 CLI。若从源码跑，使用 `serverpilot serve --db <path> --inventory <path>` 并保持该进程在线；Windows 上还没有受监管的 daemon 安装。
+
+无论哪边，服务都监听 `http://127.0.0.1:8787`。
 
 ### 2. 🖥️ 登记你的 GPU 服务器
 
@@ -120,7 +128,7 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 python3 scripts/install_agent_policy.py codex --install
 ```
 
-`serverpilot mcp install` 通过客户端自己的机制注册：Codex 与 Claude Code 调用它们的 `mcp add`，Cursor 合并进 `~/.cursor/mcp.json`，不会覆盖你已有的其他 server。
+`serverpilot mcp install` 只写启动命令：Codex 与 Claude Code 调用它们的 `mcp add`，Cursor 合并进 `~/.cursor/mcp.json`，不会覆盖你已有的其他 server。它不刷新客户端已经缓存的工具列表；要重连该 server（Cursor：Disable → Enable，或重载窗口）才会重新 `tools/list`。
 
 想自己粘贴配置就用 `serverpilot mcp config --client all`，它只打印不写盘。标准配置块是：
 
@@ -144,7 +152,7 @@ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, tas
 ```
 
 - 日常申请签名是 `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`。Agent 不传 GPU ID，`gpu_apply` 负责选卡，一份租约始终只落在一台机器上。`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，绝不从空闲容量推断。
-- 已分组的裸机先传 `server_group_id`，再由分配器在组内 best-fit 一台主机；未分组主机以及插件接入的集群仍可用 `server_id`。
+- 已分组主机（裸机 `direct` 和插件 `delegated`）传 `server_group_id`，再由分配器在组内 best-fit；`server_id` 只留给未分组主机。插件接入的集群以正常分组出现，带 `allocation`、`limits` 和 `largest_allocatable_block`（一次申请能拿到的最大卡数，不是池子剩余总数；`null` 表示未知，不要编造数字）。
 - 登记和更新主机用 `gpu_add_server`、`gpu_update_server`。MCP 不提供删除；在 App 或 REST 移除服务器，有进行中租约时会拒绝。
 - 申请前先看分组的工作目录、环境说明和数据/权重说明。成员继承组工作目录，或按服务器覆盖。环境说明只供阅读，不会被执行或注入。
 - `gpu_status` 按 组 → 服务器 → SKU 讲可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，也不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配。
@@ -170,12 +178,13 @@ Windows 10/11 需要 Microsoft Edge WebView2 Runtime（多数系统已自带）�
 
 ### macOS
 
+先装 CLI——那才是后端。然后打开桌面 App 看状态、归属和异常。App 不自己跑控制面。
+
 ```bash
-zsh desktop/build-macos-app.sh
 open "./ServerPilot.app"
 ```
 
-App 负责看状态、看归属、看异常。没有浏览器界面。人工改派只更新租约和 CUDA selector，不迁移正在运行的进程；受影响的 Agent 要按新 selector 重启工作负载。
+没有浏览器界面。人工改派只更新租约和 CUDA selector，不迁移正在运行的进程；受影响的 Agent 要按新 selector 重启工作负载。
 
 ## 🛡️ 边界与安全
 
@@ -190,6 +199,7 @@ App 负责看状态、看归属、看异常。没有浏览器界面。人工改�
 - [服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)
 - [服务器插件](docs/PLUGINS_zh.md)
 - [keepalive 与 Adapter](docs/ADAPTERS_zh.md)
+- [升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)
 - [当前实现与验证状态](docs/IMPLEMENTATION_STATUS_zh.md)
 - [安全说明](SECURITY.md) · [贡献指南](CONTRIBUTING.md)
 

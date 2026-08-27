@@ -25,6 +25,18 @@ jobs:
       - run: uv run --reinstall-package serverpilot pytest
       - run: uv run --reinstall-package serverpilot ruff check .
 
+  unpublished-seal:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+      - name: Fetch tags
+        run: git fetch --tags --force
+      - name: Refuse a sealed version that was never tagged
+        run: python3 scripts/release_metadata.py unpublished-seal
+
   swift:
     runs-on: macos-latest
     steps:

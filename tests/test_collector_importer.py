@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from serverpilot import server_collector
+from serverpilot import __version__, server_collector
 from serverpilot.adapters import HOST_RESOURCES_QUERY, RAW_SSH_OBSERVATION_ADAPTER, RawSSHResult
 from serverpilot.collector import (
     COMBINED_QUERY,
@@ -28,6 +28,7 @@ from serverpilot.collector import (
 from serverpilot.collector_protocol import (
     SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
+    take_collector_implementation_version,
 )
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.importer import import_servers_files, parse_ssh_command
@@ -620,6 +621,37 @@ def test_server_script_parser_rejects_largest_free_block_above_free_count() -> N
         parse_server_script_snapshot(
             json.dumps(snapshot),
             endpoint_id="slurm-login-p22",
+            observed_at=datetime(2026, 8, 10, tzinfo=UTC),
+        )
+
+
+def test_server_script_parser_accepts_optional_implementation_version() -> None:
+    snapshot = _server_script_snapshot()
+    observed_at = datetime(2026, 8, 10, tzinfo=UTC)
+    observation = parse_server_script_snapshot(
+        json.dumps(snapshot),
+        endpoint_id="endpoint-a",
+        observed_at=observed_at,
+    )
+    assert take_collector_implementation_version(observation) is None
+
+    snapshot["implementation_version"] = __version__
+    observation = parse_server_script_snapshot(
+        json.dumps(snapshot),
+        endpoint_id="endpoint-a",
+        observed_at=observed_at,
+    )
+    assert take_collector_implementation_version(observation) == __version__
+    assert take_collector_implementation_version(observation) is None
+
+
+def test_server_script_parser_rejects_non_string_implementation_version() -> None:
+    snapshot = _server_script_snapshot()
+    snapshot["implementation_version"] = 2
+    with pytest.raises(CollectionError, match="implementation_version"):
+        parse_server_script_snapshot(
+            json.dumps(snapshot),
+            endpoint_id="endpoint-a",
             observed_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
 

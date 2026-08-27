@@ -9,7 +9,6 @@ trap 'rm -rf "${staging_root}"' EXIT
 app_bundle="${staging_root}/ServerPilot.app"
 macos_dir="${app_bundle}/Contents/MacOS"
 resources_dir="${app_bundle}/Contents/Resources"
-runtime_dir="${resources_dir}/ServerPilotRuntime"
 core_dir="${script_dir}/ServerPilotCore"
 core_sources=("${core_dir}/Sources/ServerPilotCore"/*.swift(N))
 swift_sources=("${core_sources[@]}" "${script_dir}"/*.swift(N))
@@ -24,11 +23,6 @@ case "${target_arch}" in
     ;;
 esac
 target_triple="${target_arch}-apple-macosx${deployment_target}"
-uv_bin="${SERVERPILOT_UV:-$(command -v uv || true)}"
-backend_build_root="${project_root}/build/macos-backend"
-backend_dist_dir="${backend_build_root}/dist"
-backend_work_dir="${backend_build_root}/work"
-backend_spec_dir="${backend_build_root}/spec"
 
 if [[ "${1:-}" == "test" ]]; then
   cd "${core_dir}"
@@ -36,41 +30,19 @@ if [[ "${1:-}" == "test" ]]; then
   exit 0
 fi
 
-if [[ -z "${uv_bin}" || ! -x "${uv_bin}" ]]; then
-  print -u2 "uv is required to assemble the self-contained app backend."
-  exit 1
-fi
-
-mkdir -p "${macos_dir}" "${resources_dir}" "${runtime_dir}/configs"
+mkdir -p "${macos_dir}" "${resources_dir}/configs"
 cp "${script_dir}/Info.plist" "${app_bundle}/Contents/Info.plist"
 release_version="$(sed -n 's/^__version__ = "\(.*\)"$/\1/p' "${project_root}/src/serverpilot/__init__.py")"
 plutil -replace CFBundleShortVersionString -string "${release_version}" "${app_bundle}/Contents/Info.plist"
 cp "${script_dir}/assets/ServerPilot.icns" "${resources_dir}/ServerPilot.icns"
-cp "${project_root}/configs/inventory.yaml" "${runtime_dir}/configs/inventory.yaml"
+# daemon install --source-root still seeds Application Support from this file.
+# The GUI is not a second backend: it only needs the inventory, not a runtime.
+cp "${project_root}/configs/inventory.yaml" "${resources_dir}/configs/inventory.yaml"
 if [[ -d "${script_dir}/Fixtures" ]]; then
   mkdir -p "${resources_dir}/Fixtures"
   cp "${script_dir}/Fixtures"/*.json(N) "${resources_dir}/Fixtures/"
 fi
 plutil -lint "${app_bundle}/Contents/Info.plist" >/dev/null
-
-mkdir -p "${backend_dist_dir}" "${backend_work_dir}" "${backend_spec_dir}"
-"${uv_bin}" run --with 'pyinstaller>=6,<7' pyinstaller \
-  --noconfirm \
-  --onedir \
-  --name serverpilot \
-  --paths "${project_root}/src" \
-  --collect-submodules uvicorn \
-  --add-data "${project_root}/src/serverpilot/migrations:serverpilot/migrations" \
-  --add-data "${project_root}/src/serverpilot/bundled_plugins:serverpilot/bundled_plugins" \
-  --distpath "${backend_dist_dir}" \
-  --workpath "${backend_work_dir}" \
-  --specpath "${backend_spec_dir}" \
-  "${script_dir}/backend_main.py"
-# onedir keeps the interpreter and its libraries beside the launcher, so a
-# start is an exec rather than a 23 MB extraction into a temporary directory.
-cp -R "${backend_dist_dir}/serverpilot/." "${runtime_dir}/"
-chmod 755 "${runtime_dir}/serverpilot"
-"${runtime_dir}/serverpilot" --help >/dev/null
 
 xcrun --sdk macosx swiftc \
   -target "${target_triple}" \

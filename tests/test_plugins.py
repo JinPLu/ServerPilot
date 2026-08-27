@@ -17,6 +17,7 @@ from serverpilot.plugins import (
     apply_plugin,
     bundled_plugin_dir,
     discover_plugins,
+    discover_plugins_with_failures,
     is_known_observation_profile,
     is_valid_plugin_id,
     list_observation_profiles,
@@ -422,6 +423,21 @@ def test_parse_plugin_limits_enforces_lease_ends_and_unknown_keys() -> None:
         )
     with pytest.raises(PluginError, match="must be false"):
         parse_plugin_limits({**_info_limits(), "queues": True})
+
+
+def test_discover_plugins_exposes_schema_v2_probe_failure(tmp_path: Path) -> None:
+    user = tmp_path / "Library/Application Support/ServerPilot/plugins"
+    user.mkdir(parents=True)
+    _write_plugin(user, "sample-plug", _info_script())
+    _write_plugin(user, "legacy-plug", _info_script("legacy-plug", schema_version=2))
+    plugins, failures = discover_plugins_with_failures(home=tmp_path, environment={})
+    found = {item.plugin_id: item for item in plugins}
+    assert "sample-plug" in found
+    assert "legacy-plug" not in found
+    assert any(
+        failure.plugin_id == "legacy-plug" and "schema_version must be 3" in failure.error
+        for failure in failures
+    )
 
 
 def test_probe_plugin_rejects_schema_v2_and_missing_limits(tmp_path: Path) -> None:

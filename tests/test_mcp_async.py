@@ -5,10 +5,71 @@ import threading
 
 import pytest
 
-from serverpilot import mcp_server
+from serverpilot import API_CAPABILITIES, __version__, daemon, mcp_server
 from serverpilot.client import BrokerClientError
+from serverpilot.daemon import DaemonError, ensure_broker_ready_for_mcp
 from serverpilot.mcp_server import mcp
 from tests.helpers import tools
+
+
+def test_mcp_rejects_a_control_plane_from_another_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daemon.sys, "platform", "win32")
+    monkeypatch.setattr(
+        daemon,
+        "_probe_json",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "schema_version": "v1",
+            "version": "1.9.0",
+            "capabilities": list(API_CAPABILITIES),
+        },
+    )
+
+    with pytest.raises(DaemonError, match="Restart the ServerPilot control plane") as captured:
+        ensure_broker_ready_for_mcp()
+    assert "this MCP is ServerPilot" in str(captured.value)
+    assert __version__ in str(captured.value)
+    assert "1.9.0" in str(captured.value)
+
+
+def test_mcp_rejects_a_control_plane_missing_declared_capabilities(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daemon.sys, "platform", "win32")
+    monkeypatch.setattr(
+        daemon,
+        "_probe_json",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "schema_version": "v1",
+            "version": __version__,
+            "capabilities": [item for item in API_CAPABILITIES if item != "server_group_crud"],
+        },
+    )
+
+    with pytest.raises(DaemonError, match="server_group_crud") as captured:
+        ensure_broker_ready_for_mcp()
+    assert "Restart the ServerPilot control plane" in str(captured.value)
+
+
+def test_mcp_accepts_a_control_plane_from_this_release(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(daemon.sys, "platform", "win32")
+    monkeypatch.setattr(
+        daemon,
+        "_probe_json",
+        lambda *_args, **_kwargs: {
+            "status": "live",
+            "schema_version": "v1",
+            "version": __version__,
+            "capabilities": list(API_CAPABILITIES),
+        },
+    )
+
+    ensure_broker_ready_for_mcp()
 
 
 def test_lifespan_ensures_the_daemon_off_the_event_loop_and_closes_the_client(
@@ -26,6 +87,7 @@ def test_lifespan_ensures_the_daemon_off_the_event_loop_and_closes_the_client(
         async with mcp_server._mcp_lifespan(mcp):
             client = mcp_server._http_client
             assert client is not None
+            assert client.trust_env is False
             first = mcp_server._broker("agent")
             second = mcp_server._broker("other")
             assert first._http is client

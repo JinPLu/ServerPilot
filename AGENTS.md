@@ -24,7 +24,7 @@
 ## 发布与版本
 
 - 推送含用户可见行为的改动前，先在 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的 `Unreleased` 中用简短、面向结果的文字记录；不要把测试、内部 gate 或提交历史写成发布说明。
-- 仅推送提交不等于正式发布。正式版本发布须经用户明确要求，并完成所需验证、更新 `src/serverpilot/__init__.py` 的 `__version__`（打包与桌面版本都从它派生）、将 `Unreleased` 归入版本条目、提交、tag 和 GitHub Release。
+- 仅推送提交不等于正式发布。正式版本发布须经用户明确要求，并完成所需验证后：更新 `src/serverpilot/__init__.py` 的 `__version__`（打包与桌面版本都从它派生）、将两边 changelog 的 `Unreleased` 折成该版本条目、提交到获准分支，然后打并推送 `v{version}` tag。推送 tag 即发布：`release.yml` 校验 tag 与版本一致、用 `CHANGELOG.en.md` 对应条目创建 GitHub Release；Windows 工作流再上传 zip。
 - 获准正式发布时默认使用 `master`；其他 Git 工作流、分支、PR 或发布目标须由用户明确指定。
 
 <!-- TEAMWORK_PROJECT_START -->

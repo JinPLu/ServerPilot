@@ -9,6 +9,22 @@ from typing import Any
 import httpx
 
 
+def control_plane_http_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
+    """Issue one HTTP request to the loopback control plane.
+
+    ``trust_env`` stays false so ``HTTP_PROXY`` / ``HTTPS_PROXY`` / ``ALL_PROXY``
+    and the macOS System Configuration proxy never intercept 127.0.0.1. Python's
+    ``urllib.request.getproxies()`` still reads that OS table when the process
+    environment has no proxy variables; httpx would honor it by default.
+    """
+    return httpx.request(method, url, trust_env=False, **kwargs)
+
+
+def control_plane_async_httpx_client(**kwargs: Any) -> httpx.AsyncClient:
+    """Build the MCP process's AsyncClient for the loopback control plane."""
+    return httpx.AsyncClient(trust_env=False, **kwargs)
+
+
 class BrokerClientError(RuntimeError):
     """A broker call that did not return a success envelope.
 
@@ -61,18 +77,13 @@ class BrokerClient:
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         try:
-            response = httpx.request(
+            response = control_plane_http_request(
                 method,
                 f"{self.url}{path}",
                 headers=headers,
                 json=json_body,
                 params=params,
                 timeout=self.timeout_seconds,
-                # ServerPilot is a local control plane.  MCP processes are
-                # often launched with a minimal environment that omits
-                # NO_PROXY, so httpx would otherwise send loopback calls
-                # through an ambient HTTP proxy and surface its empty 502.
-                trust_env=False,
             )
         except httpx.HTTPError as exc:
             raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc

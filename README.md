@@ -117,6 +117,10 @@ line.
 
 ### 1. 🧰 Start the local control plane
 
+On macOS the CLI **is** the backend. `uv tool install` installs the control
+plane the daemon will run; the desktop app is only the GUI. Opening the app
+does not start or replace that process.
+
 **macOS**, from source, with [Python 3.12+](https://www.python.org/) and
 [uv](https://docs.astral.sh/uv/):
 
@@ -128,7 +132,11 @@ serverpilot daemon install --source-root "$PWD"
 serverpilot daemon status
 ```
 
-`daemon install` registers a user LaunchAgent and is macOS-only.
+`daemon install` registers a user LaunchAgent that starts the `uv tool`
+install, and is macOS-only. After a later upgrade, confirm the process on
+`http://127.0.0.1:8787/health/live` actually reports the new version — see the
+[upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
+(Chinese).
 
 **Windows**: download the desktop app under [The desktop app](#-the-desktop-app)
 below. It carries its own Python and starts the control plane itself, so there
@@ -181,9 +189,11 @@ serverpilot mcp install --client codex     # or claude, cursor
 python3 scripts/install_agent_policy.py codex --install
 ```
 
-`serverpilot mcp install` registers through each client's own mechanism: Codex
-and Claude Code get their `mcp add`, and Cursor is merged into
-`~/.cursor/mcp.json` without disturbing servers already there.
+`serverpilot mcp install` only writes the launch command: Codex and Claude
+Code get their `mcp add`, and Cursor is merged into `~/.cursor/mcp.json`
+without disturbing servers already there. It does not refresh a client's
+cached tool list — reconnect the server (Cursor: Disable → Enable, or reload
+the window) so it runs `tools/list` again.
 
 To paste it yourself, `serverpilot mcp config --client all` prints the
 registration without writing anything. The standard block is:
@@ -215,9 +225,12 @@ gpu_status → gpu_apply(server_group_id=<group>, gpu_count=<launch config>, tas
   Agents never pass GPU IDs; `gpu_apply` picks the cards, and one lease always
   lands on a single server. `gpu_count` is exact job parallelism from the launch
   script or config. The safe default is 1. Never infer it from free capacity.
-- On grouped direct hosts, pass `server_group_id`; the broker then best-fits one
-  host inside that group. `server_id` remains for ungrouped hosts and for
-  plugin-adapted clusters.
+- On a grouped host — bare-metal `direct` or plugin `delegated` — pass
+  `server_group_id`; the broker then best-fits one host inside that group.
+  `server_id` is only for ungrouped hosts. A plugin-adapted cluster appears as
+  an ordinary group, with `allocation`, `limits`, and
+  `largest_allocatable_block` (one apply's max cards, not remaining pool size;
+  `null` means unknown — do not invent a number).
 - Inventory uses `gpu_add_server` and `gpu_update_server`. There is no MCP
   delete; remove a server in the app or REST, which refuses while it holds
   active leases.
@@ -268,12 +281,15 @@ To build from source on Windows, in PowerShell:
 
 ### macOS
 
+Install the CLI first — that is the backend. Then open the desktop app to
+watch state, ownership, and failures. The app does not run its own control
+plane.
+
 ```bash
-zsh desktop/build-macos-app.sh
 open "./ServerPilot.app"
 ```
 
-The app is for seeing state, ownership, and failures. There is no browser UI.
+There is no browser UI.
 Manual reassignment updates the lease and the CUDA selector; it does not
 migrate a running process, so the agent has to restart its workload against the
 new selector.
@@ -316,6 +332,7 @@ In Chinese:
 - [Collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md)
 - [Server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md)
 - [Keepalive and adapters](https://github.com/JinPLu/ServerPilot/blob/master/docs/ADAPTERS_zh.md)
+- [Upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
 - [Implementation and verification status](https://github.com/JinPLu/ServerPilot/blob/master/docs/IMPLEMENTATION_STATUS_zh.md)
 
 Reference documentation is currently written in Chinese, and so are the desktop
