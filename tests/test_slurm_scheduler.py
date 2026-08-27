@@ -985,6 +985,28 @@ def test_scheduler_submit_script_reports_shape_for_opaque_71_byte_line(
     assert opaque_output not in result.stderr
 
 
+def test_scheduler_submit_script_reports_sbatch_status_when_sbatch_ignores_stdin(
+    tmp_path: Path,
+) -> None:
+    """sbatch does not drain stdin on the paths where it rejects a submission.
+
+    The decoder feeding it then dies of SIGPIPE, and with pipefail on that made
+    141 the pipeline's status instead of sbatch's verdict. The script body here
+    is larger than a pipe buffer so the decoder is guaranteed to still be
+    writing, which is what made the original failure intermittent.
+    """
+
+    result = _run_scheduler_submit_script(
+        tmp_path,
+        script_body="# " + "padding" * 40_000 + "\n",
+        sbatch_body="printf %s 'sbatch: error: Invalid qos specification' >&2\nexit 1",
+    )
+
+    assert result.returncode == 1
+    failure = _structured_marker(result.stderr, "GB|scheduler-submit-error|")
+    assert failure["exit"] == "1"
+
+
 def test_scheduler_submit_script_classifies_rc0_error_output_without_accepting_id(
     tmp_path: Path,
 ) -> None:

@@ -166,9 +166,7 @@ def _scheduler_submit_script(
 ) -> str:
     submit_command = shlex.join(arguments)
     encoded_script = base64.b64encode(script_body.encode("utf-8")).decode("ascii")
-    submit_pipeline = (
-        f"printf %s {shlex.quote(encoded_script)} | base64 -d | {submit_command}"
-    )
+    quoted_encoded_script = shlex.quote(encoded_script)
     quoted_job_name = shlex.quote(job_name)
     quoted_comment = shlex.quote(comment)
     return f"""\
@@ -342,8 +340,16 @@ classify_zero_status_no_id() {{
 }}
 
 set +e
-submit_output=$({{ {submit_pipeline}; }} 2>&1)
+# pipefail is off for exactly this pipeline so the status is sbatch's own. The
+# script reaches sbatch on stdin by contract, and sbatch does not drain stdin on
+# its early-exit paths, which killed the decoder with SIGPIPE and made 141 the
+# pipeline status -- reporting a job that had really been submitted as a failure
+# and leaving it running. A decode failure still surfaces, because sbatch then
+# rejects the truncated script and says so itself.
+set +o pipefail
+submit_output=$({{ printf %s {quoted_encoded_script} | base64 -d | {submit_command}; }} 2>&1)
 submit_status=$?
+set -o pipefail
 set -e
 if [ "$submit_status" -ne 0 ]; then
   failure_class=$(classify_submit_failure "$submit_status" "$submit_output")

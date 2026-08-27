@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -13,6 +14,13 @@ from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig, S
 from serverpilot.database import Database
 from serverpilot.models import Actor
 from serverpilot.service import ActorContext, BrokerService
+
+# The keepalive helper runs on the Linux GPU servers and imports fcntl at module
+# level. Where fcntl does not exist the helper cannot run at all, so collecting
+# its tests only breaks the run. The control plane guards its own fcntl import.
+collect_ignore = (
+    [] if importlib.util.find_spec("fcntl") is not None else ["test_keepalive_adapter.py"]
+)
 
 
 @pytest.fixture
