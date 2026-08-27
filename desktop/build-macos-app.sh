@@ -56,7 +56,7 @@ plutil -lint "${app_bundle}/Contents/Info.plist" >/dev/null
 mkdir -p "${backend_dist_dir}" "${backend_work_dir}" "${backend_spec_dir}"
 "${uv_bin}" run --with 'pyinstaller>=6,<7' pyinstaller \
   --noconfirm \
-  --onefile \
+  --onedir \
   --name serverpilot \
   --paths "${project_root}/src" \
   --collect-submodules uvicorn \
@@ -66,7 +66,9 @@ mkdir -p "${backend_dist_dir}" "${backend_work_dir}" "${backend_spec_dir}"
   --workpath "${backend_work_dir}" \
   --specpath "${backend_spec_dir}" \
   "${script_dir}/backend_main.py"
-cp "${backend_dist_dir}/serverpilot" "${runtime_dir}/serverpilot"
+# onedir keeps the interpreter and its libraries beside the launcher, so a
+# start is an exec rather than a 23 MB extraction into a temporary directory.
+cp -R "${backend_dist_dir}/serverpilot/." "${runtime_dir}/"
 chmod 755 "${runtime_dir}/serverpilot"
 "${runtime_dir}/serverpilot" --help >/dev/null
 

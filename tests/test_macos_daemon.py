@@ -574,6 +574,80 @@ def test_ensure_rejects_foreign_service_without_owned_launch_agent(
         manager.ensure()
 
 
+def test_start_does_not_kick_the_job_launchd_just_spawned(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """RunAtLoad already started it, and launchd throttles a respawn.
+
+    Killing the process bootstrap just spawned costs the throttle interval,
+    ten seconds during which the app has no daemon to talk to. That was the
+    difference between a three-second and a twenty-one-second cold start.
+    """
+
+    config = _config(tmp_path)
+    config.plist_path.parent.mkdir(parents=True)
+    config.plist_path.write_bytes(b"plist")
+    manager = MacOSDaemonManager(config)
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_launchctl(*arguments: str, **_kwargs: object) -> Result:
+        calls.append(arguments)
+        return Result()
+
+    monkeypatch.setattr(manager, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(manager, "_loaded", lambda: False)
+    monkeypatch.setattr(manager, "_probe_owned_ready", lambda: {"status": "ready"})
+
+    manager.start()
+
+    assert [arguments[0] for arguments in calls] == ["bootstrap"]
+
+
+def test_start_restarts_a_loaded_daemon_that_stopped_answering(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A forced restart is still the recovery path for a hung daemon."""
+
+    config = _config(tmp_path)
+    config.plist_path.parent.mkdir(parents=True)
+    config.plist_path.write_bytes(b"plist")
+    manager = MacOSDaemonManager(config)
+    calls: list[tuple[str, ...]] = []
+
+    class Result:
+        returncode = 0
+        stdout = ""
+        stderr = ""
+
+    def fake_launchctl(*arguments: str, **_kwargs: object) -> Result:
+        calls.append(arguments)
+        return Result()
+
+    probes = iter([DaemonError("not answering"), {"status": "ready"}])
+
+    def fake_probe() -> dict[str, object] | None:
+        outcome = next(probes)
+        if isinstance(outcome, DaemonError):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(manager, "_launchctl", fake_launchctl)
+    monkeypatch.setattr(manager, "_loaded", lambda: True)
+    monkeypatch.setattr(manager, "_probe_owned_ready", fake_probe)
+
+    manager.start()
+
+    assert ("kickstart", "-k", manager.service_target) in calls
+    assert not any(arguments[0] == "bootstrap" for arguments in calls)
+
+
 def test_uninstall_preserves_plist_when_launchctl_cannot_unload(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

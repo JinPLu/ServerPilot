@@ -581,7 +581,18 @@ class MacOSDaemonManager:
                 raise DaemonError(
                     f"launchctl bootstrap failed: {(result.stderr or result.stdout).strip()}"
                 )
-        self._launchctl("kickstart", "-k", self.service_target)
+            # RunAtLoad has already spawned the job. Kicking it here would kill
+            # a process that is still starting, and launchd then withholds the
+            # respawn for its throttle interval: ten seconds in which the app
+            # has nothing to talk to.
+        else:
+            try:
+                if self._probe_owned_ready() is not None:
+                    return
+            except DaemonError:
+                pass
+            # Loaded but not answering is the case a forced restart is for.
+            self._launchctl("kickstart", "-k", self.service_target)
         deadline = time.monotonic() + timeout_seconds
         last_error: DaemonError | None = None
         while time.monotonic() < deadline:
