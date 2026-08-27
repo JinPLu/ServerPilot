@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 2.0.0 - 2026-08-28
 
 **Source is now the daily product: a local daemon, the desktop apps, and five MCP tools. The browser UI and the scheduler/planning surfaces are gone; the claim loop you were using is not.**
 
