@@ -6,6 +6,11 @@ archive, and each one has already shipped a wheel that imported fine and then
 failed on first use: a missing Alembic script directory takes the database
 down, and a bundled plugin that arrives without its executable bit is silently
 invisible to discovery rather than failing loudly.
+
+The bundled plugin set is also checked for extras. setuptools never deletes
+from its ``build/lib`` cache, so a plugin that once sat in the source tree
+keeps being packaged from every later local build long after git forgot it.
+A private cluster connector left there ships to whoever installs the wheel.
 """
 
 from __future__ import annotations
@@ -40,6 +45,15 @@ def _resolve(target: Path) -> Path:
     return target
 
 
+def _source_plugin_names() -> set[str] | None:
+    """The plugin names the source tree actually carries, when it is reachable."""
+
+    source = Path(__file__).resolve().parent.parent / "src" / "serverpilot" / "bundled_plugins"
+    if not source.is_dir():
+        return None
+    return {path.name for path in source.iterdir() if path.is_file()}
+
+
 def verify(wheel: Path) -> list[str]:
     with ZipFile(wheel) as archive:
         entries = archive.infolist()
@@ -60,6 +74,14 @@ def verify(wheel: Path) -> list[str]:
         for entry in plugins
         if not (entry.external_attr >> 16) & stat.S_IXUSR
     )
+    expected = _source_plugin_names()
+    if expected is not None:
+        packaged = {entry.filename[len(PLUGIN_TREE) :] for entry in plugins}
+        problems.extend(
+            f"{PLUGIN_TREE}{name} is not in the source tree; "
+            "delete build/lib and rebuild before shipping it"
+            for name in sorted(packaged - expected)
+        )
     return problems
 
 

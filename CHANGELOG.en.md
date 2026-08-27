@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **A local build no longer packages a plugin that was deleted from the source tree long ago.** setuptools never removes files from its `build/lib` cache, so a plugin that once sat in the tree keeps being packaged by every later local build after git has forgotten it — and if that plugin is a private cluster connector, it ships to whoever installs the wheel. Packaging verification now compares the bundled plugin set against the source tree and fails on extras, naming the stale cache to clear. (Artifacts published from GitHub were never affected: CI checks out clean and has no such cache.)
+
 ## 2.1.0 - 2026-08-28
 
 **Upgrading once now finishes the job: macOS carries a single backend, a reinstall moves the running control plane onto it, and a release is one pushed tag.**
