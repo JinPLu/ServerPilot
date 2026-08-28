@@ -471,12 +471,36 @@ private func confirmKeepaliveEnd() -> Bool {
     return alert.runModal() == .alertFirstButtonReturn
 }
 
+/// Describe when this lease last ran something, for the person about to clear it.
+///
+/// "No process right now" is what the release already proves, and it is not the
+/// same as "this lease is finished": a job between two batches looks exactly
+/// like one that ended. Clearing the first wedges its cards, because the work
+/// comes back to a card that no longer belongs to anyone. Deliberately no
+/// "recent = dangerous" threshold — that would rebuild a release standard in
+/// the client, and this path exists to rescue exactly the leases no standard
+/// can judge. The elapsed time is the fact; the judgement stays with the person.
+private func processObservationSummary(_ isoTimestamp: String?) -> String {
+    guard let isoTimestamp, let observedAt = endpointTelemetryHistoryDate(isoTimestamp) else {
+        return "自这笔租约生效以来，ServerPilot 从未在这些 GPU 上观测到计算进程。"
+    }
+    let elapsed = Date().timeIntervalSince(observedAt)
+    guard elapsed >= 0 else {
+        return "最近一次在这些 GPU 上观测到计算进程：\(historyDateTime(observedAt))。"
+    }
+    return "最近一次在这些 GPU 上观测到计算进程：\(historyElapsedDescription(elapsed))前。"
+}
+
 @discardableResult
 private func confirmEmptyLeaseCleanup(_ lease: LeaseRecord, conflict: Bool) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
     alert.messageText = conflict ? "确认任务已结束后清理记录？" : "释放这笔空闲占用？"
-    alert.informativeText = "ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会释放。此操作不会停止远端任务。"
+    alert.informativeText = """
+    ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会释放。此操作不会停止远端任务。
+
+    \(processObservationSummary(lease.lastProcessObservedAt))
+    """
     alert.addButton(withTitle: conflict ? "确认任务已结束后清理" : "释放空闲占用")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn

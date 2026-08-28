@@ -1,59 +1,59 @@
 import Foundation
-import XCTest
+import Testing
 @testable import ServerPilotCore
 
 @MainActor
-final class ServerGroupTests: XCTestCase {
-    func testSnapshotDecodesServerGroupsAndEndpointAssignment() throws {
+@Suite(.serialized) struct ServerGroupTests {
+    @Test func testSnapshotDecodesServerGroupsAndEndpointAssignment() throws {
         let snapshot = BrokerSnapshot(envelope: Self.groupedEnvelope())
-        XCTAssertEqual(snapshot.serverGroups.map(\.id), ["lab-a", "lab-b"])
-        XCTAssertEqual(snapshot.serverGroup(id: "lab-a")?.displayName, "Lab A")
-        XCTAssertEqual(snapshot.serverGroup(id: "lab-a")?.workspacePath, "/srv/lab-a")
-        XCTAssertEqual(snapshot.serverGroup(id: "lab-a")?.environmentNotes, "weights under /data/lab-a")
-        XCTAssertEqual(snapshot.serverGroup(id: "lab-a")?.description, "shared A100 pool")
+        #expect(snapshot.serverGroups.map(\.id) == ["lab-a", "lab-b"])
+        #expect(snapshot.serverGroup(id: "lab-a")?.displayName == "Lab A")
+        #expect(snapshot.serverGroup(id: "lab-a")?.workspacePath == "/srv/lab-a")
+        #expect(snapshot.serverGroup(id: "lab-a")?.environmentNotes == "weights under /data/lab-a")
+        #expect(snapshot.serverGroup(id: "lab-a")?.description == "shared A100 pool")
 
-        let inherited = try XCTUnwrap(snapshot.endpoint(id: "node-a1"))
-        XCTAssertEqual(inherited.serverGroupID, "lab-a")
-        XCTAssertEqual(inherited.workspacePath, "/srv/lab-a")
-        XCTAssertNil(inherited.workspacePathOverride)
-        XCTAssertTrue(inherited.inheritsGroupWorkspacePath)
-        XCTAssertEqual(snapshot.serverGroup(for: inherited)?.id, "lab-a")
+        let inherited = try #require(snapshot.endpoint(id: "node-a1"))
+        #expect(inherited.serverGroupID == "lab-a")
+        #expect(inherited.workspacePath == "/srv/lab-a")
+        #expect(inherited.workspacePathOverride == nil)
+        #expect(inherited.inheritsGroupWorkspacePath)
+        #expect(snapshot.serverGroup(for: inherited)?.id == "lab-a")
 
-        let overridden = try XCTUnwrap(snapshot.endpoint(id: "node-a2"))
-        XCTAssertEqual(overridden.serverGroupID, "lab-a")
-        XCTAssertEqual(overridden.workspacePath, "/mnt/override-a2")
-        XCTAssertEqual(overridden.workspacePathOverride, "/mnt/override-a2")
-        XCTAssertFalse(overridden.inheritsGroupWorkspacePath)
+        let overridden = try #require(snapshot.endpoint(id: "node-a2"))
+        #expect(overridden.serverGroupID == "lab-a")
+        #expect(overridden.workspacePath == "/mnt/override-a2")
+        #expect(overridden.workspacePathOverride == "/mnt/override-a2")
+        #expect(!(overridden.inheritsGroupWorkspacePath))
 
-        let ungrouped = try XCTUnwrap(snapshot.endpoint(id: "solo-1"))
-        XCTAssertNil(ungrouped.serverGroupID)
-        XCTAssertEqual(ungrouped.workspacePath, "/srv/solo")
-        XCTAssertNil(ungrouped.workspacePathOverride)
-        XCTAssertFalse(ungrouped.inheritsGroupWorkspacePath)
+        let ungrouped = try #require(snapshot.endpoint(id: "solo-1"))
+        #expect(ungrouped.serverGroupID == nil)
+        #expect(ungrouped.workspacePath == "/srv/solo")
+        #expect(ungrouped.workspacePathOverride == nil)
+        #expect(!(ungrouped.inheritsGroupWorkspacePath))
     }
 
-    func testGroupingHelpersSeparateMembershipFromUngroupedEndpoints() throws {
+    @Test func testGroupingHelpersSeparateMembershipFromUngroupedEndpoints() throws {
         let snapshot = BrokerSnapshot(envelope: Self.groupedEnvelope())
-        XCTAssertEqual(snapshot.endpoints(inGroup: "lab-a").map(\.id), ["node-a1", "node-a2"])
-        XCTAssertEqual(snapshot.endpoints(inGroup: "lab-b").map(\.id), ["node-b1"])
-        XCTAssertEqual(snapshot.ungroupedEndpoints.map(\.id), ["solo-1"])
-        XCTAssertTrue(snapshot.endpoints(inGroup: "missing").isEmpty)
+        #expect(snapshot.endpoints(inGroup: "lab-a").map(\.id) == ["node-a1", "node-a2"])
+        #expect(snapshot.endpoints(inGroup: "lab-b").map(\.id) == ["node-b1"])
+        #expect(snapshot.ungroupedEndpoints.map(\.id) == ["solo-1"])
+        #expect(snapshot.endpoints(inGroup: "missing").isEmpty)
     }
 
-    func testMissingServerGroupsKeepsLegacyEndpointsCompatible() throws {
+    @Test func testMissingServerGroupsKeepsLegacyEndpointsCompatible() throws {
         let snapshot = try Self.fixtureSnapshot(named: "1")
-        XCTAssertTrue(snapshot.serverGroups.isEmpty)
-        XCTAssertEqual(snapshot.ungroupedEndpoints.map(\.id), snapshot.endpoints.map(\.id))
-        let endpoint = try XCTUnwrap(snapshot.endpoints.first)
-        XCTAssertNil(endpoint.serverGroupID)
-        XCTAssertNil(endpoint.workspacePathOverride)
-        XCTAssertEqual(endpoint.workspacePath, "/srv/serverpilot-fixtures")
-        XCTAssertFalse(endpoint.inheritsGroupWorkspacePath)
-        XCTAssertNil(snapshot.serverGroup(for: endpoint))
+        #expect(snapshot.serverGroups.isEmpty)
+        #expect(snapshot.ungroupedEndpoints.map(\.id) == snapshot.endpoints.map(\.id))
+        let endpoint = try #require(snapshot.endpoints.first)
+        #expect(endpoint.serverGroupID == nil)
+        #expect(endpoint.workspacePathOverride == nil)
+        #expect(endpoint.workspacePath == "/srv/serverpilot-fixtures")
+        #expect(!(endpoint.inheritsGroupWorkspacePath))
+        #expect(snapshot.serverGroup(for: endpoint) == nil)
     }
 
-    func testStorageGroupLabelIsNotPromotedToServerGroup() throws {
-        let endpoint = try XCTUnwrap(EndpointRecord(raw: [
+    @Test func testStorageGroupLabelIsNotPromotedToServerGroup() throws {
+        let endpoint = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -61,45 +61,45 @@ final class ServerGroupTests: XCTestCase {
             "storage_group": "fixture",
             "monitor": ["status": "ONLINE"],
         ]))
-        XCTAssertNil(endpoint.serverGroupID)
-        XCTAssertNil(endpoint.workspacePathOverride)
-        XCTAssertEqual(endpoint.workspacePath, "/srv/legacy")
-        XCTAssertFalse(endpoint.inheritsGroupWorkspacePath)
+        #expect(endpoint.serverGroupID == nil)
+        #expect(endpoint.workspacePathOverride == nil)
+        #expect(endpoint.workspacePath == "/srv/legacy")
+        #expect(!(endpoint.inheritsGroupWorkspacePath))
     }
 
-    func testServerGroupRecordRejectsEnvironmentMapAndExecutionFields() {
-        XCTAssertNil(ServerGroupRecord(raw: [
+    @Test func testServerGroupRecordRejectsEnvironmentMapAndExecutionFields() {
+        #expect(ServerGroupRecord(raw: [
             "id": "lab-a",
             "display_name": "Lab A",
             "workspace_path": "/srv/lab-a",
             "environment_notes": ["CUDA_HOME": "/usr/local/cuda"],
-        ]))
-        XCTAssertNil(ServerGroupRecord(raw: [
+        ]) == nil)
+        #expect(ServerGroupRecord(raw: [
             "id": "lab-a",
             "display_name": "Lab A",
             "workspace_path": "/srv/lab-a",
             "environment": ["PATH": "/bin"],
-        ]))
-        XCTAssertNil(ServerGroupRecord(raw: [
+        ]) == nil)
+        #expect(ServerGroupRecord(raw: [
             "id": "lab-a",
             "display_name": "Lab A",
             "workspace_path": "/srv/lab-a",
             "command": "nvidia-smi",
-        ]))
-        XCTAssertNil(ServerGroupRecord(raw: [
+        ]) == nil)
+        #expect(ServerGroupRecord(raw: [
             "id": "lab-a",
             "workspace_path": "relative/path",
-        ]))
-        XCTAssertNotNil(ServerGroupRecord(raw: [
+        ]) == nil)
+        #expect(ServerGroupRecord(raw: [
             "id": "lab-a",
             "display_name": "Lab A",
             "workspace_path": "/srv/lab-a",
             "environment_notes": "CUDA_HOME is under /usr/local/cuda",
             "description": "plain notes only",
-        ]))
+        ]) != nil)
     }
 
-    func testServerGroupDraftRequiresSlugNameAbsolutePathAndPlainNotes() throws {
+    @Test func testServerGroupDraftRequiresSlugNameAbsolutePathAndPlainNotes() throws {
         let draft = try ServerGroupDraft(
             id: "lab-a",
             displayName: " Lab A ",
@@ -107,83 +107,83 @@ final class ServerGroupTests: XCTestCase {
             environmentNotes: " weights under /data ",
             description: " shared pool "
         )
-        XCTAssertEqual(draft.id, "lab-a")
-        XCTAssertEqual(draft.displayName, "Lab A")
-        XCTAssertEqual(draft.workspacePath, "/srv/lab-a")
-        XCTAssertEqual(draft.environmentNotes, "weights under /data")
-        XCTAssertEqual(draft.description, "shared pool")
+        #expect(draft.id == "lab-a")
+        #expect(draft.displayName == "Lab A")
+        #expect(draft.workspacePath == "/srv/lab-a")
+        #expect(draft.environmentNotes == "weights under /data")
+        #expect(draft.description == "shared pool")
 
-        XCTAssertNoThrow(try ServerGroupDraft(
+        #expect(throws: Never.self) { try ServerGroupDraft(
             id: "ab",
             displayName: "AB",
             workspacePath: "/srv/ab"
-        ))
-        XCTAssertNoThrow(try ServerGroupDraft(
+        ) }
+        #expect(throws: Never.self) { try ServerGroupDraft(
             id: "a" + String(repeating: "x", count: 127),
             displayName: String(repeating: "n", count: 120),
             workspacePath: "/srv/lab-a",
             environmentNotes: String(repeating: "e", count: 8_000),
             description: String(repeating: "d", count: 1_000)
-        ))
+        ) }
 
-        XCTAssertThrowsError(try ServerGroupDraft(
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "a",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "a" + String(repeating: "x", count: 128),
             displayName: "Lab A",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "Lab A",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab_a",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: String(repeating: "n", count: 121),
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "Lab\nA",
             workspacePath: "/srv/lab-a"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "Lab A",
             workspacePath: "relative/path"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a",
             environmentNotes: "bad\0notes"
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a",
             environmentNotes: String(repeating: "e", count: 8_001)
-        ))
-        XCTAssertThrowsError(try ServerGroupDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupDraft(
             id: "lab-a",
             displayName: "Lab A",
             workspacePath: "/srv/lab-a",
             description: String(repeating: "d", count: 1_001)
-        ))
+        ) }
 
         let update = try ServerGroupUpdateDraft(
             displayName: "Lab A",
@@ -191,18 +191,18 @@ final class ServerGroupTests: XCTestCase {
             environmentNotes: "notes",
             description: "desc"
         )
-        XCTAssertEqual(update.displayName, "Lab A")
-        XCTAssertThrowsError(try ServerGroupUpdateDraft(
+        #expect(update.displayName == "Lab A")
+        #expect(throws: (any Error).self) { try ServerGroupUpdateDraft(
             displayName: "Lab A",
             workspacePath: ""
-        ))
-        XCTAssertThrowsError(try ServerGroupUpdateDraft(
+        ) }
+        #expect(throws: (any Error).self) { try ServerGroupUpdateDraft(
             displayName: String(repeating: "n", count: 121),
             workspacePath: "/srv/lab-a"
-        ))
+        ) }
     }
 
-    func testEndpointDraftAllowsInheritedPathWhenGroupedAndRejectsOverrideWithoutGroup() throws {
+    @Test func testEndpointDraftAllowsInheritedPathWhenGroupedAndRejectsOverrideWithoutGroup() throws {
         let inherited = try EndpointDraft(
             host: "gpu.example.test",
             port: 22,
@@ -212,9 +212,9 @@ final class ServerGroupTests: XCTestCase {
             suppliedID: "node-a1",
             serverGroupID: "lab-a"
         )
-        XCTAssertEqual(inherited.serverGroupID, "lab-a")
-        XCTAssertEqual(inherited.workspacePath, "")
-        XCTAssertNil(inherited.workspacePathOverride)
+        #expect(inherited.serverGroupID == "lab-a")
+        #expect(inherited.workspacePath == "")
+        #expect(inherited.workspacePathOverride == nil)
 
         let overridden = try EndpointDraft(
             host: "gpu.example.test",
@@ -226,17 +226,17 @@ final class ServerGroupTests: XCTestCase {
             serverGroupID: "lab-a",
             workspacePathOverride: "/mnt/override"
         )
-        XCTAssertEqual(overridden.workspacePathOverride, "/mnt/override")
+        #expect(overridden.workspacePathOverride == "/mnt/override")
 
-        XCTAssertThrowsError(try EndpointDraft(
+        #expect(throws: (any Error).self) { try EndpointDraft(
             host: "gpu.example.test",
             port: 22,
             sshUser: "collector",
             workspacePath: "",
             observationProfile: "linux-nvidia",
             suppliedID: "solo-1"
-        ))
-        XCTAssertThrowsError(try EndpointDraft(
+        ) }
+        #expect(throws: (any Error).self) { try EndpointDraft(
             host: "gpu.example.test",
             port: 22,
             sshUser: "collector",
@@ -244,23 +244,23 @@ final class ServerGroupTests: XCTestCase {
             observationProfile: "linux-nvidia",
             suppliedID: "solo-1",
             workspacePathOverride: "/mnt/override"
-        ))
+        ) }
     }
 
-    func testLegacyEndpointUpdatePayloadOmitsGroupFields() throws {
+    @Test func testLegacyEndpointUpdatePayloadOmitsGroupFields() throws {
         let draft = try EndpointUpdateDraft(
             sshUser: "collector",
             workspacePath: "/srv/storyboard",
             observationProfile: "server-script-v1"
         )
         let payload = BrokerStore.endpointUpdatePayload(draft)
-        XCTAssertEqual(Set(payload.keys), ["ssh_user", "workspace_path", "observation_profile"])
-        XCTAssertEqual(payload["ssh_user"] as? String, "collector")
-        XCTAssertEqual(payload["workspace_path"] as? String, "/srv/storyboard")
-        XCTAssertEqual(payload["observation_profile"] as? String, "server-script-v1")
+        #expect(Set(payload.keys) == ["ssh_user", "workspace_path", "observation_profile"])
+        #expect(payload["ssh_user"] as? String == "collector")
+        #expect(payload["workspace_path"] as? String == "/srv/storyboard")
+        #expect(payload["observation_profile"] as? String == "server-script-v1")
     }
 
-    func testGroupedEndpointPayloadsSendNullableOverrideAndOmitEffectivePath() throws {
+    @Test func testGroupedEndpointPayloadsSendNullableOverrideAndOmitEffectivePath() throws {
         let inheritedCreate = try EndpointDraft(
             host: "gpu.example.test",
             port: 22,
@@ -271,10 +271,10 @@ final class ServerGroupTests: XCTestCase {
             serverGroupID: "lab-a"
         )
         let inheritedCreatePayload = BrokerStore.endpointCreatePayload(inheritedCreate)
-        XCTAssertEqual(inheritedCreatePayload["server_group_id"] as? String, "lab-a")
-        XCTAssertTrue(inheritedCreatePayload["workspace_path_override"] is NSNull)
-        XCTAssertNil(inheritedCreatePayload["workspace_path"])
-        XCTAssertFalse(Set(inheritedCreatePayload.keys).contains("workspace_path"))
+        #expect(inheritedCreatePayload["server_group_id"] as? String == "lab-a")
+        #expect(inheritedCreatePayload["workspace_path_override"] is NSNull)
+        #expect(inheritedCreatePayload["workspace_path"] == nil)
+        #expect(!(Set(inheritedCreatePayload.keys).contains("workspace_path")))
 
         let overrideCreate = try EndpointDraft(
             host: "gpu.example.test",
@@ -287,9 +287,9 @@ final class ServerGroupTests: XCTestCase {
             workspacePathOverride: "/mnt/override"
         )
         let overrideCreatePayload = BrokerStore.endpointCreatePayload(overrideCreate)
-        XCTAssertEqual(overrideCreatePayload["server_group_id"] as? String, "lab-a")
-        XCTAssertEqual(overrideCreatePayload["workspace_path_override"] as? String, "/mnt/override")
-        XCTAssertNil(overrideCreatePayload["workspace_path"])
+        #expect(overrideCreatePayload["server_group_id"] as? String == "lab-a")
+        #expect(overrideCreatePayload["workspace_path_override"] as? String == "/mnt/override")
+        #expect(overrideCreatePayload["workspace_path"] == nil)
 
         let assigned = try EndpointUpdateDraft(
             sshUser: "collector",
@@ -299,10 +299,10 @@ final class ServerGroupTests: XCTestCase {
             workspacePathOverride: nil
         )
         let assignedPayload = BrokerStore.endpointUpdatePayload(assigned)
-        XCTAssertEqual(Set(assignedPayload.keys), ["ssh_user", "observation_profile", "server_group_id", "workspace_path_override"])
-        XCTAssertEqual(assignedPayload["server_group_id"] as? String, "lab-a")
-        XCTAssertTrue(assignedPayload["workspace_path_override"] is NSNull)
-        XCTAssertNil(assignedPayload["workspace_path"])
+        #expect(Set(assignedPayload.keys) == ["ssh_user", "observation_profile", "server_group_id", "workspace_path_override"])
+        #expect(assignedPayload["server_group_id"] as? String == "lab-a")
+        #expect(assignedPayload["workspace_path_override"] is NSNull)
+        #expect(assignedPayload["workspace_path"] == nil)
 
         let unassigned = try EndpointUpdateDraft(
             sshUser: "collector",
@@ -312,31 +312,31 @@ final class ServerGroupTests: XCTestCase {
             workspacePathOverride: nil
         )
         let unassignedPayload = BrokerStore.endpointUpdatePayload(unassigned)
-        XCTAssertEqual(Set(unassignedPayload.keys), ["ssh_user", "observation_profile", "workspace_path", "server_group_id"])
-        XCTAssertTrue(unassignedPayload["server_group_id"] is NSNull)
-        XCTAssertNil(unassignedPayload["workspace_path_override"])
-        XCTAssertEqual(unassignedPayload["workspace_path"] as? String, "/srv/solo")
+        #expect(Set(unassignedPayload.keys) == ["ssh_user", "observation_profile", "workspace_path", "server_group_id"])
+        #expect(unassignedPayload["server_group_id"] is NSNull)
+        #expect(unassignedPayload["workspace_path_override"] == nil)
+        #expect(unassignedPayload["workspace_path"] as? String == "/srv/solo")
     }
 
-    func testGroupedUpdateFromRecordDoesNotFreezeEffectiveWorkspacePath() throws {
-        let inherited = try XCTUnwrap(EndpointRecord(raw: [
+    @Test func testGroupedUpdateFromRecordDoesNotFreezeEffectiveWorkspacePath() throws {
+        let inherited = try #require(EndpointRecord(raw: [
             "id": "node-a1",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
             "server_group_id": "lab-a",
             "workspace_path": "/srv/lab-a",
         ]))
-        XCTAssertEqual(inherited.workspacePath, "/srv/lab-a")
+        #expect(inherited.workspacePath == "/srv/lab-a")
         let draft = EndpointUpdateDraft(endpoint: inherited)
-        XCTAssertEqual(draft.workspacePath, "/srv/lab-a")
-        XCTAssertTrue(draft.includesGroupAssignment)
+        #expect(draft.workspacePath == "/srv/lab-a")
+        #expect(draft.includesGroupAssignment)
         let payload = BrokerStore.endpointUpdatePayload(draft)
-        XCTAssertEqual(payload["server_group_id"] as? String, "lab-a")
-        XCTAssertTrue(payload["workspace_path_override"] is NSNull)
-        XCTAssertNil(payload["workspace_path"])
+        #expect(payload["server_group_id"] as? String == "lab-a")
+        #expect(payload["workspace_path_override"] is NSNull)
+        #expect(payload["workspace_path"] == nil)
     }
 
-    func testLegacyEndpointCreatePayloadSendsWorkspacePathAndOmitsOverride() throws {
+    @Test func testLegacyEndpointCreatePayloadSendsWorkspacePathAndOmitsOverride() throws {
         let draft = try EndpointDraft(
             host: "gpu.example.test",
             port: 2201,
@@ -346,13 +346,13 @@ final class ServerGroupTests: XCTestCase {
             suppliedID: "legacy-node"
         )
         let payload = BrokerStore.endpointCreatePayload(draft)
-        XCTAssertEqual(payload["workspace_path"] as? String, "/srv/storyboard")
-        XCTAssertNil(payload["server_group_id"])
-        XCTAssertNil(payload["workspace_path_override"])
-        XCTAssertFalse(Set(payload.keys).contains("workspace_path_override"))
+        #expect(payload["workspace_path"] as? String == "/srv/storyboard")
+        #expect(payload["server_group_id"] == nil)
+        #expect(payload["workspace_path_override"] == nil)
+        #expect(!(Set(payload.keys).contains("workspace_path_override")))
     }
 
-    func testGroupedClaimConstraintsEmitServerGroupIdsAndOmitEndpointIds() {
+    @Test func testGroupedClaimConstraintsEmitServerGroupIdsAndOmitEndpointIds() {
         let grouped = ClaimDraft(
             projectID: "project-a",
             taskReference: "train",
@@ -362,12 +362,12 @@ final class ServerGroupTests: XCTestCase {
             serverGroupID: "lab-a"
         )
         let constraints = BrokerStore.claimConstraints(for: grouped)
-        XCTAssertEqual(Set(constraints.keys), ["gpu_count", "placement", "same_host", "server_group_ids"])
-        XCTAssertEqual(constraints["gpu_count"] as? Int, 2)
-        XCTAssertEqual(constraints["placement"] as? String, "pack")
-        XCTAssertEqual(constraints["same_host"] as? Bool, true)
-        XCTAssertEqual(constraints["server_group_ids"] as? [String], ["lab-a"])
-        XCTAssertNil(constraints["endpoint_ids"])
+        #expect(Set(constraints.keys) == ["gpu_count", "placement", "same_host", "server_group_ids"])
+        #expect(constraints["gpu_count"] as? Int == 2)
+        #expect(constraints["placement"] as? String == "pack")
+        #expect(constraints["same_host"] as? Bool == true)
+        #expect(constraints["server_group_ids"] as? [String] == ["lab-a"])
+        #expect(constraints["endpoint_ids"] == nil)
 
         let trimmed = ClaimDraft(
             projectID: "project-a",
@@ -378,13 +378,13 @@ final class ServerGroupTests: XCTestCase {
             serverGroupID: "  lab-a  "
         )
         let trimmedConstraints = BrokerStore.claimConstraints(for: trimmed)
-        XCTAssertEqual(Set(trimmedConstraints.keys), ["gpu_count", "placement", "same_host", "server_group_ids"])
-        XCTAssertEqual(trimmedConstraints["same_host"] as? Bool, true)
-        XCTAssertEqual(trimmedConstraints["server_group_ids"] as? [String], ["lab-a"])
-        XCTAssertNil(trimmedConstraints["endpoint_ids"])
+        #expect(Set(trimmedConstraints.keys) == ["gpu_count", "placement", "same_host", "server_group_ids"])
+        #expect(trimmedConstraints["same_host"] as? Bool == true)
+        #expect(trimmedConstraints["server_group_ids"] as? [String] == ["lab-a"])
+        #expect(trimmedConstraints["endpoint_ids"] == nil)
     }
 
-    func testLegacyClaimConstraintsKeepEndpointIdsWhenGroupIsAbsent() {
+    @Test func testLegacyClaimConstraintsKeepEndpointIdsWhenGroupIsAbsent() {
         let legacy = ClaimDraft(
             projectID: "project-a",
             taskReference: "train",
@@ -392,12 +392,12 @@ final class ServerGroupTests: XCTestCase {
             gpuCount: 1,
             endpointID: "solo-1"
         )
-        XCTAssertNil(legacy.serverGroupID)
+        #expect(legacy.serverGroupID == nil)
         let constraints = BrokerStore.claimConstraints(for: legacy)
-        XCTAssertEqual(Set(constraints.keys), ["gpu_count", "placement", "same_host", "endpoint_ids"])
-        XCTAssertEqual(constraints["same_host"] as? Bool, true)
-        XCTAssertEqual(constraints["endpoint_ids"] as? [String], ["solo-1"])
-        XCTAssertNil(constraints["server_group_ids"])
+        #expect(Set(constraints.keys) == ["gpu_count", "placement", "same_host", "endpoint_ids"])
+        #expect(constraints["same_host"] as? Bool == true)
+        #expect(constraints["endpoint_ids"] as? [String] == ["solo-1"])
+        #expect(constraints["server_group_ids"] == nil)
 
         let blankGroup = ClaimDraft(
             projectID: "project-a",
@@ -408,13 +408,13 @@ final class ServerGroupTests: XCTestCase {
             serverGroupID: "   "
         )
         let blankConstraints = BrokerStore.claimConstraints(for: blankGroup)
-        XCTAssertEqual(Set(blankConstraints.keys), ["gpu_count", "placement", "same_host", "endpoint_ids"])
-        XCTAssertEqual(blankConstraints["same_host"] as? Bool, true)
-        XCTAssertEqual(blankConstraints["endpoint_ids"] as? [String], ["solo-1"])
-        XCTAssertNil(blankConstraints["server_group_ids"])
+        #expect(Set(blankConstraints.keys) == ["gpu_count", "placement", "same_host", "endpoint_ids"])
+        #expect(blankConstraints["same_host"] as? Bool == true)
+        #expect(blankConstraints["endpoint_ids"] as? [String] == ["solo-1"])
+        #expect(blankConstraints["server_group_ids"] == nil)
     }
 
-    func testSubmitClaimPostsGroupedAndLegacyConstraintPayloads() async throws {
+    @Test func testSubmitClaimPostsGroupedAndLegacyConstraintPayloads() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GroupRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
@@ -451,17 +451,18 @@ final class ServerGroupTests: XCTestCase {
             groupedRecorder.message = message
         }
         try await waitUntil { groupedRecorder.success != nil }
-        XCTAssertEqual(groupedRecorder.success, true)
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.url?.path, "/api/v1/claims")
-        let groupedPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(groupedRecorder.success == true)
+        #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/claims")
+        let groupedPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let groupedPayload = try #require(
+            try JSONSerialization.jsonObject(with: groupedPayloadBody) as? [String: Any]
         )
-        let groupedConstraints = try XCTUnwrap(groupedPayload["constraints"] as? [String: Any])
-        XCTAssertEqual(Set(groupedConstraints.keys), ["gpu_count", "placement", "same_host", "server_group_ids"])
-        XCTAssertEqual(groupedConstraints["same_host"] as? Bool, true)
-        XCTAssertEqual(groupedConstraints["server_group_ids"] as? [String], ["lab-a"])
-        XCTAssertNil(groupedConstraints["endpoint_ids"])
+        let groupedConstraints = try #require(groupedPayload["constraints"] as? [String: Any])
+        #expect(Set(groupedConstraints.keys) == ["gpu_count", "placement", "same_host", "server_group_ids"])
+        #expect(groupedConstraints["same_host"] as? Bool == true)
+        #expect(groupedConstraints["server_group_ids"] as? [String] == ["lab-a"])
+        #expect(groupedConstraints["endpoint_ids"] == nil)
 
         let legacyRecorder = CompletionRecorder()
         store.submitClaim(ClaimDraft(
@@ -475,19 +476,20 @@ final class ServerGroupTests: XCTestCase {
             legacyRecorder.message = message
         }
         try await waitUntil { legacyRecorder.success != nil }
-        XCTAssertEqual(legacyRecorder.success, true)
-        let legacyPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(legacyRecorder.success == true)
+        let legacyPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let legacyPayload = try #require(
+            try JSONSerialization.jsonObject(with: legacyPayloadBody) as? [String: Any]
         )
-        let legacyConstraints = try XCTUnwrap(legacyPayload["constraints"] as? [String: Any])
-        XCTAssertEqual(Set(legacyConstraints.keys), ["gpu_count", "placement", "same_host", "endpoint_ids"])
-        XCTAssertEqual(legacyConstraints["same_host"] as? Bool, true)
-        XCTAssertEqual(legacyConstraints["endpoint_ids"] as? [String], ["solo-1"])
-        XCTAssertNil(legacyConstraints["server_group_ids"])
+        let legacyConstraints = try #require(legacyPayload["constraints"] as? [String: Any])
+        #expect(Set(legacyConstraints.keys) == ["gpu_count", "placement", "same_host", "endpoint_ids"])
+        #expect(legacyConstraints["same_host"] as? Bool == true)
+        #expect(legacyConstraints["endpoint_ids"] as? [String] == ["solo-1"])
+        #expect(legacyConstraints["server_group_ids"] == nil)
     }
 
-    func testEndpointUpdateDraftFromRecordPreservesAssignment() throws {
-        let inherited = try XCTUnwrap(EndpointRecord(raw: [
+    @Test func testEndpointUpdateDraftFromRecordPreservesAssignment() throws {
+        let inherited = try #require(EndpointRecord(raw: [
             "id": "node-a1",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -495,19 +497,19 @@ final class ServerGroupTests: XCTestCase {
             "workspace_path": "/srv/lab-a",
         ]))
         let draft = EndpointUpdateDraft(endpoint: inherited)
-        XCTAssertEqual(draft.serverGroupID, "lab-a")
-        XCTAssertNil(draft.workspacePathOverride)
-        XCTAssertTrue(draft.includesGroupAssignment)
-        XCTAssertEqual(draft.workspacePath, "/srv/lab-a")
+        #expect(draft.serverGroupID == "lab-a")
+        #expect(draft.workspacePathOverride == nil)
+        #expect(draft.includesGroupAssignment)
+        #expect(draft.workspacePath == "/srv/lab-a")
     }
 
-    func testServerGroupCRUDUsesDocumentedRoutesAndPayloads() async throws {
+    @Test func testServerGroupCRUDUsesDocumentedRoutesAndPayloads() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GroupRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
         var snapshot = BrokerSnapshot(envelope: Self.groupedEnvelope())
         snapshot.snapshotRevision = 102
-        let group = try XCTUnwrap(snapshot.serverGroup(id: "lab-a"))
+        let group = try #require(snapshot.serverGroup(id: "lab-a"))
         let store = BrokerStore(
             actorID: "tester",
             refreshTimeoutSeconds: 1,
@@ -535,19 +537,20 @@ final class ServerGroupTests: XCTestCase {
             createRecorder.message = message
         }
         try await waitUntil { createRecorder.success != nil }
-        XCTAssertEqual(createRecorder.success, true)
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.url?.path, "/api/v1/server-groups")
-        let createPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(createRecorder.success == true)
+        #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups")
+        let createPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let createPayload = try #require(
+            try JSONSerialization.jsonObject(with: createPayloadBody) as? [String: Any]
         )
-        XCTAssertEqual(createPayload["id"] as? String, "lab-c")
-        XCTAssertEqual(createPayload["display_name"] as? String, "Lab C")
-        XCTAssertEqual(createPayload["workspace_path"] as? String, "/srv/lab-c")
-        XCTAssertEqual(createPayload["environment_notes"] as? String, "sync nightly")
-        XCTAssertEqual(createPayload["description"] as? String, "new pool")
-        XCTAssertNil(createPayload["environment"])
-        XCTAssertNil(createPayload["command"])
+        #expect(createPayload["id"] as? String == "lab-c")
+        #expect(createPayload["display_name"] as? String == "Lab C")
+        #expect(createPayload["workspace_path"] as? String == "/srv/lab-c")
+        #expect(createPayload["environment_notes"] as? String == "sync nightly")
+        #expect(createPayload["description"] as? String == "new pool")
+        #expect(createPayload["environment"] == nil)
+        #expect(createPayload["command"] == nil)
 
         let updateRecorder = CompletionRecorder()
         store.updateServerGroup(
@@ -563,15 +566,16 @@ final class ServerGroupTests: XCTestCase {
             updateRecorder.message = message
         }
         try await waitUntil { updateRecorder.success != nil }
-        XCTAssertEqual(updateRecorder.success, true)
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.url?.path, "/api/v1/server-groups/lab-a")
-        let updatePayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(updateRecorder.success == true)
+        #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups/lab-a")
+        let updatePayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let updatePayload = try #require(
+            try JSONSerialization.jsonObject(with: updatePayloadBody) as? [String: Any]
         )
-        XCTAssertEqual(updatePayload["display_name"] as? String, "Lab A2")
-        XCTAssertEqual(updatePayload["workspace_path"] as? String, "/srv/lab-a2")
-        XCTAssertNil(updatePayload["id"])
+        #expect(updatePayload["display_name"] as? String == "Lab A2")
+        #expect(updatePayload["workspace_path"] as? String == "/srv/lab-a2")
+        #expect(updatePayload["id"] == nil)
 
         let deleteRecorder = CompletionRecorder()
         store.deleteServerGroup(group) { success, message in
@@ -579,12 +583,12 @@ final class ServerGroupTests: XCTestCase {
             deleteRecorder.message = message
         }
         try await waitUntil { deleteRecorder.success != nil }
-        XCTAssertEqual(deleteRecorder.success, true)
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.httpMethod, "DELETE")
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.url?.path, "/api/v1/server-groups/lab-a")
+        #expect(deleteRecorder.success == true)
+        #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "DELETE")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups/lab-a")
     }
 
-    func testAddEndpointPayloadIncludesGroupAssignmentAndOverride() async throws {
+    @Test func testAddEndpointPayloadIncludesGroupAssignmentAndOverride() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [GroupRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
@@ -620,15 +624,16 @@ final class ServerGroupTests: XCTestCase {
             groupedRecorder.message = message
         }
         try await waitUntil { groupedRecorder.success != nil }
-        XCTAssertEqual(groupedRecorder.success, true)
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(GroupRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints")
-        let groupedPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(groupedRecorder.success == true)
+        #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints")
+        let groupedPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let groupedPayload = try #require(
+            try JSONSerialization.jsonObject(with: groupedPayloadBody) as? [String: Any]
         )
-        XCTAssertEqual(groupedPayload["server_group_id"] as? String, "lab-a")
-        XCTAssertEqual(groupedPayload["workspace_path_override"] as? String, "/mnt/override")
-        XCTAssertNil(groupedPayload["workspace_path"])
+        #expect(groupedPayload["server_group_id"] as? String == "lab-a")
+        #expect(groupedPayload["workspace_path_override"] as? String == "/mnt/override")
+        #expect(groupedPayload["workspace_path"] == nil)
 
         let inheritRecorder = CompletionRecorder()
         store.addEndpoint(try EndpointDraft(
@@ -644,13 +649,14 @@ final class ServerGroupTests: XCTestCase {
             inheritRecorder.message = message
         }
         try await waitUntil { inheritRecorder.success != nil }
-        XCTAssertEqual(inheritRecorder.success, true)
-        let inheritPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(inheritRecorder.success == true)
+        let inheritPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let inheritPayload = try #require(
+            try JSONSerialization.jsonObject(with: inheritPayloadBody) as? [String: Any]
         )
-        XCTAssertEqual(inheritPayload["server_group_id"] as? String, "lab-a")
-        XCTAssertTrue(inheritPayload["workspace_path_override"] is NSNull)
-        XCTAssertNil(inheritPayload["workspace_path"])
+        #expect(inheritPayload["server_group_id"] as? String == "lab-a")
+        #expect(inheritPayload["workspace_path_override"] is NSNull)
+        #expect(inheritPayload["workspace_path"] == nil)
 
         let legacyRecorder = CompletionRecorder()
         store.addEndpoint(try EndpointDraft(
@@ -665,24 +671,25 @@ final class ServerGroupTests: XCTestCase {
             legacyRecorder.message = message
         }
         try await waitUntil { legacyRecorder.success != nil }
-        XCTAssertEqual(legacyRecorder.success, true)
-        let legacyPayload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: try XCTUnwrap(GroupRouteURLProtocol.lastBody)) as? [String: Any]
+        #expect(legacyRecorder.success == true)
+        let legacyPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
+        let legacyPayload = try #require(
+            try JSONSerialization.jsonObject(with: legacyPayloadBody) as? [String: Any]
         )
-        XCTAssertEqual(legacyPayload["workspace_path"] as? String, "/srv/storyboard")
-        XCTAssertNil(legacyPayload["server_group_id"])
-        XCTAssertNil(legacyPayload["workspace_path_override"])
+        #expect(legacyPayload["workspace_path"] as? String == "/srv/storyboard")
+        #expect(legacyPayload["server_group_id"] == nil)
+        #expect(legacyPayload["workspace_path_override"] == nil)
     }
 
-    func testServerGroupCRUDFailsClosedWithoutCapabilityAndStaysReadOnlyInFixtureMode() async throws {
+    @Test func testServerGroupCRUDFailsClosedWithoutCapabilityAndStaysReadOnlyInFixtureMode() async throws {
         let snapshot = BrokerSnapshot(envelope: Self.groupedEnvelope())
-        let group = try XCTUnwrap(snapshot.serverGroup(id: "lab-a"))
+        let group = try #require(snapshot.serverGroup(id: "lab-a"))
         let advertised = ServiceInfo(schemaVersion: "v1", capabilities: ["endpoint_update"])
-        XCTAssertFalse(advertised.supportsServerGroupCRUD)
-        XCTAssertFalse(ServiceInfo(schemaVersion: "v1", capabilities: ["server_groups"]).supportsServerGroupCRUD)
-        XCTAssertTrue(ServiceInfo.fixture.supportsServerGroupCRUD)
-        XCTAssertTrue(ServiceInfo(schemaVersion: "v1", capabilities: []).supportsServerGroupCRUD)
-        XCTAssertTrue(ServiceInfo(schemaVersion: "v1", capabilities: ["server_group_crud"]).supportsServerGroupCRUD)
+        #expect(!(advertised.supportsServerGroupCRUD))
+        #expect(!(ServiceInfo(schemaVersion: "v1", capabilities: ["server_groups"]).supportsServerGroupCRUD))
+        #expect(ServiceInfo.fixture.supportsServerGroupCRUD)
+        #expect(ServiceInfo(schemaVersion: "v1", capabilities: []).supportsServerGroupCRUD)
+        #expect(ServiceInfo(schemaVersion: "v1", capabilities: ["server_group_crud"]).supportsServerGroupCRUD)
 
         let liveStore = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         liveStore.connectForTesting(
@@ -691,7 +698,7 @@ final class ServerGroupTests: XCTestCase {
             baseURL: URL(string: "http://broker.test/")!
         )
         try await waitUntil { liveStore.freshness == .fresh && !liveStore.isRefreshing }
-        XCTAssertFalse(liveStore.supportsServerGroupCRUD)
+        #expect(!(liveStore.supportsServerGroupCRUD))
 
         let createRecorder = CompletionRecorder()
         liveStore.createServerGroup(try ServerGroupDraft(
@@ -703,13 +710,13 @@ final class ServerGroupTests: XCTestCase {
             createRecorder.message = message
         }
         try await waitUntil { createRecorder.success != nil }
-        XCTAssertEqual(createRecorder.success, false)
-        XCTAssertTrue(createRecorder.message?.contains("创建服务器分组") == true)
+        #expect(createRecorder.success == false)
+        #expect(createRecorder.message?.contains("创建服务器分组") == true)
 
         let fixtureStore = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         fixtureStore.useFixture(snapshot: snapshot)
-        XCTAssertTrue(fixtureStore.supportsServerGroupCRUD)
-        XCTAssertFalse(fixtureStore.allowsMutations)
+        #expect(fixtureStore.supportsServerGroupCRUD)
+        #expect(!(fixtureStore.allowsMutations))
 
         let fixtureRecorder = CompletionRecorder()
         fixtureStore.deleteServerGroup(group) { success, message in
@@ -717,18 +724,15 @@ final class ServerGroupTests: XCTestCase {
             fixtureRecorder.message = message
         }
         try await waitUntil { fixtureRecorder.success != nil }
-        XCTAssertEqual(fixtureRecorder.success, false)
-        XCTAssertEqual(
-            fixtureRecorder.message,
-            "当前为只读测试夹具或尚未连接本机服务，不能执行资源变更。"
-        )
+        #expect(fixtureRecorder.success == false)
+        #expect(fixtureRecorder.message == "当前为只读测试夹具或尚未连接本机服务，不能执行资源变更。")
     }
 
-    func testGroupedSnapshotChangeIsNotSemanticallyEquivalent() {
+    @Test func testGroupedSnapshotChangeIsNotSemanticallyEquivalent() {
         let grouped = BrokerSnapshot(envelope: Self.groupedEnvelope())
         var withoutGroups = grouped
         withoutGroups.serverGroups = []
-        XCTAssertFalse(grouped.isSemanticallyEquivalentForRefresh(to: withoutGroups))
+        #expect(!(grouped.isSemanticallyEquivalentForRefresh(to: withoutGroups)))
     }
 
     private static func groupedEnvelope() -> [String: Any] {
@@ -816,7 +820,7 @@ final class ServerGroupTests: XCTestCase {
         let deadline = Date().addingTimeInterval(timeout)
         while !condition() {
             if Date() > deadline {
-                XCTFail("Timed out waiting for condition")
+                Issue.record("Timed out waiting for condition")
                 return
             }
             try await Task.sleep(nanoseconds: 5_000_000)

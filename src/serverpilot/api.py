@@ -2,12 +2,13 @@
 
 import asyncio
 import contextlib
+import functools
 import os
 import re
 import threading
 import time
 from collections import defaultdict, deque
-from collections.abc import AsyncIterator, Callable, Mapping
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Annotated, Any
 
@@ -292,20 +293,25 @@ def claim_candidate_endpoint_ids(
 
     The keeper-start / claim race is per endpoint. Pinning or a group narrows
     the lock to that set. With neither constraint the allocator may pick any
-    host, so every collectable endpoint stays locked.
+    host, so every candidate endpoint stays locked.
+
+    A host with no keepalive adapter has no keeper to race with, and a claim
+    can never reclaim from it. Locking it buys nothing and costs the whole
+    reconcile pass for that host, which is skipped while the lock is held.
     """
 
-    pinned = request_data.constraints.endpoint_ids
+    candidates = [
+        endpoint for endpoint in endpoints if getattr(endpoint, "keepalive_adapter_id", None)
+    ]
+    pinned = set(request_data.constraints.endpoint_ids)
     if pinned:
-        return set(pinned)
+        return {endpoint.id for endpoint in candidates if endpoint.id in pinned}
     group_ids = set(request_data.constraints.server_group_ids)
     if group_ids:
         return {
-            endpoint.id
-            for endpoint in endpoints
-            if endpoint.server_group_id in group_ids
+            endpoint.id for endpoint in candidates if endpoint.server_group_id in group_ids
         }
-    return {endpoint.id for endpoint in endpoints}
+    return {endpoint.id for endpoint in candidates}
 
 
 def create_app(
@@ -349,7 +355,6 @@ def create_app(
             collected = await shared_collector.collect_once(
                 service,
                 endpoints=[endpoint],
-                concurrency=1,
             )
         except Exception:
             raise BrokerError(
@@ -476,8 +481,8 @@ def create_app(
         """
 
         async with keepalive_reconcile_lock(endpoint_id):
-            endpoint = service.collector_endpoint(endpoint_id)
-            plan = service.list_keepalive_transitions(endpoint_id)
+            endpoint = await service.in_domain(service.collector_endpoint, endpoint_id)
+            plan = await service.in_domain(service.list_keepalive_transitions, endpoint_id)
             transitions = plan.get("transitions")
             if not isinstance(transitions, list):
                 raise BrokerError(
@@ -498,7 +503,7 @@ def create_app(
                 transition for transition in transitions if transition.get("action") == "recover"
             ]
             if not starts and not stops and not recovers:
-                return service.get_endpoint_keepalive_summary(endpoint_id)
+                return await service.in_domain(service.get_endpoint_keepalive_summary, endpoint_id)
             adapter_id = endpoint.keepalive_adapter_id
             if adapter_id is None:
                 raise BrokerError(
@@ -541,7 +546,8 @@ def create_app(
                     except BrokerError:
                         if code != "keepalive_cleanup_failed":
                             code = "keepalive_observation_failed"
-                    service.set_keepalive_error(
+                    await service.in_domain(
+                        service.set_keepalive_error,
                         endpoint_id,
                         [gpu_id for gpu_id, _gpu_uuid in start_targets],
                         _public_error_message(
@@ -580,7 +586,8 @@ def create_app(
                     confirmed_worker_identities = {
                         gpu_id: identities_by_uuid[gpu_uuid] for gpu_id, gpu_uuid in start_targets
                     }
-                    service.confirm_keepalive_workers(
+                    await service.in_domain(
+                        service.confirm_keepalive_workers,
                         actor,
                         endpoint_id,
                         [gpu_id for gpu_id, _gpu_uuid in start_targets],
@@ -617,7 +624,8 @@ def create_app(
                         attested, recover_gpu_uuids
                     )
                     await collect_keepalive_endpoint(endpoint)
-                    service.confirm_keepalive_workers(
+                    await service.in_domain(
+                        service.confirm_keepalive_workers,
                         actor,
                         endpoint_id,
                         [gpu_id for gpu_id, _gpu_uuid in recover_targets],
@@ -657,7 +665,8 @@ def create_app(
                     # Resolve the lease through the service before remote I/O;
                     # a stale plan must never ask the helper to stop a GPU.
                     try:
-                        pending = service.prepare_keepalive_stop(
+                        pending = await service.in_domain(
+                            service.prepare_keepalive_stop,
                             actor,
                             endpoint_id,
                             transition.get("gpu_id"),
@@ -702,7 +711,8 @@ def create_app(
                     try:
                         observation_not_before = utcnow()
                         await collect_keepalive_endpoint(endpoint)
-                        service.finalize_keepalive_stop(
+                        await service.in_domain(
+                            service.finalize_keepalive_stop,
                             actor,
                             endpoint_id,
                             lease_id,
@@ -739,12 +749,12 @@ def create_app(
                         status_code=409,
                         details={"failed_gpu_ids": [item["gpu_id"] for item in stop_failures]},
                     )
-            return service.get_endpoint_keepalive_summary(endpoint_id)
+            return await service.in_domain(service.get_endpoint_keepalive_summary, endpoint_id)
 
     async def reclaim_keepalive_for_claim(
         actor: ActorContext,
         request_data_provider: Callable[[], RequestCreate],
-        claim: Callable[[], dict[str, Any]],
+        claim: Callable[[], Awaitable[dict[str, Any]]],
         *,
         idempotency_key: str | None,
         locked_endpoint_ids: set[str] | None = None,
@@ -761,7 +771,7 @@ def create_app(
 
         async def execute_locked() -> dict[str, Any] | None:
             request_data = request_data_provider()
-            plan = service.plan_keepalive_reclaim(request_data)
+            plan = await service.in_domain(service.plan_keepalive_reclaim, request_data)
             transitions = plan.get("transitions")
             if (
                 plan.get("complete") is not True
@@ -796,7 +806,7 @@ def create_app(
             for target in targets:
                 by_endpoint[target["endpoint_id"]].append(target)
             for endpoint_id, endpoint_targets in by_endpoint.items():
-                endpoint = service.collector_endpoint(endpoint_id)
+                endpoint = await service.in_domain(service.collector_endpoint, endpoint_id)
                 adapter_id = endpoint.keepalive_adapter_id
                 if adapter_id is None:
                     return None
@@ -806,7 +816,8 @@ def create_app(
                     return None
                 prepared: list[dict[str, str]] = []
                 for target in endpoint_targets:
-                    pending = service.prepare_keepalive_stop(
+                    pending = await service.in_domain(
+                        service.prepare_keepalive_stop,
                         actor,
                         endpoint_id,
                         target["gpu_id"],
@@ -847,7 +858,8 @@ def create_app(
                     ) from None
                 for target in prepared:
                     try:
-                        service.finalize_keepalive_stop(
+                        await service.in_domain(
+                            service.finalize_keepalive_stop,
                             actor,
                             endpoint_id,
                             target["lease_id"],
@@ -875,13 +887,13 @@ def create_app(
             # Keep the endpoint locks through the ordinary claim.
             # Otherwise collector reconciliation could observe the fresh
             # empty GPU and restart its keeper in the gap.
-            return claim()
+            return await claim()
 
         if locked_endpoint_ids is not None:
             return await execute_locked()
         endpoint_ids = claim_candidate_endpoint_ids(
             request_data_provider(),
-            service.collector_endpoints(),
+            await service.in_domain(service.collector_endpoints),
         )
         async with keepalive_endpoint_locks(endpoint_ids):
             return await execute_locked()
@@ -906,12 +918,12 @@ def create_app(
         endpoint = None
         if len(endpoint_ids) == 1:
             try:
-                endpoint = service.collector_endpoint(endpoint_ids[0])
+                endpoint = await service.in_domain(service.collector_endpoint, endpoint_ids[0])
             except BrokerError:
                 return None
         elif not endpoint_ids and len(group_ids) == 1:
             matches = []
-            for item in service.collector_endpoints():
+            for item in await service.in_domain(service.collector_endpoints):
                 if item.server_group_id != group_ids[0]:
                     continue
                 if not is_plugin_profile(item.observation_profile):
@@ -930,7 +942,11 @@ def create_app(
         if plugin is None or "apply" not in plugin.capabilities:
             return None
         try:
-            overlay = apply_plugin(
+            # The cluster's own apply budget is seconds to minutes. Keeping it
+            # off the event loop is what lets the GUI and other claims stay
+            # responsive while one delegated cluster is deciding.
+            overlay = await asyncio.to_thread(
+                apply_plugin,
                 plugin.plugin_id,
                 gpu_count=request_data.constraints.gpu_count,
                 task_ref=request_data.task_ref,
@@ -943,7 +959,11 @@ def create_app(
             await collect_keepalive_endpoint(endpoint)
         except BrokerError:
             with contextlib.suppress(PluginError):
-                release_plugin(plugin.plugin_id, allocation_ref=str(overlay["allocation_ref"]))
+                await asyncio.to_thread(
+                    release_plugin,
+                    plugin.plugin_id,
+                    allocation_ref=str(overlay["allocation_ref"]),
+                )
             raise
         gpu_ids = _plugin_overlay_gpu_ids(endpoint.id, overlay)
         retry_data = request_data
@@ -956,7 +976,8 @@ def create_app(
                 }
             )
         try:
-            return service.create_request(
+            return await service.in_domain(
+                service.create_request,
                 actor,
                 retry_data,
                 idempotency_key=idempotency_key,
@@ -966,7 +987,11 @@ def create_app(
             )
         except Exception:
             with contextlib.suppress(PluginError):
-                release_plugin(plugin.plugin_id, allocation_ref=str(overlay["allocation_ref"]))
+                await asyncio.to_thread(
+                    release_plugin,
+                    plugin.plugin_id,
+                    allocation_ref=str(overlay["allocation_ref"]),
+                )
             raise
 
     async def claim_request_now(
@@ -980,7 +1005,7 @@ def create_app(
 
         endpoint_ids = claim_candidate_endpoint_ids(
             request_data,
-            service.collector_endpoints(),
+            await service.in_domain(service.collector_endpoints),
         )
         # A keeper start and an ordinary claim must not race between remote
         # start and ownership persistence. Keep this lock through a possible
@@ -988,7 +1013,8 @@ def create_app(
         # endpoint, so only hosts this request could select are locked.
         async with keepalive_endpoint_locks(endpoint_ids):
             try:
-                return service.create_request(
+                return await service.in_domain(
+                    service.create_request,
                     actor,
                     request_data,
                     idempotency_key=idempotency_key,
@@ -1001,7 +1027,9 @@ def create_app(
                 claimed = await reclaim_keepalive_for_claim(
                     actor,
                     lambda: request_data,
-                    lambda: service.create_request(
+                    functools.partial(
+                        service.in_domain,
+                        service.create_request,
                         actor,
                         request_data,
                         idempotency_key=idempotency_key,
@@ -1050,12 +1078,10 @@ def create_app(
         next_prune_at = 0.0
         while True:
             interval = service.collector_interval_seconds()
-            cycle_started = time.monotonic()
             try:
-                endpoints = service.collector_endpoints()
+                endpoints = await service.in_domain(service.collector_endpoints_due)
                 collected = await shared_collector.collect_once(
                     service,
-                    concurrency=5,
                     endpoints=endpoints,
                     stagger_seconds=0.0,
                 )
@@ -1075,10 +1101,13 @@ def create_app(
                 pass
             if time.monotonic() >= next_prune_at:
                 with contextlib.suppress(Exception):
-                    service.prune_telemetry_history()
+                    await service.in_domain(service.prune_telemetry_history)
                 next_prune_at = time.monotonic() + 3600
-            elapsed = time.monotonic() - cycle_started
-            await asyncio.sleep(max(0.25, interval - elapsed))
+            # A fixed gap, not a fixed period. Subtracting the cycle time makes
+            # a slow cycle collapse into a back-to-back loop that never lets
+            # the event loop drain; `stale_after` is three intervals, so a gap
+            # leaves room for a cycle that runs long.
+            await asyncio.sleep(interval)
 
     @contextlib.asynccontextmanager
     async def lifespan(application: FastAPI):
@@ -1096,6 +1125,7 @@ def create_app(
             reconcile_tasks = tuple(keepalive_reconcile_tasks)
             if reconcile_tasks:
                 await asyncio.gather(*reconcile_tasks, return_exceptions=True)
+            service.shutdown()
 
     app = FastAPI(title="ServerPilot", version=__version__, lifespan=lifespan)
     app.state.service = service
@@ -1339,7 +1369,7 @@ def create_app(
         return await claim_request_now(
             actor,
             request_data,
-            idempotency_key=idempotency_key,
+            idempotency_key=_idempotency_key(idempotency_key),
             persistent_lease=True,
         )
 
@@ -1423,10 +1453,11 @@ def create_app(
         mutation_key: str,
         operator_override: bool,
     ) -> dict[str, Any]:
-        endpoint_ids = {endpoint.id for endpoint in service.collector_endpoints()}
+        endpoint_ids = {endpoint.id for endpoint in await service.in_domain(service.collector_endpoints)}
         async with keepalive_endpoint_locks(endpoint_ids):
             try:
-                return service.reassign_lease_gpus(
+                return await service.in_domain(
+                    service.reassign_lease_gpus,
                     actor,
                     lease_id,
                     assignment.gpu_ids,
@@ -1436,7 +1467,8 @@ def create_app(
             except BrokerError as exc:
                 if exc.code != "gpu_already_assigned":
                     raise
-                reclaim_request = service.keepalive_reclaim_request_for_reassignment(
+                reclaim_request = await service.in_domain(
+                    service.keepalive_reclaim_request_for_reassignment,
                     actor,
                     lease_id,
                     assignment.gpu_ids,
@@ -1447,7 +1479,9 @@ def create_app(
                 reassigned = await reclaim_keepalive_for_claim(
                     actor,
                     lambda: reclaim_request,
-                    lambda: service.reassign_lease_gpus(
+                    functools.partial(
+                        service.in_domain,
+                        service.reassign_lease_gpus,
                         actor,
                         lease_id,
                         assignment.gpu_ids,
@@ -1477,7 +1511,7 @@ def create_app(
                 status_code=403,
             )
         label = request.headers.get("x-serverpilot-actor", "human").strip() or "human"
-        local = service.local_actor(label)
+        local = await service.in_domain(service.local_actor, label)
         actor = ActorContext(id=local.id, role="operator", project_ids=local.project_ids)
         return await apply_lease_gpu_reassignment(
             actor,
@@ -1495,24 +1529,22 @@ def create_app(
         actor: ApiActor,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
-        """Clear an empty workload/keepalive lease only after fresh collection."""
+        """Clear an empty workload/keepalive lease, on proof or on unreachability.
+
+        The collection still runs first, and a host that answers must still
+        show the cards empty. A failed collection is no longer refused here:
+        that refusal is what made a withdrawn container unrecoverable, because
+        the proof this path demands can only come from the machine that is
+        gone. The domain decides on the recorded reachability instead, so a
+        single flaky probe still cannot clear a lease on a live host.
+        """
 
         mutation_key = _idempotency_key(idempotency_key)
         observation_not_before = utcnow()
-        endpoint = service.collector_endpoint(endpoint_id)
-        collected = await shared_collector.collect_once(
-            service,
-            endpoints=[endpoint],
-            concurrency=1,
-        )
-        result = collected.get(endpoint_id)
-        if not isinstance(result, dict) or "error" in result:
-            raise BrokerError(
-                "conflict_observation_failed",
-                "服务器采集失败，暂不释放空闲占用",
-                status_code=503,
-            )
-        return service.release_empty_conflicted_lease(
+        endpoint = await service.in_domain(service.collector_endpoint, endpoint_id)
+        await shared_collector.collect_once(service, endpoints=[endpoint])
+        return await service.in_domain(
+            service.release_empty_conflicted_lease,
             actor,
             endpoint_id,
             lease_id,
@@ -1640,7 +1672,8 @@ def create_app(
 
         mutation_key = _idempotency_key(idempotency_key)
         policy = "idle_keepalive" if state.enabled else "disabled"
-        configured = service.configure_keepalive_policy(
+        configured = await service.in_domain(
+            service.configure_keepalive_policy,
             actor,
             endpoint_id,
             policy,

@@ -10,7 +10,6 @@ import pytest
 from serverpilot.collector import CollectionError, SSHCollector, parse_server_script_snapshot
 from serverpilot.config import CollectorConfig, EndpointConfig, InventoryConfig
 from serverpilot.plugins import (
-    DIRECT_PROFILE_LIMITS,
     PLUGIN_ID_PATTERN,
     PluginError,
     add_plugin,
@@ -24,7 +23,6 @@ from serverpilot.plugins import (
     observe_plugin,
     parse_plugin_limits,
     probe_plugin,
-    profile_limits,
     release_plugin,
     user_plugin_dir,
 )
@@ -161,6 +159,43 @@ if sys.argv[1:] == ["observe"]:
             endpoint_id="x",
             observed_at=utcnow(),
         )
+
+
+def test_info_is_probed_once_per_file_content(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery may run on every collection and every claim; ``info`` may not.
+
+    The directory listing stays live so a plugin dropped in later is still
+    found, but the subprocess is remembered until the file itself changes.
+    """
+
+    user = tmp_path / "Library/Application Support/ServerPilot/plugins"
+    user.mkdir(parents=True)
+    counter = tmp_path / "info-calls"
+    counter.write_text("0", encoding="utf-8")
+    probe = (
+        "\nimport pathlib\n"
+        f"_c = pathlib.Path({str(counter)!r})\n"
+        '_c.write_text(str(int(_c.read_text()) + 1))\n'
+    )
+    script = _info_script("count-plug").replace("import json, sys", "import json, sys" + probe)
+    _write_plugin(user, "count-plug", script)
+    monkeypatch.setattr("serverpilot.plugins.user_plugin_dir", lambda **_kwargs: user)
+
+    for _ in range(5):
+        assert is_known_observation_profile("count-plug")
+    assert counter.read_text(encoding="utf-8") == "1"
+
+    # A plugin dropped in while the daemon runs is still discovered.
+    _write_plugin(user, "later-plug", _info_script("later-plug"))
+    assert is_known_observation_profile("later-plug")
+    assert counter.read_text(encoding="utf-8") == "1"
+
+    # Rewriting the file invalidates the remembered verdict.
+    _write_plugin(user, "count-plug", script + "\n# changed\n")
+    assert is_known_observation_profile("count-plug")
+    assert counter.read_text(encoding="utf-8") == "2"
 
 
 def test_unknown_profile_is_rejected() -> None:
@@ -305,8 +340,6 @@ def test_bundled_slurm_immediate_declares_observe_apply_release() -> None:
     profiles = {item["id"] for item in list_observation_profiles()}
     assert "slurm-immediate" in profiles
     assert {"linux-nvidia", "linux-host", "server-script-v1"} <= profiles
-    assert profile_limits("linux-nvidia") == DIRECT_PROFILE_LIMITS
-    assert profile_limits("slurm-immediate") == info.limits
 
 
 def test_slurm_immediate_sinfo_parsers_and_job_name() -> None:

@@ -8,6 +8,7 @@ import pytest
 
 from serverpilot import API_CAPABILITIES, __version__, daemon, mcp_server
 from serverpilot.client import (
+    CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
     CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     BrokerClientError,
 )
@@ -184,7 +185,7 @@ def test_routine_tool_parameter_names_are_unchanged() -> None:
     assert set(release_schema["properties"]) == {"lease_id"}
 
 
-def test_async_broker_claim_overrides_the_shared_read_timeout() -> None:
+def test_async_broker_claim_waits_out_the_server_budget() -> None:
     recorded: list[float | None] = []
 
     class FakeHttp:
@@ -207,7 +208,10 @@ def test_async_broker_claim_overrides_the_shared_read_timeout() -> None:
         )
 
     asyncio.run(run())
-    assert recorded == [CONTROL_PLANE_READ_TIMEOUT_SECONDS, 120.0]
+    assert recorded == [
+        CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+        CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+    ]
 
 
 def test_object_parameters_publish_nested_schemas() -> None:

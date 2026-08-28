@@ -9,25 +9,18 @@ from typing import Any
 import httpx
 
 CONTROL_PLANE_READ_TIMEOUT_SECONDS = 20.0
-# Measured 8-card reclaim spent ~8.5s per GPU when each stop re-collected the
-# whole host. Apply calls keep that budget with headroom even after one
-# collection per endpoint, and never wait more than three minutes.
-CONTROL_PLANE_CLAIM_SECONDS_PER_GPU = 15.0
-CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS = 180.0
+# A claim costs whatever the server it lands on costs, and nothing on the
+# server side scales with the number of cards: a direct claim stops one host
+# once and observes it once, and a delegated claim is bounded by the apply
+# budget its plugin declares. Guessing from `gpu_count` produced the one
+# outcome a claim must never have -- the caller giving up while the control
+# plane went on to commit a lease nobody would release. So the caller waits
+# out the largest budget the server can spend instead of predicting it:
+# `plugins.MAX_PROFILE_APPLY_SECONDS` bounds the delegated side,
+# `adapters.direct_claim_budget_seconds` the direct side, and
+# `tests/test_client.py` keeps this value above both.
+CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS = 200.0
 _CONTROL_PLANE_CLAIM_PATHS = frozenset({"/api/v1/claims", "/api/v1/routine/claims"})
-
-
-def control_plane_claim_timeout(gpu_count: int) -> float:
-    """HTTP budget for one apply/claim; scales with the requested GPU count."""
-
-    count = gpu_count if type(gpu_count) is int and gpu_count >= 1 else 1
-    return min(
-        CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS,
-        max(
-            CONTROL_PLANE_READ_TIMEOUT_SECONDS,
-            count * CONTROL_PLANE_CLAIM_SECONDS_PER_GPU,
-        ),
-    )
 
 
 def control_plane_request_timeout(
@@ -37,16 +30,12 @@ def control_plane_request_timeout(
     timeout: float | None = None,
     default: float = CONTROL_PLANE_READ_TIMEOUT_SECONDS,
 ) -> float:
-    """Read calls keep the default; claim posts scale with ``gpu_count``."""
+    """Read calls keep the default; a claim waits out the server's own budget."""
 
     if timeout is not None:
         return timeout
-    if path in _CONTROL_PLANE_CLAIM_PATHS and isinstance(json_body, dict):
-        constraints = json_body.get("constraints")
-        if isinstance(constraints, dict):
-            gpu_count = constraints.get("gpu_count")
-            if type(gpu_count) is int and gpu_count >= 1:
-                return control_plane_claim_timeout(gpu_count)
+    if path in _CONTROL_PLANE_CLAIM_PATHS:
+        return CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
     return default
 
 
@@ -71,15 +60,71 @@ class BrokerClientError(RuntimeError):
 
     ``code`` carries the broker's own error code when the response had one, so
     a caller can tell a business outcome such as ``no_capacity`` apart from a
-    transport failure without parsing the message.
+    transport failure without parsing the message. ``unsent`` says whether the
+    request provably never reached the control plane, which is the only case
+    where replaying it is free of consequence.
     """
 
     def __init__(
-        self, message: str, *, code: str | None = None, status_code: int | None = None
+        self,
+        message: str,
+        *,
+        code: str | None = None,
+        status_code: int | None = None,
+        unsent: bool = False,
+        details: dict[str, Any] | None = None,
     ) -> None:
         super().__init__(message)
         self.code = code
         self.status_code = status_code
+        self.unsent = unsent
+        self.details = details or {}
+
+
+def parse_broker_response(response: httpx.Response) -> dict[str, Any]:
+    """Turn one control-plane response into an envelope, or raise for its error.
+
+    The CLI's synchronous client and the MCP session's async broker differ only
+    in how they issue a request; everything after the response arrived is the
+    same decision. Keeping two copies of it let them disagree: ``details`` was
+    attached on the async path and dropped on the sync one, so a documented
+    outcome such as ``group_selection_required`` reached an agent complete and
+    reached the CLI stripped of the very choices it names.
+    """
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        content_type = response.headers.get("content-type", "unknown")
+        raise BrokerClientError(
+            f"broker returned non-JSON HTTP {response.status_code} ({content_type})"
+        ) from exc
+    if response.is_error:
+        error = payload.get("error", {}) if isinstance(payload, dict) else {}
+        error = error if isinstance(error, dict) else {}
+        code = error.get("code")
+        details = error.get("details")
+        raise BrokerClientError(
+            f"broker HTTP {response.status_code}: {code or 'unknown'}: "
+            f"{error.get('message', 'request failed')}",
+            code=code if isinstance(code, str) else None,
+            status_code=response.status_code,
+            details=details if isinstance(details, dict) else None,
+        )
+    if not isinstance(payload, dict):
+        raise BrokerClientError("broker returned an invalid JSON envelope")
+    return payload
+
+
+def request_was_never_sent(exc: httpx.HTTPError) -> bool:
+    """True when the transport failed before the control plane could see it.
+
+    A connect failure proves nothing was received. A read timeout proves the
+    opposite: the request arrived and the server may still be working on it,
+    so replaying it only doubles the wait for an answer that is already coming.
+    """
+
+    return isinstance(exc, httpx.ConnectError | httpx.ConnectTimeout)
 
 
 class BrokerClient:
@@ -133,26 +178,11 @@ class BrokerClient:
                 ),
             )
         except httpx.HTTPError as exc:
-            raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            content_type = response.headers.get("content-type", "unknown")
             raise BrokerClientError(
-                f"broker returned non-JSON HTTP {response.status_code} ({content_type})"
+                f"broker request failed: {type(exc).__name__}",
+                unsent=request_was_never_sent(exc),
             ) from exc
-        if response.is_error:
-            error = payload.get("error", {}) if isinstance(payload, dict) else {}
-            code = error.get("code")
-            message = error.get("message", "request failed")
-            raise BrokerClientError(
-                f"broker HTTP {response.status_code}: {code or 'unknown'}: {message}",
-                code=code if isinstance(code, str) else None,
-                status_code=response.status_code,
-            )
-        if not isinstance(payload, dict):
-            raise BrokerClientError("broker returned an invalid JSON envelope")
-        return payload
+        return parse_broker_response(response)
 
     def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.request("GET", path, params=params)

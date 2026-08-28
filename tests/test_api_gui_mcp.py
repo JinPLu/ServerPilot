@@ -725,11 +725,21 @@ def test_mcp_exposes_required_tools() -> None:
     assert "server-script-v1" in add_profile
     assert "plugin" in add_profile.lower()
     assert "linux-nvidia" in by_name["gpu_add_server"].description
-    for name in (
-        "gpu_add_server",
-        "gpu_update_server",
-    ):
-        assert {"approval_ref", "idempotency_key"}.issubset(by_name[name].inputSchema["required"])
+    # The two administration tools must be callable exactly as the instructions
+    # describe them. They used to demand agent_name / approval_ref /
+    # idempotency_key, none of which the instructions teach — and two of which
+    # the agent policy asserts must never be taught — so an agent following the
+    # documented contract could only ever get a TypeError.
+    assert by_name["gpu_add_server"].inputSchema["required"] == [
+        "project_id",
+        "host",
+        "workspace_path",
+    ]
+    assert by_name["gpu_update_server"].inputSchema["required"] == ["server_id"]
+    for name in ("gpu_add_server", "gpu_update_server"):
+        properties = by_name[name].inputSchema["properties"]
+        for withdrawn in ("agent_name", "approval_ref", "idempotency_key"):
+            assert withdrawn not in properties, (name, withdrawn)
 
 
 def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
@@ -758,7 +768,7 @@ def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
     )
 
 
-def test_mcp_endpoint_administration_requires_contract_and_uses_rest(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_mcp_endpoint_administration_uses_rest_with_its_own_replay_key(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls = []
 
     class FakeClient:
@@ -777,12 +787,9 @@ def test_mcp_endpoint_administration_requires_contract_and_uses_rest(monkeypatch
     monkeypatch.setattr(mcp_server, "_client", lambda actor_name=None: FakeClient())
 
     created = tools.gpu_add_server(
-        "agent",
         "project-a",
         "10.0.0.8",
         "/srv/server-a",
-        "approved-task",
-        "create-stable",
         server_id="server-a",
     )
     assert created["endpoint"]["id"] == "server-a"
@@ -803,24 +810,21 @@ def test_mcp_endpoint_administration_requires_contract_and_uses_rest(monkeypatch
             "expected_gpu_total_vram_mib": None,
             "owner_project_id": "project-a",
         },
-        "create-stable",
+        calls[-1][3],
     )
+    assert calls[-1][3], "the tool supplies its own replay key"
     tools.gpu_update_server(
-        "agent",
         "server-a",
-        "approved-task",
-        "update-stable",
         ssh_user="gpu",
         workspace_path="/srv/server-a-updated",
     )
-    assert calls[1:] == [
-        (
-            "PATCH",
-            "/api/v1/endpoints/server-a",
-            {"ssh_user": "gpu", "workspace_path": "/srv/server-a-updated"},
-            "update-stable",
-        ),
-    ]
+    assert calls[1][0:3] == (
+        "PATCH",
+        "/api/v1/endpoints/server-a",
+        {"ssh_user": "gpu", "workspace_path": "/srv/server-a-updated"},
+    )
+    assert calls[1][3]
+    assert calls[1][3] != calls[0][3], "each call carries its own key"
 
 
 def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -1191,7 +1195,7 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
                                 "memory_utilization_pct": 27,
                                 "temperature_c": 75,
                                 "private": "drop",
-                                "recent_average": {
+                                "lease_recent_average": {
                                     "window_seconds": 600,
                                     "sample_count": 10,
                                     "first_observed_at": "2026-08-11T23:50:00Z",
@@ -1332,7 +1336,7 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
                         "lease": {"id": "lease-mine", "task_ref": "训练"},
                         "telemetry": {
                             "memory_used_mib": 4_000,
-                            "recent_average": {
+                            "lease_recent_average": {
                                 "window_seconds": 3_600,
                                 "sample_count": 3,
                                 "first_observed_at": "2026-08-15T00:00:00Z",
@@ -1390,7 +1394,7 @@ def test_routine_status_names_the_gpu_holding_a_multi_gpu_lease_back() -> None:
             "lease": {"id": "lease-mine", "task_ref": "训练"},
             "telemetry": {
                 "observed_at": "2026-08-15T00:02:00Z",
-                "recent_average": {
+                "lease_recent_average": {
                     "window_seconds": 600,
                     "sample_count": 10,
                     "first_observed_at": "2026-08-15T00:00:00Z",
@@ -1445,7 +1449,7 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
             "lease": {"id": "lease-mine", "task_ref": "训练"},
             "telemetry": {
                 "observed_at": "2026-08-15T00:02:00Z",
-                "recent_average": {
+                "lease_recent_average": {
                     "window_seconds": 600,
                     "sample_count": sample_count,
                     "first_observed_at": "2026-08-15T00:00:00Z",

@@ -27,14 +27,16 @@ v3 的 `info` **必须**带 `limits` 对象，四键齐全、不许多键。缺�
 | --- | --- | --- |
 | `lease_ends` | 这次分配怎么结束。集群到点杀作业，和持有到调用方 `release`，对同一实验不可互换，所以必须声明，不能靠推断。 | `on_release` 或 `hard_kill_at_time_limit` |
 | `max_lease_seconds` | 硬时限秒数。`hard_kill_at_time_limit` 时必填正整数（1–2592000，即最多 30 天）；`on_release` 时必须是 `null`。 | 正整数或 `null` |
-| `apply_max_seconds` | 这次 `apply` 最多等多久。不声明等待窗口就写 `null`。 | 正整数（1–3600）或 `null` |
+| `apply_max_seconds` | 这次 `apply` 最多等多久。**这是强制超时，不是说明**：`apply` 超过它就被终止并按失败处理。上限 180 秒，因为没有调用方会等得更久（`client.CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS` 是另一半，`tests/test_client.py` 把两者钉在一起）。不声明等待窗口就写 `null`，此时回落到通用变更超时。**声明超过 180 会让 `info` 校验失败，于是整个插件在发现阶段静默消失、对应集群从容量里不见**——只有 `serverpilot doctor` 会指出来。 | 正整数（1–180）或 `null` |
 | `queues` | 当前契约不接受排队。 | 必须是 `false` |
 
-内置观测 profile（`linux-nvidia` / `linux-host` / `server-script-v1`）等价于 `on_release`、两个时限 `null`、`queues: false`。随包 `slurm-immediate` 声明 `hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、`queues: false`。
+内置观测 profile（`linux-nvidia` / `linux-host` / `server-script-v1`）等价于 `on_release`、`max_lease_seconds: null`、`queues: false`。它们不声明 `apply_max_seconds`：直连申请的成本不由 profile 公布，而是由一次申请实际花掉的 adapter 与采集超时推导（`adapters.direct_claim_budget_seconds`），由所属服务器分组投影出来。随包 `slurm-immediate` 声明 `hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、`queues: false`。
 
 ### 停留在 v2 会怎样
 
-已经放进插件目录、但仍返回 `schema_version: 2` 或缺少合法 `limits` 的可执行文件，**不会在发现时打出错误**。`discover_plugins` 对 `probe_plugin` 的失败直接 `continue`，`plugin list` 里看不到它，控制面当它不存在。文件还在目录里，人容易以为「已经装好了」。
+已经放进插件目录、但仍返回 `schema_version: 2` 或缺少合法 `limits` 的可执行文件，**不会在发现时打出错误**。`discover_plugins` 对 `probe_plugin` 的失败直接 `continue`，`plugin list` 里看不到它，控制面当它不存在。文件还在目录里，人容易以为「已经装好了」。`serverpilot doctor` 会把这类失败明确列出来。
+
+`info` 是子进程，而发现会发生在每一轮采集和每一次申请上，所以它的结论按文件内容缓存：目录每次都重新列（运行中放进去的插件仍会被发现），但同一个文件不变就不再重新 fork。改写文件即失效，无需手工刷新。
 
 `serverpilot plugin add` 走同一套 `probe_plugin`，会当场拒绝并报 `schema_version must be 3` 或 `limits` 校验失败。坑在已经就位、只靠发现的那条路径：升级控制面之后，旧插件会静默从列表里消失，对应集群不再被观测或申请。
 

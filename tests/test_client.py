@@ -4,11 +4,10 @@ import httpx
 import pytest
 
 from serverpilot.client import (
-    CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS,
+    CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
     CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     BrokerClient,
     BrokerClientError,
-    control_plane_claim_timeout,
     control_plane_request_timeout,
 )
 
@@ -194,28 +193,31 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
     assert all(not url.endswith("/api/v1/state") for _method, url in calls)
 
 
-def test_control_plane_claim_timeout_scales_with_gpu_count() -> None:
-    assert control_plane_claim_timeout(1) == CONTROL_PLANE_READ_TIMEOUT_SECONDS
-    assert control_plane_claim_timeout(8) == 120.0
-    assert control_plane_claim_timeout(16) == CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS
+def test_claim_timeout_outlasts_every_budget_the_server_can_spend() -> None:
+    """The caller must never give up while the control plane is still working.
+
+    That is the one failure a claim cannot have: the server goes on to commit
+    a lease the caller never learns about and therefore never releases. So the
+    wait is not predicted from the request, it is bounded by what the server
+    itself is allowed to spend.
+    """
+
+    from serverpilot.adapters import direct_claim_budget_seconds
+    from serverpilot.plugins import MAX_PROFILE_APPLY_SECONDS
+
+    assert CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS > MAX_PROFILE_APPLY_SECONDS
+    assert direct_claim_budget_seconds(60) < CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
+
     assert control_plane_request_timeout("/api/v1/snapshot") == CONTROL_PLANE_READ_TIMEOUT_SECONDS
-    assert (
-        control_plane_request_timeout(
-            "/api/v1/routine/claims",
-            {"constraints": {"gpu_count": 8}},
-        )
-        == 120.0
-    )
-    assert (
-        control_plane_request_timeout(
-            "/api/v1/claims",
-            {"constraints": {"gpu_count": 1}},
-        )
-        == CONTROL_PLANE_READ_TIMEOUT_SECONDS
-    )
+    for path in ("/api/v1/claims", "/api/v1/routine/claims"):
+        for gpu_count in (1, 8, 16):
+            assert (
+                control_plane_request_timeout(path, {"constraints": {"gpu_count": gpu_count}})
+                == CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
+            )
 
 
-def test_broker_client_claim_uses_scaled_timeout(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+def test_broker_client_claim_uses_the_claim_timeout(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls = []
 
     def request(method, url, **kwargs):  # type: ignore[no-untyped-def]
@@ -233,5 +235,59 @@ def test_broker_client_claim_uses_scaled_timeout(monkeypatch) -> None:  # type: 
 
     assert calls == [
         ("GET", "http://127.0.0.1:8787/api/v1/snapshot", CONTROL_PLANE_READ_TIMEOUT_SECONDS),
-        ("POST", "http://127.0.0.1:8787/api/v1/routine/claims", 120.0),
+        (
+            "POST",
+            "http://127.0.0.1:8787/api/v1/routine/claims",
+            CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+        ),
     ]
+
+
+def test_both_clients_carry_the_error_details_a_documented_outcome_needs(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The two clients differ in how they issue a request, not in what they read.
+
+    `details` is where the broker names the choices behind an answer such as
+    group_selection_required. It used to be attached on the MCP path and
+    dropped on the CLI path, so the same answer arrived actionable through one
+    and stripped through the other.
+    """
+
+    import asyncio
+
+    from serverpilot import mcp_server
+
+    body = {
+        "schema_version": "v1",
+        "error": {
+            "code": "group_selection_required",
+            "message": "pick a group",
+            "details": {"server_groups": [{"id": "group-a"}]},
+        },
+    }
+
+    def request(_method, _url, **_kwargs):  # type: ignore[no-untyped-def]
+        return httpx.Response(409, json=body)
+
+    monkeypatch.setattr("serverpilot.client.httpx.request", request)
+    with pytest.raises(BrokerClientError) as sync_error:
+        BrokerClient("http://127.0.0.1:8787").post("/api/v1/claims", {}, idempotency_key="k")
+
+    class FakeHttp:
+        async def request(self, _method: str, _url: str, **_kwargs: object) -> httpx.Response:
+            return httpx.Response(409, json=body)
+
+    async def run() -> None:
+        broker = mcp_server._AsyncBroker(
+            FakeHttp(),  # type: ignore[arg-type]
+            url="http://127.0.0.1:8787",
+            actor="agent",
+        )
+        await broker.post("/api/v1/claims", {})
+
+    with pytest.raises(BrokerClientError) as async_error:
+        asyncio.run(run())
+
+    assert sync_error.value.details == async_error.value.details
+    assert sync_error.value.details == {"server_groups": [{"id": "group-a"}]}
+    assert sync_error.value.code == async_error.value.code == "group_selection_required"
+    assert str(sync_error.value) == str(async_error.value)

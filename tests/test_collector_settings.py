@@ -9,6 +9,7 @@ from sqlalchemy import select
 from serverpilot.models import RuntimeSetting
 from serverpilot.schemas import CollectorSettingsUpdate
 from serverpilot.service import BrokerService
+from tests.helpers import observation
 
 
 def test_collector_setting_is_persisted_and_restored(service, admin, inventory, tmp_path: Path) -> None:
@@ -104,3 +105,65 @@ def test_collector_settings_api_requires_supported_value_and_idempotency(build_a
         )
         assert response.status_code == 200
         assert response.json()["settings"]["stale_after_seconds"] == 15
+
+
+def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(
+    service, admin
+) -> None:
+    """A host that stopped answering must not cost a connect timeout per cycle.
+
+    Backoff changes only the probe rhythm. Admission is already fail-closed
+    through stale telemetry, so the endpoint stays in the inventory every other
+    caller sees, and it returns to the regular cycle on its first success.
+    """
+
+    from datetime import timedelta
+
+    from sqlalchemy import select
+
+    from serverpilot.models import ProviderState
+    from serverpilot.service import DEGRADED_ENDPOINT_PROBE_SECONDS
+    from serverpilot.timeutil import utcnow
+
+    service.ingest_observation(observation("endpoint-a", count=1))
+    service.ingest_observation(observation("endpoint-b", count=1))
+    assert [item.id for item in service.collector_endpoints_due()] == [
+        "endpoint-a",
+        "endpoint-b",
+    ]
+
+    service.record_provider_failure("endpoint-b", "CollectionError: timed out")
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
+        )
+        assert state is not None
+        stale = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 60
+        )
+        state.last_success_at = stale
+        state.last_attempt_at = utcnow()
+        session.commit()
+
+    assert [item.id for item in service.collector_endpoints_due()] == ["endpoint-a"]
+    # Every other caller still sees the full inventory: backoff is a rhythm,
+    # not a lifecycle change.
+    assert [item.id for item in service.collector_endpoints()] == [
+        "endpoint-a",
+        "endpoint-b",
+    ]
+
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
+        )
+        assert state is not None
+        state.last_attempt_at = utcnow() - timedelta(
+            seconds=DEGRADED_ENDPOINT_PROBE_SECONDS + 1
+        )
+        session.commit()
+
+    assert [item.id for item in service.collector_endpoints_due()] == [
+        "endpoint-a",
+        "endpoint-b",
+    ]

@@ -911,8 +911,11 @@ class SSHCollector:
         from serverpilot.plugins import is_plugin_profile, observe_plugin
 
         if is_plugin_profile(endpoint.observation_profile):
+            # A plugin is a subprocess with its own multi-second budget. Running
+            # it inline would stop every other request and every other endpoint
+            # in this cycle for as long as the cluster takes to answer.
             return parse_server_script_snapshot(
-                observe_plugin(endpoint.observation_profile),
+                await asyncio.to_thread(observe_plugin, endpoint.observation_profile),
                 endpoint_id=endpoint.id,
                 observed_at=observed_at,
             )
@@ -989,26 +992,30 @@ class SSHCollector:
         self,
         service: BrokerService,
         *,
-        concurrency: int = 5,
         endpoints: list[EndpointConfig] | None = None,
         stagger_seconds: float = 0.0,
     ) -> dict[str, object]:
-        semaphore = asyncio.Semaphore(concurrency)
+        """Observe every selected endpoint once, concurrently.
+
+        A cycle costs as long as the slowest host, not the sum of the hosts.
+        There is no fan-out constant to tune: each endpoint is already bounded
+        by its own connect timeout, and a fixed cap only makes the endpoints
+        past it wait for a host that has stopped answering.
+        """
 
         async def collect(index: int, endpoint: EndpointConfig) -> tuple[str, dict[str, object]]:
             if stagger_seconds > 0 and index:
                 await asyncio.sleep(index * stagger_seconds)
-            async with semaphore:
-                try:
-                    observation = await self.observe_endpoint(endpoint)
-                    return endpoint.id, service.ingest_observation(observation)
-                except Exception as exc:
-                    # Service records only the bounded failure class/message, never SSH secrets.
-                    service.record_provider_failure(endpoint.id, f"{type(exc).__name__}: {exc}")
-                    return endpoint.id, {"error": type(exc).__name__}
+            try:
+                observation = await self.observe_endpoint(endpoint)
+                return endpoint.id, await service.in_domain(service.ingest_observation, observation)
+            except Exception as exc:
+                # Service records only the bounded failure class/message, never SSH secrets.
+                await service.in_domain(service.record_provider_failure, endpoint.id, f"{type(exc).__name__}: {exc}")
+                return endpoint.id, {"error": type(exc).__name__}
 
         # DB inventory is the mutable owner after bootstrap; YAML only seeds it.
-        selected = endpoints if endpoints is not None else service.collector_endpoints()
+        selected = endpoints if endpoints is not None else await service.in_domain(service.collector_endpoints)
         results = await asyncio.gather(
             *(collect(index, endpoint) for index, endpoint in enumerate(selected))
         )

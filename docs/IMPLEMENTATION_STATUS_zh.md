@@ -26,6 +26,68 @@ Agent 合同现已明确限定作用域：ServerPilot 只协调 GPU，禁止绕�
 
 ## 已完成验证
 
+### 本次工作树（实机验证，2026-08-28 夜）
+
+针对「申请不到卡 / 流程卡顿 / 申请很慢」的定位与修复，证据取自本机运行的控制面（6 endpoint / 26 GPU / 2 分组）。
+
+语义变化：
+
+- **占卡状态以采集新鲜度为第一条规则。** 看不见一张卡就无法确认它上面的占卡进程还在，`actual` 因此报 `ERROR` 而不是回放上一次记录值。状态页、endpoint 汇总和分配器现在共用 `_keepalive_gpu_status` 这一处实现（此前 snapshot 内另有一份手写拷贝 `derive_keepalive`，且已经对「有进程但无占卡记录」给出不同答案）。snapshot 因此少了一次 `KeepaliveCurrent` 预取，`session.get` 命中 identity map；只读副本实测 `snapshot()` p50 从 8.3ms 降到 7.5ms。
+- **过期的占卡不再是可回收容量。** `_eligible_gpus` 此前算出 GPU state 却在 keepalive 分支丢弃它，于是失联主机上的卡进入 reclaim 候选；`_select_resources` 的 best-fit 在同为 8 卡时按 endpoint id 排序，恰好优先选中那台失联的机器，申请在 SSH 超时上耗尽预算后以 503 结束，且因为是 `raise` 而非 `return None`，插件兜底根本不执行。
+- **一个 GPU UUID 只归属一个 endpoint。** 容器换转发端口重新登记会为同一张物理卡留下第二份记录。`ingest_observation` 现在按「黏性在位者 + 过期移交」收敛归属，失主的占卡租约在同一轮释放；分配器另有 `uuid_leased_elsewhere` 这条 fail-closed 过滤。不合并 endpoint，只裁定物理卡归属。
+- **警告不再比它描述的对象活得久。** `idle_lease` 并入 lease 作用域告警类型，孤儿 endpoint / GPU 告警在 `_reconcile_leases` 每轮清理，删除服务器时即时关闭。
+- **采集节奏与退避。** 循环改为固定间隙（此前 `max(0.25, interval - elapsed)` 在慢周期下退化为背靠背连续采集）；持续失败的 endpoint 退到 `DEGRADED_ENDPOINT_PROBE_SECONDS`（60s）重试，第一次成功即回到每轮。退避只影响探测节奏，不改变准入——它已经通过 stale telemetry fail closed；省下的是每轮一次失败写入与 revision 自增，那会让每个读者都以为有变化。间隔取得接近采集周期，好让刚被人修好的主机自己回来，不需要另开一个即时重探入口。扇出常数删除：一轮的时长是最慢的一台，不是总和。
+- **阻塞调用离开事件循环。** 插件 `info` 的结论按文件内容缓存（实测单次调用 37ms → 0.11ms）；`observe` / `apply` / `release` 经 `asyncio.to_thread`；协程内的领域调用经 `BrokerService.in_domain`（单 worker，即 `/health/ready` 已公布的 `single_writer`）。`tests/test_package_layout.py` 有静态护栏禁止协程里裸调 `service.` 或插件动词。
+- **申请预算由服务端决定。** 插件声明的 `apply_max_seconds` 成为强制超时，直连分组投影推导出的预算，客户端不再按 `gpu_count` 估算；读超时不再重放申请（请求已送达，重放只会把等待翻倍），只有确证未送达的连接失败才重试一次。`/api/v1/routine/claims` 与 `/api/v1/claims` 一样强制 idempotency key。
+
+实机证据（同一台机器，改前 / 改后）：
+
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| 事件循环延迟探针（不存在路由，45s 采样） | p99 458ms，max 1922ms，>1s 停顿 5 次 | p99 5.0ms，max 56ms，>1s 停顿 0 次 |
+| `GET /api/v1/state` | 1.0–1.3s | 0.04s |
+| `GET /api/v1/gpus` | 1.70s | 0.05s |
+| `GET /api/v1/endpoints` | 1.52s | 0.05s |
+| 活跃告警 | 23 条（21 条指向已不存在的资源） | 2 条，均为真实失联 endpoint |
+| 失联主机 `server-10-40-1-28-p4725` 的占卡投影 | `actual=ON`，8 张卡进入 reclaim 候选 | `actual=ERROR`，`available_count=0`，在 `busy_gpus` 中标为 `unreachable` |
+| `gpu_apply(server_group_id="baidu-baige", gpu_count=8)` | 挑中失联主机后 503 | 约 17 秒成功，落在仍在应答的 `server-10-40-0-199-p4580`，随后正常释放 |
+
+Python 全量测试 `616 passed`，Ruff 通过。未改数据库 schema，无新迁移：所有判定都从既有列（`GPUDevice.present/last_seen_at`、`ProviderState.last_success_at/last_attempt_at`、`TelemetryCurrent.observed_at`）派生。
+
+第二轮（契约与归因，同夜）：
+
+- **两个服务器管理工具恢复可调用。** `_require_endpoint_admin_contract` 删除：它校验 `approval_ref` 非空后即丢弃，服务端从不消费。`gpu_add_server` 必填参数从 6 个降到 `[project_id, host, workspace_path]`，`gpu_update_server` 从 4 个降到 `[server_id]`，与 instructions 首次一致（`approval_ref` / `idempotency_key` 正是 `tests/test_agent_policy.py` 断言不得出现在 instructions 里的概念）。replay key 改由工具自己生成。保留必填 `project_id`：owner 为空会让 `has_unowned_endpoints` 在下次 `initialize` 触发 `_upsert_inventory`，用 YAML 回滚用户在 App 上改过的字段。重复登记由 `endpoint_exists` / `endpoint_address_exists` 两条 409 挡住——那从来不是 idempotency key 的职责。
+- **两个 broker client 收敛到 `parse_broker_response`。** 此前 `error.details` 只有异步侧携带，同步侧静默丢弃，于是 `group_selection_required` 经 MCP 到达时带着候选组、经 CLI 到达时被剥空。
+- **租约遥测按持有期夹紧。** snapshot 为 workload 租约的卡新增 `telemetry.lease_recent_average`，样本下界取 `lease.issued_at`；MCP 的 `leased_gpus[].recent_average` 与 `lease.telemetry_window` 改读它。未夹紧的 `recent_average` 不动——它描述这张卡本身，是 App 消费的另一个事实。样本不足为 `null`，`current` 仍可读。
+- **lease 投影新增只读 `last_process_observed_at`**：这些卡上最后一次运行计算进程的时间，**下界取 `process_started_at >= lease.issued_at`**——只有在你拿到卡之后启动的进程才可能是你的。用 `last_seen_at` 做下界挡不住一个跨越分配时刻仍在被观测的旧进程。它不参与任何放行判断。
+
+**明确不做的服务端门槛。** release-empty 曾计划加"最近有进程就拒绝"的判据，经评审否决：`release_empty_conflicted_lease` 接受 HELD/ACTIVE/ORPHANED_BUSY/CONFLICT，而 `_reconcile_idle_lease` 只在 `kind != "keepalive"` 且 state ∈ {HELD, ACTIVE} 时更新 `idle_since`，故 keepalive 租约与 CONFLICT 租约的该值恒为 `None` 或冻结。任何基于它的阈值都会让这条人工恢复路径在自己的目标场景上永久 409——而它存在的意义正是救那些卡死的租约。改为服务端判据一字不改，只把"最后一次有进程"这个事实交给人。
+
+**桌面端**：`confirmEmptyLeaseCleanup` 的确认框展示 `last_process_observed_at`（相对时间，或「从未观测到」）。刻意不设「多久以内算危险」的阈值——那等于在客户端重建一套放行标准，而这条路径存在的意义正是救那些没有标准可依的租约。点击层数不变，紧急恢复不因此变难。`desktop/Fixtures/maintenance.json`（8 秒前，复刻事故形态）与 `conflict.json`（两小时前）覆盖另外两个文案分支。`zsh desktop/build-macos-app.sh` 与 `zsh desktop/verify-macos-app.sh` 均通过。（当时 Swift 单元测试因缺 Xcode 的 `XCTest` 无法在本机运行；见下文第三轮，已迁到 swift-testing 并在本机跑通。）
+
+**已知缺陷（未修，本轮后单独做）**：`reassign_lease_gpus` 中途换卡不更新 `lease.issued_at`，`LeaseResource` 也没有"这张卡何时加入本租约"的列，故换卡后 `lease_recent_average` 的夹紧退化为无效。修它需要新增 `LeaseResource.assigned_at` 列与 migration，届时 `last_process_observed_at` 的下界一并改为 `max(issued_at, assigned_at)`。只在人工换卡时发生。
+
+第二轮实机复验：`gpu_apply` 3.6s；申请后 `recent_average: null`、`current` 可读、`telemetry_window` 不发布假窗口；`open_leases` 含自己；两个管理工具 required 正确；`group_selection_required` 携带候选组。Python 全量测试 `616 passed`。
+
+
+第三轮（失联主机的死锁，同夜）：
+
+- **`_endpoint_is_unreachable`（`service.py`）是新增的唯一判据。** 取 `ProviderState(provider="raw-ssh", endpoint_id)`：无记录或 `last_error is None` 即为可达；`last_success_at` 为空视为失联；否则 `now - last_success_at > collector.stale_after_seconds`。判据客观、只读既有列，无新迁移。
+- **`release_empty_conflicted_lease` 补全了它缺的另一半语义。** 它原本只实现「证明卡是空的」，撞上「已经无法证明任何事」就永久 503 `conflict_observation_failed`：采集失败 → 拿不到新鲜度证明 → 租约释放不掉 → `delete_endpoint` 撞 409 `endpoint_has_active_leases` → 服务器删不掉 → 卡永久锁死在账本里。每条恢复路径都向那台已经不存在的机器要证据。失联时跳过新鲜度证明与逐卡进程检查（`for gpu in [] if unreachable else gpus`），`release_reason` 记为 `server unreachable; operator settled the ledger`。
+- **`delete_endpoint` 同理：失联时 409 让位，并调 `_settle_leases_for_deleted_endpoint` 结算残留租约**（`release_reason = "server deleted while unreachable"`），审计 summary 带 `unreachable` 与 `settled_lease_ids`，不留指向已删 endpoint 的悬空租约。该查询覆盖全部情形：`LeaseEndpointCommitment` 只与同一批 GPU 的 `LeaseResource` 同时写入，不存在只有 commitment 没有卡行的活跃租约。
+
+**没有加 override 参数或 `force` 开关。** 这正是第二轮评审否掉的「加门槛再加旁路」：判据由客观事实（采集确实失败且已过期）决定，动作本来就只能由人从 App/REST 发起。三档语义因此是完整的一张表，不是两条路径：采集成功且卡上有进程 → 拒绝（fail closed，不变）；采集成功且卡上无进程 → 释放（不变）；采集失败且已失联 → 允许人结算账本。
+
+**fail closed 在这里保护不了任何东西。** ServerPilot 从不停用户 workload，更停不了一个够不着的；一条过期的账本记录也拦不住别人使用那张卡。它唯一的效果是把卡锁死在自己账本里。
+
+测试钉住两个方向（`tests/test_service.py`）：主机**仍在应答**时照旧 `conflict_observation_stale` / `endpoint_has_active_leases`（一次网络抖动清不掉活主机上的租约），失联后才放行并写入对应 `release_reason`。
+
+**桌面单元测试改用 swift-testing，本机不再需要 Xcode。** 62 个用例从 XCTest 迁到 `@Test`/`#expect`/`#require`，`desktop/build-macos-app.sh test` 从 `xcode-select -p` 推导 `-F .../Library/Developer/Frameworks` 与 rpath，CommandLineTools 环境下即可运行（装了 Xcode 的机器同样适用）。这条取代了上文「本机无法运行 Swift 单元测试」的说明——`testLeaseRecordCarriesWhenItLastRanSomething` 已在本机跑通。迁移中暴露一个真实问题：XCTest 串行执行同一个 class，swift-testing 默认并行，共享 `StateRouteURLProtocol` 静态状态的用例会互相踩；两个 suite 因此显式标注 `@Suite(.serialized)`，而不是依赖隐式执行顺序。
+
+第三轮实机复验（现网控制面）：p4725 的 8 笔遗留占卡租约全部结算、endpoint 删除，账本从 26 张卡收敛到真实存在的 18 张，指向 p4725 的残留 GPU 行为 0，孤儿告警随之消失。Python 全量测试 `618 passed`，Ruff 通过；`zsh desktop/build-macos-app.sh test` 报告 `62 tests in 2 suites passed`。未改数据库 schema，无新迁移。
+
+仍未做：`api.py` 里 32 个同步 `def` 路由未改为 `async def` + `in_domain`。它们由 FastAPI 自动丢线程池，本来就不在事件循环上，观测到的卡顿不由它们造成；改动会覆盖每个路由体，且把读也串行到单 worker，收益需要先有实测支撑。`hanhai22` 插件依赖一个 12 小时有效期的外部 ControlMaster（由 Storyboard 项目的 `tools/run/hanhai_session.py up --auto` 建立并复用同一个 `~/.ssh/cm/` socket）。socket 过期后该组静默退回上一次成功观测的数字，`largest_allocatable_block` 变 `null`；实测重开 master 后 151 秒内自行恢复（`largest_allocatable_block: 5`，40 张空闲卡分散在多节点）。MCP 目前不投影 `monitor.last_error`，所以 agent 拿到 `null` 时没有可执行的下一步。
+
 ### 2.0.0 候选（当前工作树）
 
 以下结果针对当前工作树，在准备发布 `v2.0.0` 时复跑：
@@ -105,7 +167,7 @@ macOS App 人工 GPU 改派现在也走独立的 loopback desktop operator 路�
 
 ## 尚未完成的验证
 
-当前机器没有下载 XCTest，因此没有运行 Swift 单元测试或 XCUITest。原生 APP 的实机按钮证据属于 `1.5.5`；`1.5.6` 在补齐根 App 构建与定向现场验收前，不能沿用该证据。尚未完成的桌面辅助体验检查包括 VoiceOver、键盘完整焦点顺序、缩放重排、色彩对比度测量与 Reduce Motion；不能仅凭截图宣称这些辅助功能完全合规。
+Swift 单元测试已迁到 swift-testing，`zsh desktop/build-macos-app.sh test` 在本机（仅 CommandLineTools）可跑，62 个用例通过；XCUITest 仍需 Xcode，本机未运行。原生 APP 的实机按钮证据属于 `1.5.5`；`1.5.6` 在补齐根 App 构建与定向现场验收前，不能沿用该证据。尚未完成的桌面辅助体验检查包括 VoiceOver、键盘完整焦点顺序、缩放重排、色彩对比度测量与 Reduce Motion；不能仅凭截图宣称这些辅助功能完全合规。
 
 以下运行环境能力仍未验证：
 

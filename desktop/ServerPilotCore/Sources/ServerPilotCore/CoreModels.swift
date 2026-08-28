@@ -1203,6 +1203,10 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
     public let gpuIDs: [String]
     public let issuedAt: String?
     public let expiresAt: String?
+    /// When a compute process was last seen on this lease's own cards. Read-only:
+    /// it never gates a release, it only lets a person tell a job between two
+    /// batches from one that has ended.
+    public let lastProcessObservedAt: String?
     public let taskReference: String?
     public let purpose: String?
 
@@ -1227,6 +1231,7 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         self.gpuIDs = raw["gpu_ids"] as? [String] ?? []
         self.issuedAt = raw.string("issued_at")
         self.expiresAt = raw.string("expires_at")
+        self.lastProcessObservedAt = raw.string("last_process_observed_at")
         self.taskReference = raw.string("task_ref")
         self.purpose = raw.string("purpose")
     }

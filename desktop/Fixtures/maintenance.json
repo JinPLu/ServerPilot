@@ -454,7 +454,8 @@
             "fixture-maintenance:GPU-fixture-maintenance-03-RUNNING_MANAGED"
           ],
           "task_ref": "state-matrix",
-          "purpose": "fixture"
+          "purpose": "fixture",
+          "last_process_observed_at": "2026-07-31T23:59:52Z"
         }
       ],
       "requests": [],

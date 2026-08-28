@@ -236,7 +236,15 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # the per-card free menu: the caller has to be told to choose
     # server_group_id, not to pin a grouped direct host with server_id, and
     # that gpu_count comes from the launch script.
-    assert len(mcp.instructions) < 2200
+    # It moved from 2200 to 2400 when open_leases made releasing possible at
+    # all.  gpu_apply returns a lease id once, so a caller in a later turn
+    # could see cards were held but not name the lease holding them, and
+    # gpu_release takes nothing else.  The text used to say an idle card is
+    # reclaimed on its own -- which is all you can tell a caller that cannot
+    # release -- and that made the backstop read as the mechanism.  Deleting
+    # the duplicated gpu_count definition paid most of the increase: the
+    # gpu_apply parameter already carries it.
+    assert len(mcp.instructions) < 2400
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",

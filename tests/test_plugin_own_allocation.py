@@ -428,7 +428,7 @@ class _ClaimCollector:
     def __init__(self) -> None:
         self.ready = False
 
-    async def collect_once(self, service, endpoints=None, concurrency=1):  # type: ignore[no-untyped-def]
+    async def collect_once(self, service, endpoints=None):  # type: ignore[no-untyped-def]
         endpoint = (endpoints or [None])[0]
         if self.ready and endpoint is not None:
             service.ingest_observation(

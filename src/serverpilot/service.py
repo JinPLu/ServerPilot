@@ -2,18 +2,21 @@
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import hashlib
 import re
 import secrets
 import threading
 from collections import Counter, defaultdict
 from collections.abc import Callable, Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
-from sqlalchemy import delete, func, or_, select, text
+from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from serverpilot import SCHEMA_VERSION, __version__
@@ -69,7 +72,10 @@ ACTIVE_LEASE_STATES = {"HELD", "ACTIVE", "ORPHANED_BUSY", "CONFLICT"}
 SYSTEM_ACTOR_ID = RESERVED_SYSTEM_ID
 SYSTEM_PROJECT_ID = RESERVED_SYSTEM_ID
 TERMINAL_LEASE_STATES = {"RELEASED", "EXPIRED_EMPTY"}
-LEASE_SCOPED_BLOCKING_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy"}
+# Alerts that describe one lease and become meaningless once that lease can no
+# longer own resources. `idle_lease` belongs here: a released lease is not idle,
+# it is gone, and nothing else was closing its warning.
+LEASE_SCOPED_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy", "idle_lease"}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
 TELEMETRY_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
@@ -82,6 +88,13 @@ PROCESS_START_TIME_JITTER_SECONDS = 2
 MUTATING_ROLES = {"allocator", "operator", "admin"}
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
 COLLECTOR_INTERVAL_SETTING_KEY = "collector_interval_seconds"
+# How long to leave an endpoint whose collection keeps failing out of the
+# regular cycle. Once its telemetry is stale the endpoint is already
+# fail-closed, so probing it every interval changes no answer; what it does
+# spend is a failed-collection write and a revision bump every cycle, which
+# makes every reader think something changed. Kept close to the interval so a
+# host someone has just repaired rejoins without anyone having to ask.
+DEGRADED_ENDPOINT_PROBE_SECONDS = 60
 PLUGIN_CAPACITY_SETTING_PREFIX = "pc:"
 COLLECTOR_VERSION_SETTING_PREFIX = "civ:"
 REMOTE_COLLECTOR_PROFILES = frozenset({"server-script-v1"})
@@ -180,8 +193,37 @@ class BrokerService:
         self.database = database
         self.inventory = inventory
         self._collector_settings_lock = threading.Lock()
+        # One worker, created on first use. This is not a throughput
+        # compromise: it is the `single_writer` contract this control plane
+        # already publishes, kept inside the process instead of being fought
+        # out in SQLite's busy handler by whichever threads happen to arrive.
+        self._domain_executor: ThreadPoolExecutor | None = None
 
     # ---- initialization, identity and transaction primitives -----------------
+
+    async def in_domain(self, call: Callable[..., T], /, *args: Any, **kwargs: Any) -> T:
+        """Run one domain call off the event loop.
+
+        Every domain method is synchronous SQLite. Run on the event loop it
+        stops every other request for the length of the transaction, and a
+        `BEGIN IMMEDIATE` that has to wait can stop it for the whole busy
+        timeout. Coroutines enter the domain through here and nowhere else.
+        """
+
+        if self._domain_executor is None:
+            self._domain_executor = ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="serverpilot-domain"
+            )
+        return await asyncio.get_running_loop().run_in_executor(
+            self._domain_executor, functools.partial(call, *args, **kwargs)
+        )
+
+    def shutdown(self) -> None:
+        """Release the domain worker; safe to call more than once."""
+
+        executor, self._domain_executor = self._domain_executor, None
+        if executor is not None:
+            executor.shutdown(wait=True)
 
     def initialize(self, *, sync_inventory: bool = False) -> None:
         """Initialize the loopback control-plane state."""
@@ -210,7 +252,7 @@ class BrokerService:
                 now,
                 actor_id=SYSTEM_ACTOR_ID,
             )
-            self._resolve_stale_lease_alerts(session, now)
+            self._resolve_orphaned_alerts(session, now)
             self._bump_revision(session, now)
 
         self._write(operation)
@@ -660,13 +702,14 @@ class BrokerService:
         )
         return payload
 
-    @staticmethod
     def _server_group_allocation_fields(
+        self,
         members: list[Endpoint],
         *,
         gpu_payloads: list[dict[str, Any]],
         endpoint_payloads: list[dict[str, Any]],
     ) -> dict[str, Any]:
+        from serverpilot.adapters import direct_claim_budget_seconds
         from serverpilot.plugins import DIRECT_PROFILE_LIMITS, get_plugin, is_plugin_profile
 
         delegated_endpoint: Endpoint | None = None
@@ -731,6 +774,11 @@ class BrokerService:
             "max_gpus_per_lease": max_registered,
             "cpu_cores_per_gpu": None,
             "memory_mib_per_gpu": None,
+            # A direct claim's cost is one host's stop plus one observation, so
+            # the group can publish it instead of leaving the caller to guess.
+            "apply_max_seconds": direct_claim_budget_seconds(
+                self.inventory.collector.ssh_connect_timeout_seconds
+            ),
         }
         return {
             "allocation": "direct",
@@ -810,6 +858,35 @@ class BrokerService:
             return values
 
         return self._read(operation)
+
+    def collector_endpoints_due(self) -> list[EndpointConfig]:
+        """Return the endpoints to probe this cycle.
+
+        A healthy endpoint is probed every cycle. One whose collection keeps
+        failing is backed off so the cycle stays as short as the hosts that do
+        answer; it rejoins every cycle on its first success. Backoff changes
+        only the probe rhythm, never admission: a degraded endpoint is already
+        fail-closed through stale telemetry.
+        """
+
+        def operation(session: Session) -> set[str]:
+            now = utcnow()
+            stale_after = timedelta(seconds=self.inventory.collector.stale_after_seconds)
+            backoff = timedelta(seconds=DEGRADED_ENDPOINT_PROBE_SECONDS)
+            deferred: set[str] = set()
+            for state in session.scalars(select(ProviderState)).all():
+                if state.endpoint_id is None:
+                    continue
+                last_success = _as_utc(state.last_success_at)
+                if last_success is not None and now - last_success <= stale_after:
+                    continue
+                last_attempt = _as_utc(state.last_attempt_at)
+                if last_attempt is not None and now - last_attempt < backoff:
+                    deferred.add(state.endpoint_id)
+            return deferred
+
+        deferred = self._read(operation)
+        return [item for item in self.collector_endpoints() if item.id not in deferred]
 
     def collector_endpoint(self, endpoint_id: str) -> EndpointConfig:
         """Return one sealed endpoint configuration for targeted verification.
@@ -1014,6 +1091,41 @@ class BrokerService:
             .limit(1)
         )
 
+    def _endpoint_is_unreachable(
+        self, session: Session, endpoint_id: str, now: datetime
+    ) -> bool:
+        """True when ServerPilot can no longer learn anything about this host.
+
+        Every recovery path here asks the machine itself for proof, which is
+        right for as long as the machine answers. When it stops -- a container
+        destroyed from outside, a forwarded port withdrawn -- the same demand
+        becomes a deadlock: the cards cannot be proved free, so the lease
+        cannot be released, so the endpoint cannot be deleted, and the ledger
+        goes on holding cards ServerPilot can neither hand out nor let go.
+
+        Holding them protects nothing. ServerPilot never stops a workload, and
+        it certainly cannot stop one it cannot reach; a stale ledger row keeps
+        nobody off the card either. The only thing left to protect is the
+        operator's ability to say what they already know. So the ledger can be
+        settled, and the audit records that this is what happened rather than
+        claiming the cards were observed empty.
+        """
+
+        state = session.scalar(
+            select(ProviderState).where(
+                ProviderState.provider == "raw-ssh",
+                ProviderState.endpoint_id == endpoint_id,
+            )
+        )
+        if state is None or state.last_error is None:
+            return False
+        last_success = _as_utc(state.last_success_at)
+        if last_success is None:
+            return True
+        return now - last_success > timedelta(
+            seconds=self.inventory.collector.stale_after_seconds
+        )
+
     @staticmethod
     def _endpoint_has_active_leases(session: Session, endpoint_id: str) -> bool:
         gpu_lease_id = session.scalar(
@@ -1040,8 +1152,70 @@ class BrokerService:
         )
         return commitment_lease_id is not None
 
+    def _settle_leases_for_deleted_endpoint(
+        self,
+        session: Session,
+        endpoint_id: str,
+        actor: ActorContext,
+        *,
+        now: datetime,
+    ) -> list[str]:
+        """Close every live lease on a server being deleted while unreachable."""
+
+        leases = (
+            session.scalars(
+                select(Lease)
+                .join(LeaseResource, LeaseResource.lease_id == Lease.id)
+                .join(GPUDevice, GPUDevice.id == LeaseResource.gpu_id)
+                .where(
+                    Lease.state.in_(ACTIVE_LEASE_STATES),
+                    LeaseResource.active.is_(True),
+                    GPUDevice.endpoint_id == endpoint_id,
+                )
+            )
+            .unique()
+            .all()
+        )
+        settled: list[str] = []
+        for lease in leases:
+            before = self._lease_dict(session, lease)
+            lease.state = "RELEASED"
+            lease.released_at = now
+            lease.release_reason = "server deleted while unreachable"
+            for resource in session.scalars(
+                select(LeaseResource).where(
+                    LeaseResource.lease_id == lease.id,
+                    LeaseResource.active.is_(True),
+                )
+            ).all():
+                resource.active = False
+                resource.released_at = now
+            request = session.get(AllocationRequest, lease.request_id)
+            if request is not None:
+                request.state = "RELEASED"
+                request.updated_at = now
+            self._resolve_lease_alerts(session, lease.id, now)
+            self._audit(
+                session,
+                actor_id=actor.id,
+                action="lease.released",
+                resource_type="lease",
+                resource_id=lease.id,
+                result="success",
+                before=before,
+                after=self._lease_dict(session, lease),
+                summary={"reason": lease.release_reason, "endpoint_id": endpoint_id},
+                now=now,
+            )
+            settled.append(lease.id)
+        if settled:
+            session.flush()
+        return settled
+
     @staticmethod
-    def _purge_endpoint_restrict_history(session: Session, endpoint_id: str) -> None:
+    def _purge_endpoint_restrict_history(
+        session: Session, endpoint_id: str, *, now: datetime
+    ) -> None:
         gpu_ids = list(
             session.scalars(select(GPUDevice.id).where(GPUDevice.endpoint_id == endpoint_id))
         )
@@ -1050,6 +1224,19 @@ class BrokerService:
         )
         if gpu_ids:
             session.execute(delete(LeaseResource).where(LeaseResource.gpu_id.in_(gpu_ids)))
+        # An alert describes something that existed. Close them here so a
+        # deleted server leaves no warning behind for the next reader.
+        for alert in session.scalars(
+            select(Alert).where(
+                Alert.active.is_(True),
+                or_(
+                    (Alert.resource_type == "endpoint") & (Alert.resource_id == endpoint_id),
+                    (Alert.resource_type == "gpu") & (Alert.resource_id.in_(gpu_ids or [""])),
+                ),
+            )
+        ).all():
+            alert.active = False
+            alert.last_seen_at = now
         session.flush()
 
     @staticmethod
@@ -1101,11 +1288,11 @@ class BrokerService:
 
     @staticmethod
     def _resolve_lease_alerts(session: Session, lease_id: str, now: datetime) -> int:
-        """Close blocking alerts once their lease can no longer own resources."""
+        """Close a lease's alerts once it can no longer own resources."""
 
         alerts = session.scalars(
             select(Alert).where(
-                Alert.alert_type.in_(LEASE_SCOPED_BLOCKING_ALERT_TYPES),
+                Alert.alert_type.in_(LEASE_SCOPED_ALERT_TYPES),
                 Alert.resource_type == "lease",
                 Alert.resource_id == lease_id,
                 Alert.active.is_(True),
@@ -1139,18 +1326,25 @@ class BrokerService:
         return len(alerts)
 
     @classmethod
-    def _resolve_stale_lease_alerts(cls, session: Session, now: datetime) -> int:
-        """Repair alerts whose lease is terminal, absent, or owns no live resource."""
+    def _resolve_orphaned_alerts(cls, session: Session, now: datetime) -> int:
+        """Close alerts whose subject no longer exists.
 
+        An alert outlives what it describes when a lease ends or a server is
+        deleted. Nothing else closes those, so the state page accumulates
+        warnings about resources that are gone and the real ones stop standing
+        out. The subject's own existence is the rule; no alert type is special.
+        """
+
+        resolved = cls._resolve_deleted_resource_alerts(session, now)
         alerts = session.scalars(
             select(Alert).where(
-                Alert.alert_type.in_(LEASE_SCOPED_BLOCKING_ALERT_TYPES),
+                Alert.alert_type.in_(LEASE_SCOPED_ALERT_TYPES),
                 Alert.resource_type == "lease",
                 Alert.active.is_(True),
             )
         ).all()
         if not alerts:
-            return 0
+            return resolved
         lease_ids = {alert.resource_id for alert in alerts}
         leases = {
             lease.id: lease
@@ -1164,7 +1358,6 @@ class BrokerService:
                 )
             ).all()
         )
-        resolved = 0
         for lease_id in lease_ids:
             lease = leases.get(lease_id)
             if (
@@ -1173,6 +1366,32 @@ class BrokerService:
                 or lease_id not in live_resource_lease_ids
             ):
                 resolved += cls._resolve_lease_alerts(session, lease_id, now)
+        return resolved
+
+    @staticmethod
+    def _resolve_deleted_resource_alerts(session: Session, now: datetime) -> int:
+        """Close alerts about an endpoint or GPU row that no longer exists."""
+
+        resolved = 0
+        for resource_type, model in (("endpoint", Endpoint), ("gpu", GPUDevice)):
+            alerts = session.scalars(
+                select(Alert).where(
+                    Alert.resource_type == resource_type,
+                    Alert.active.is_(True),
+                )
+            ).all()
+            if not alerts:
+                continue
+            resource_ids = {alert.resource_id for alert in alerts}
+            live = set(
+                session.scalars(select(model.id).where(model.id.in_(resource_ids))).all()
+            )
+            for alert in alerts:
+                if alert.resource_id in live:
+                    continue
+                alert.active = False
+                alert.last_seen_at = now
+                resolved += 1
         return resolved
 
     def _idempotent(
@@ -2281,8 +2500,18 @@ class BrokerService:
         lease: Lease | None,
         now: datetime,
     ) -> tuple[str, str | None]:
-        """Describe keepalive ownership without exposing the system actor."""
+        """Describe keepalive ownership without exposing the system actor.
 
+        Freshness is the first rule. A card the collector cannot currently see
+        says nothing about whether our keeper is still running, so the honest
+        answer is ERROR rather than replaying the last recorded value.
+        """
+
+        telemetry = session.get(TelemetryCurrent, gpu.id)
+        observed_at = _as_utc(telemetry.observed_at) if telemetry is not None else None
+        cutoff = now - timedelta(seconds=self.inventory.collector.stale_after_seconds)
+        if not gpu.present or observed_at is None or observed_at < cutoff:
+            return "ERROR", "采集数据已过期，无法确认占卡进程是否还在运行"
         current = session.get(KeepaliveCurrent, gpu.id)
         if lease is None or lease.kind != "keepalive":
             if current is not None:
@@ -2295,8 +2524,9 @@ class BrokerService:
             return "ERROR", "占卡记录未处于可用状态"
         if current is not None:
             return current.actual, current.error_reason
-        processes = self._current_processes(session, gpu.id, now)
-        return ("ON", None) if processes else ("OFF", None)
+        if self._current_processes(session, gpu.id, now):
+            return "ERROR", "占卡进程身份尚未建立"
+        return "OFF", None
 
     @staticmethod
     def _set_keepalive_current(
@@ -3804,36 +4034,6 @@ class BrokerService:
 
             endpoint_payloads = [endpoint_snapshot(endpoint) for endpoint in visible_endpoints]
 
-            keepalive_current_by_gpu = {
-                current.gpu_id: current
-                for current in session.scalars(
-                    select(KeepaliveCurrent).where(KeepaliveCurrent.gpu_id.in_(gpu_ids))
-                    if gpu_ids
-                    else select(KeepaliveCurrent).where(text("0 = 1"))
-                ).all()
-            }
-
-            def derive_keepalive(gpu: GPUDevice, lease: Lease | None) -> tuple[str, str | None]:
-                current = keepalive_current_by_gpu.get(gpu.id)
-                if lease is None or lease.kind != "keepalive":
-                    return (
-                        (current.actual, current.error_reason)
-                        if current is not None
-                        else ("OFF", None)
-                    )
-                resources = [
-                    resource for resource in resources_by_lease[lease.id] if resource.active
-                ]
-                if len(resources) != 1 or resources[0].gpu_id != gpu.id:
-                    return "ERROR", "占卡记录没有准确对应这一张 GPU"
-                if lease.state != "ACTIVE":
-                    return "ERROR", "占卡记录未处于可用状态"
-                if current is not None:
-                    return current.actual, current.error_reason
-                if processes_by_gpu[gpu.id]:
-                    return "ERROR", "占卡进程身份尚未建立"
-                return "OFF", None
-
             def derive_state(gpu: GPUDevice) -> tuple[str, str | None]:
                 endpoint = next(item for item in visible_endpoints if item.id == gpu.endpoint_id)
                 if not gpu.enabled:
@@ -3866,7 +4066,7 @@ class BrokerService:
                 if lease is not None and lease.state == "ORPHANED_BUSY":
                     return "ORPHANED_BUSY", "lease expired while a compute process remains"
                 if lease is not None and lease.kind == "keepalive":
-                    keepalive_state, keepalive_reason = derive_keepalive(gpu, lease)
+                    keepalive_state, keepalive_reason = self._keepalive_gpu_status(session, gpu, lease, now)
                     if keepalive_state == "ON":
                         return "KEEPALIVE", "occupancy is active"
                     if keepalive_state == "OFF" and not processes_by_gpu[gpu.id]:
@@ -3897,8 +4097,23 @@ class BrokerService:
                     )
                 processes = processes_by_gpu[gpu.id]
                 lease = lease_by_gpu.get(gpu.id)
+                if telemetry_payload is not None and lease is not None and lease.kind == "workload":
+                    # A holder may only be shown its own load. The plain window
+                    # starts ten minutes ago, so a card claimed a moment ago
+                    # reported the previous holder's work — or ServerPilot's own
+                    # keepalive hold — as the caller's, and an agent sizing a
+                    # batch from it would size it against somebody else's job.
+                    lease_started = _as_utc(lease.issued_at) or recent_cutoff
+                    telemetry_payload["lease_recent_average"] = self._recent_telemetry_average(
+                        gpu,
+                        [
+                            sample
+                            for sample in recent_telemetry_samples_by_gpu[gpu.id]
+                            if (_as_utc(sample.observed_at) or now) >= lease_started
+                        ],
+                    )
                 gpu_state, reason = derive_state(gpu)
-                keepalive_state, keepalive_reason = derive_keepalive(gpu, lease)
+                keepalive_state, keepalive_reason = self._keepalive_gpu_status(session, gpu, lease, now)
                 endpoint = next(item for item in visible_endpoints if item.id == gpu.endpoint_id)
                 keepalive_state, keepalive_reason = self._policy_keepalive_status(
                     endpoint,
@@ -3989,10 +4204,51 @@ class BrokerService:
                 for item in gpu_payloads
                 if item["state"] == "RUNNING_MANAGED" and item["lease"] is not None
             }
+            # "No process right now" is what release-empty already proves, and
+            # it is not the same as "this lease is finished": a job between two
+            # batches looks exactly like one that ended. Publishing when a
+            # process was last seen lets whoever is about to clear a lease see
+            # that difference. It is read-only and never gates the release --
+            # a gate here would wedge the very leases this path exists to
+            # recover, whose resources stop being timestamped once they leave
+            # the states that update them.
+            last_process_by_lease: dict[str, datetime | None] = defaultdict(lambda: None)
+            # Deliberately not the current-process set: the moment this matters
+            # is the moment a lease looks empty, and a process that has gone is
+            # exactly the one whose timing has to survive. The bound is when
+            # each process *started*, not when it was last seen: only a process
+            # begun after the cards were handed over can be this holder's, and
+            # a card is routinely re-let seconds after its previous job -- or
+            # after ServerPilot's own keepalive worker -- stopped.
+            own_processes = [
+                and_(
+                    ProcessObservation.gpu_id == gpu_id,
+                    ProcessObservation.process_started_at >= started,
+                )
+                for gpu_id, lease in lease_by_gpu.items()
+                if (started := _as_utc(lease.issued_at)) is not None
+            ]
+            if own_processes:
+                for gpu_id, last_seen in session.execute(
+                    select(
+                        ProcessObservation.gpu_id,
+                        func.max(ProcessObservation.last_seen_at),
+                    )
+                    .where(or_(*own_processes))
+                    .group_by(ProcessObservation.gpu_id)
+                ).all():
+                    lease = lease_by_gpu.get(gpu_id)
+                    seen = _as_utc(last_seen)
+                    if lease is None or seen is None:
+                        continue
+                    known = last_process_by_lease[lease.id]
+                    if known is None or seen > known:
+                        last_process_by_lease[lease.id] = seen
             for lease_id, payload in lease_payloads.items():
                 payload["runtime_state"] = (
                     "RUNNING" if lease_id in running_lease_ids else "ASSIGNED"
                 )
+                payload["last_process_observed_at"] = _iso(last_process_by_lease[lease_id])
 
             all_gpu_payloads = gpu_payloads
             counts = defaultdict(int)
@@ -4638,11 +4894,77 @@ class BrokerService:
 
     # ---- collector input and telemetry / process reconciliation ----------------
 
-    def _release_absent_keepalive_leases(
+    def _converge_gpu_uuid_ownership(
         self,
         session: Session,
         *,
         endpoint_id: str,
+        observed_uuids: dict[str, GPUDevice],
+        observed_at: datetime,
+        now: datetime,
+    ) -> set[str]:
+        """Make one physical GPU belong to exactly one endpoint.
+
+        A GPU UUID is an identity boundary, but a GPU row is keyed by endpoint,
+        so re-registering the same machine on a new forwarded port leaves the
+        same card present under two endpoints, each free to lease it.
+
+        The rule is a sticky incumbent with handover on staleness: an endpoint
+        that still sees the card keeps it and a later registration stands down,
+        and once the incumbent goes stale the newcomer takes over, which is
+        what a restarted container needs. The winner is decided by the
+        persisted ``present`` flag rather than by comparing two timestamps, so
+        two live endpoints settle instead of trading the card every cycle.
+
+        Endpoints are never merged; only the card's owner is decided. Returns
+        the endpoints that lost a card, so their leases are reconciled too.
+        """
+
+        if not observed_uuids:
+            return set()
+        stale_before = observed_at - timedelta(
+            seconds=self.inventory.collector.stale_after_seconds
+        )
+        affected: set[str] = set()
+        for sibling in session.scalars(
+            select(GPUDevice).where(
+                GPUDevice.gpu_uuid.in_(list(observed_uuids)),
+                GPUDevice.endpoint_id != endpoint_id,
+                GPUDevice.present.is_(True),
+            )
+        ).all():
+            mine = observed_uuids.get(sibling.gpu_uuid)
+            if mine is None:
+                continue
+            last_seen = _as_utc(sibling.last_seen_at)
+            if last_seen is not None and last_seen >= stale_before:
+                loser, alert_type, held_by = mine, "duplicate_gpu_uuid", sibling.endpoint_id
+            else:
+                loser, alert_type, held_by = sibling, "gpu_uuid_moved", endpoint_id
+                affected.add(sibling.endpoint_id)
+            loser.present = False
+            loser.absent_at = observed_at
+            self._upsert_alert(
+                session,
+                alert_type=alert_type,
+                severity="warning",
+                resource_type="endpoint",
+                resource_id=loser.endpoint_id,
+                message=(
+                    f"GPU {sibling.gpu_uuid} is held by endpoint {held_by}; "
+                    "this registration cannot lease it"
+                ),
+                now=now,
+            )
+        if affected:
+            session.flush()
+        return affected
+
+    def _release_absent_keepalive_leases(
+        self,
+        session: Session,
+        *,
+        endpoint_ids: set[str],
         now: datetime,
         revision: int,
     ) -> int:
@@ -4650,12 +4972,16 @@ class BrokerService:
 
         Workload leases are left in place; a complete observation can prove a
         vanished GPU is gone, but it cannot prove a user job was empty.
+
+        More than one endpoint can be reconciled at once: when a card is
+        observed on a new registration the old one loses it in the same pass,
+        and its keeper must not go on claiming a card it no longer holds.
         """
 
         gpus = {
             gpu.id: gpu
             for gpu in session.scalars(
-                select(GPUDevice).where(GPUDevice.endpoint_id == endpoint_id)
+                select(GPUDevice).where(GPUDevice.endpoint_id.in_(sorted(endpoint_ids)))
             ).all()
         }
         absent_gpu_ids = {gpu_id for gpu_id, gpu in gpus.items() if not gpu.present}
@@ -4713,7 +5039,7 @@ class BrokerService:
             self._resolve_lease_alerts(session, lease.id, now)
             self._audit(
                 session,
-                actor_id=f"collector:{endpoint_id}",
+                actor_id=f"collector:{sorted(endpoint_ids)[0]}",
                 action="lease.released",
                 resource_type="lease",
                 resource_id=lease.id,
@@ -4975,6 +5301,13 @@ class BrokerService:
                     history_points_written += 1
             absent_gpu_count = 0
             if observation.observation_complete:
+                handed_over = self._converge_gpu_uuid_ownership(
+                    session,
+                    endpoint_id=endpoint.id,
+                    observed_uuids=by_uuid,
+                    observed_at=observed_at,
+                    now=now,
+                )
                 purged = self._purge_unobserved_plugin_gpus(
                     session,
                     endpoint=endpoint,
@@ -4992,7 +5325,7 @@ class BrokerService:
                 session.flush()
                 revision = self._release_absent_keepalive_leases(
                     session,
-                    endpoint_id=endpoint.id,
+                    endpoint_ids={endpoint.id, *handed_over},
                     now=now,
                     revision=revision,
                 )
@@ -5606,6 +5939,26 @@ class BrokerService:
             )
         return values
 
+    @staticmethod
+    def _reserved_gpu_ids(
+        session: Session,
+        *,
+        start: datetime,
+        end: datetime,
+    ) -> set[str]:
+        """Every GPU an active reservation covers in this window, in one query."""
+
+        reserved: set[str] = set()
+        for reservation in session.scalars(
+            select(Reservation).where(
+                Reservation.state == "ACTIVE",
+                Reservation.start_at < end,
+                Reservation.end_at > start,
+            )
+        ).all():
+            reserved.update(json_load(reservation.gpu_ids_json))
+        return reserved
+
     def _reservation_blocks_gpu(
         self,
         session: Session,
@@ -5614,14 +5967,7 @@ class BrokerService:
         start: datetime,
         end: datetime,
     ) -> bool:
-        reservations = session.scalars(
-            select(Reservation).where(
-                Reservation.state == "ACTIVE",
-                Reservation.start_at < end,
-                Reservation.end_at > start,
-            )
-        ).all()
-        return any(gpu_id in json_load(reservation.gpu_ids_json) for reservation in reservations)
+        return gpu_id in self._reserved_gpu_ids(session, start=start, end=end)
 
     def _eligible_gpus(
         self,
@@ -5641,9 +5987,27 @@ class BrokerService:
         all_gpus = session.scalars(
             select(GPUDevice).order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
         ).all()
+        # A GPU UUID is one physical card. Re-registering a machine on a new
+        # forwarded port can leave a second row for that card, and leasing both
+        # rows would hand the same card to two callers. Ownership convergence
+        # prevents the duplicate; this keeps the allocator itself fail-closed.
+        # Scanning the reservation table once per card made the allocator's cost
+        # quadratic in a fleet's size; the window is the same for every card.
+        reserved_gpu_ids = self._reserved_gpu_ids(session, start=now, end=lease_end)
+        leased_gpu_ids_by_uuid: dict[str, set[str]] = defaultdict(set)
+        for gpu_uuid, gpu_id in session.execute(
+            select(GPUDevice.gpu_uuid, GPUDevice.id)
+            .join(LeaseResource, LeaseResource.gpu_id == GPUDevice.id)
+            .join(Lease, Lease.id == LeaseResource.lease_id)
+            .where(LeaseResource.active.is_(True), Lease.state.in_(ACTIVE_LEASE_STATES))
+        ).all():
+            leased_gpu_ids_by_uuid[gpu_uuid].add(gpu_id)
         for gpu in all_gpus:
             if not gpu.present:
                 excluded["absent"] += 1
+                continue
+            if leased_gpu_ids_by_uuid[gpu.gpu_uuid] - {gpu.id}:
+                excluded["uuid_leased_elsewhere"] += 1
                 continue
             if gpu.cuda_ordinal is None:
                 excluded["cuda_selector"] += 1
@@ -5727,8 +6091,20 @@ class BrokerService:
             reclaimable_keepalive = False
             occupying_lease = self._active_lease_for_gpu(session, gpu.id)
             if occupying_lease is not None and occupying_lease.kind == "keepalive":
+                # This opt-in is used only by the pure reclaim planner. A
+                # normal claim path never treats keepalive capacity as free:
+                # an adapter stop plus fresh empty observation must occur
+                # before the caller runs its ordinary claim.
                 if not include_reclaimable_keepalive:
                     excluded["keepalive"] += 1
+                    continue
+                # A keeper we cannot currently observe is not reclaimable
+                # capacity. Stopping it needs the host to answer, and a host
+                # that stopped answering is exactly the one whose cards must
+                # not be picked: the claim would spend its entire budget on an
+                # SSH timeout instead of choosing a reachable host.
+                if state not in {"KEEPALIVE", "AVAILABLE"}:
+                    excluded[state.lower()] += 1
                     continue
                 status, _keepalive_reason = self._keepalive_gpu_status(
                     session, gpu, occupying_lease, now
@@ -5738,13 +6114,6 @@ class BrokerService:
                     continue
                 reclaimable_keepalive = True
             elif state != "AVAILABLE":
-                # This opt-in is used only by the pure reclaim planner. A
-                # normal claim path never treats keepalive capacity as free:
-                # an adapter stop plus fresh empty observation must occur
-                # before the caller runs its ordinary claim.
-                if not include_reclaimable_keepalive or state not in {"KEEPALIVE", "CONFLICT"}:
-                    excluded[state.lower()] += 1
-                    continue
                 excluded[state.lower()] += 1
                 continue
             telemetry = self._latest_telemetry(session, gpu.id)
@@ -5756,7 +6125,7 @@ class BrokerService:
             ):
                 excluded["free_vram"] += 1
                 continue
-            if self._reservation_blocks_gpu(session, gpu.id, start=now, end=lease_end):
+            if gpu.id in reserved_gpu_ids:
                 excluded["future_reservation"] += 1
                 continue
             values.append(gpu)
@@ -6984,6 +7353,12 @@ class BrokerService:
         treated as proof of emptiness. The same proof applies to internal
         per-GPU keepalive leases so a failed stop cannot permanently wedge a
         GPU that a human needs to recover.
+
+        The proof is waived in exactly one case: the endpoint has stopped
+        answering altogether. Demanding evidence from a machine that is gone is
+        what wedges the cards, and the ledger it protects has stopped
+        protecting anything. The release then records that the server was
+        unreachable rather than claiming its GPUs were observed empty.
         """
 
         self._require_role(actor, MUTATING_ROLES)
@@ -7038,6 +7413,7 @@ class BrokerService:
                 )
 
             now = utcnow()
+            unreachable = self._endpoint_is_unreachable(session, endpoint_id, now)
             cutoff = now - timedelta(seconds=self.inventory.collector.stale_after_seconds)
             host = session.get(EndpointTelemetryCurrent, endpoint_id)
             provider_state = session.scalar(
@@ -7050,7 +7426,7 @@ class BrokerService:
             last_success_at = (
                 _as_utc(provider_state.last_success_at) if provider_state is not None else None
             )
-            if (
+            if not unreachable and (
                 host_collected_at is None
                 or host_collected_at < barrier
                 or host_collected_at < cutoff
@@ -7065,7 +7441,7 @@ class BrokerService:
                     status_code=409,
                 )
 
-            for gpu in gpus:
+            for gpu in [] if unreachable else gpus:
                 assert gpu is not None
                 telemetry = session.get(TelemetryCurrent, gpu.id)
                 telemetry_collected_at = (
@@ -7102,7 +7478,11 @@ class BrokerService:
             before = self._lease_dict(session, lease)
             lease.state = "RELEASED"
             lease.released_at = now
-            lease.release_reason = "empty fresh observation cleared endpoint ownership"
+            lease.release_reason = (
+                "server unreachable; operator settled the ledger"
+                if unreachable
+                else "empty fresh observation cleared endpoint ownership"
+            )
             for resource in resources:
                 resource.active = False
                 resource.released_at = now
@@ -7123,6 +7503,7 @@ class BrokerService:
                 summary={
                     "source": "endpoint_operator",
                     "endpoint_id": endpoint_id,
+                    "endpoint_unreachable": unreachable,
                     "lease_kind": lease.kind,
                 },
                 now=now,
@@ -7589,7 +7970,7 @@ class BrokerService:
         """Reconcile expiry and legacy attribution state; never kill/restart anything."""
 
         self._normalize_legacy_workload_conflicts(session, now, actor_id=actor_id)
-        self._resolve_stale_lease_alerts(session, now)
+        self._resolve_orphaned_alerts(session, now)
         leases = session.scalars(select(Lease).where(Lease.state.in_(ACTIVE_LEASE_STATES))).all()
         expired_released = False
         plugin_releases: list[dict[str, str]] = []
@@ -7657,7 +8038,7 @@ class BrokerService:
                     summary={"reason": lease.release_reason},
                     now=now,
                 )
-        self._resolve_stale_lease_alerts(session, now)
+        self._resolve_orphaned_alerts(session, now)
         if expired_released:
             self._allocate_queued(session, now, self._revision(session))
         return plugin_releases
@@ -8493,13 +8874,25 @@ class BrokerService:
             if endpoint is None:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
-            if self._endpoint_has_active_leases(session, endpoint.id):
+            now = utcnow()
+            unreachable = self._endpoint_is_unreachable(session, endpoint.id, now)
+            if not unreachable and self._endpoint_has_active_leases(session, endpoint.id):
                 raise BrokerError(
                     "endpoint_has_active_leases",
                     "这台服务器上还有进行中的租约，请先释放后再删除。",
                     status_code=409,
                 )
-            now = utcnow()
+            # Deleting a server that stopped answering is how an operator says
+            # the machine is gone. Refusing until its leases are released was a
+            # deadlock: releasing them needs proof from that same machine. The
+            # leases are settled here instead, named for what actually
+            # happened, so no lease is left pointing at an endpoint row that no
+            # longer exists.
+            settled = (
+                self._settle_leases_for_deleted_endpoint(session, endpoint.id, actor, now=now)
+                if unreachable
+                else []
+            )
             before = self._project_endpoint(session, endpoint)
             tombstone = session.get(EndpointDeletion, endpoint.id)
             if tombstone is None:
@@ -8515,7 +8908,7 @@ class BrokerService:
                 tombstone.host = endpoint.host
                 tombstone.port = endpoint.port
                 tombstone.deleted_at = now
-            self._purge_endpoint_restrict_history(session, endpoint.id)
+            self._purge_endpoint_restrict_history(session, endpoint.id, now=now)
             session.delete(endpoint)
             session.flush()
             revision = self._bump_revision(session, now)
@@ -8527,6 +8920,7 @@ class BrokerService:
                 resource_id=endpoint_id,
                 result="success",
                 before=before,
+                summary={"unreachable": unreachable, "settled_lease_ids": settled},
                 now=now,
             )
             result = {
@@ -8534,6 +8928,7 @@ class BrokerService:
                 "snapshot_revision": revision,
                 "endpoint_id": endpoint_id,
                 "endpoint": before,
+                "settled_lease_ids": settled,
                 "changed": True,
             }
             self._remember_idempotency(

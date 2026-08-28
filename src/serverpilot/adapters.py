@@ -572,3 +572,20 @@ def endpoint_keepalive_adapter(adapter_id: str) -> ServerScriptKeepaliveAdapter:
     if adapter_id != SERVER_SCRIPT_KEEPALIVE_ADAPTER.id:  # sealed exhaustiveness check
         raise AdapterRegistryError(f"unknown endpoint keepalive adapter: {adapter_id}")
     return SERVER_SCRIPT_KEEPALIVE_ADAPTER
+
+
+def direct_claim_budget_seconds(ssh_connect_timeout_seconds: int) -> int:
+    """Worst-case seconds for one direct claim, derived from the timeouts it uses.
+
+    A claim holds one host, so the cost is one helper probe, one stop, and the
+    one fresh observation that proves the cards are empty. Publishing the
+    derived number is what lets a caller size its own wait from the group it is
+    claiming from, instead of guessing a per-GPU constant that no server-side
+    step actually scales with.
+    """
+
+    return (
+        ServerScriptKeepaliveAdapter.connect_timeout_seconds
+        + ServerScriptKeepaliveAdapter.timeout_seconds
+        + ssh_connect_timeout_seconds
+    )

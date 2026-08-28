@@ -219,13 +219,12 @@ class FakeTargetedCollector:
         self,
         service,
         *,
-        concurrency: int = 5,
         endpoints=None,
         stagger_seconds: float = 0.0,
     ):  # type: ignore[no-untyped-def]
         assert endpoints is not None
         endpoint_ids = [endpoint.id for endpoint in endpoints]
-        self.calls.append((endpoint_ids, concurrency))
+        self.calls.append(endpoint_ids)
         if self.fail:
             return {endpoint_ids[0]: {"error": "FakeFailure"}}
         value = service.ingest_observation(
@@ -318,20 +317,19 @@ class BlockingKeepaliveAdapter(FakeKeepaliveAdapter):
 class PeriodicFakeCollector:
     def __init__(self) -> None:
         self.calls = 0
-        self.call_options: list[tuple[int, float]] = []
+        self.call_options: list[float] = []
         self.second_collection = threading.Event()
 
     async def collect_once(
         self,
         service,
         *,
-        concurrency: int = 5,
         endpoints=None,
         stagger_seconds: float = 0.0,
     ):  # type: ignore[no-untyped-def]
         assert endpoints is not None
         self.calls += 1
-        self.call_options.append((concurrency, stagger_seconds))
+        self.call_options.append(stagger_seconds)
         results = {
             endpoint.id: service.ingest_observation(
                 observation(
@@ -350,20 +348,19 @@ class PeriodicFakeCollector:
 
 class SchedulingCollector:
     def __init__(self) -> None:
-        self.calls: list[tuple[list[str], int, float]] = []
+        self.calls: list[tuple[list[str], float]] = []
         self.collected = threading.Event()
 
     async def collect_once(
         self,
         _service,
         *,
-        concurrency: int = 5,
         endpoints=None,
         stagger_seconds: float = 0.0,
     ):  # type: ignore[no-untyped-def]
         assert endpoints is not None
         endpoint_ids = [endpoint.id for endpoint in endpoints]
-        self.calls.append((endpoint_ids, concurrency, stagger_seconds))
+        self.calls.append((endpoint_ids, stagger_seconds))
         self.collected.set()
         return {endpoint_id: {"error": "Skipped"} for endpoint_id in endpoint_ids}
 
@@ -377,7 +374,6 @@ class WorkloadConflictCollector(FakeTargetedCollector):
         self,
         service,
         *,
-        concurrency: int = 5,
         endpoints=None,
         stagger_seconds: float = 0.0,
     ):  # type: ignore[no-untyped-def]
@@ -404,7 +400,6 @@ class WorkloadConflictCollector(FakeTargetedCollector):
             self.conflict_created = True
         return await super().collect_once(
             service,
-            concurrency=concurrency,
             endpoints=endpoints,
             stagger_seconds=stagger_seconds,
         )
@@ -480,7 +475,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
     assert "pid" not in serialized
     assert "gpu_uuid" not in serialized
     assert adapter.calls == [("endpoint-a", True, (GPU_UUIDS[0],))]
-    assert collector.calls == [(["endpoint-a"], 1)]
+    assert collector.calls == [["endpoint-a"]]
     assert resolved == ["server-script-v1"]
 
     disabled = client.post(
@@ -502,7 +497,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
         "eligible_idle_gpu_count": 0,
     }
     assert adapter.calls[-1] == ("endpoint-a", False, (GPU_UUIDS[0],))
-    assert collector.calls[-1] == (["endpoint-a"], 1)
+    assert collector.calls[-1] == ["endpoint-a"]
 
 
 def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcile(
@@ -529,7 +524,7 @@ def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcil
     with TestClient(app):
         assert adapter.started.wait(timeout=2)
         assert collector.second_collection.wait(timeout=2)
-        assert collector.call_options[:2] == [(5, 0.0), (5, 0.0)]
+        assert collector.call_options[:2] == [0.0, 0.0]
         assert adapter.calls == [("endpoint-a", True, (GPU_UUIDS[0],))]
         adapter.release()
         assert adapter.cleaned.wait(timeout=2)
@@ -567,7 +562,7 @@ def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
                         "purpose": "verify keeper start and Agent claim are serialized",
                         "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-a"]},
                     },
-                    headers={"X-ServerPilot-Actor": "agent-a"},
+                    headers={"X-ServerPilot-Actor": "agent-a", "Idempotency-Key": "claim-during-keeper-start"},
                 )
             )
             await asyncio.sleep(0.2)
@@ -596,9 +591,18 @@ def _endpoint_b_observation() -> object:
 
 def test_claim_candidate_endpoint_ids_pins_groups_or_all_hosts() -> None:
     endpoints = [
-        SimpleNamespace(id="endpoint-a", server_group_id="group-a"),
-        SimpleNamespace(id="endpoint-b", server_group_id="group-a"),
-        SimpleNamespace(id="endpoint-c", server_group_id="group-b"),
+        SimpleNamespace(
+            id="endpoint-a", server_group_id="group-a", keepalive_adapter_id="server-script-v1"
+        ),
+        SimpleNamespace(
+            id="endpoint-b", server_group_id="group-a", keepalive_adapter_id="server-script-v1"
+        ),
+        SimpleNamespace(
+            id="endpoint-c", server_group_id="group-b", keepalive_adapter_id="server-script-v1"
+        ),
+        # No keeper to race with, so nothing to lock: a claim can never reclaim
+        # from this host, and locking it would only stall its reconcile pass.
+        SimpleNamespace(id="endpoint-d", server_group_id="group-b", keepalive_adapter_id=None),
     ]
 
     def request(**constraints: object) -> RequestCreate:
@@ -626,6 +630,7 @@ def test_claim_candidate_endpoint_ids_pins_groups_or_all_hosts() -> None:
         "endpoint-b",
         "endpoint-c",
     }
+    assert claim_candidate_endpoint_ids(request(endpoint_ids=["endpoint-d"]), endpoints) == set()
     assert claim_candidate_endpoint_ids(
         request(endpoint_ids=["endpoint-a"], server_group_ids=["group-b"]),
         endpoints,
@@ -663,7 +668,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
                             "endpoint_ids": ["endpoint-b"],
                         },
                     },
-                    headers={"X-ServerPilot-Actor": "agent-a"},
+                    headers={"X-ServerPilot-Actor": "agent-a", "Idempotency-Key": "claim-b-while-a-blocked"},
                 )
             )
             done, _pending = await asyncio.wait({other}, timeout=1)
@@ -678,7 +683,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
                         "purpose": "unscoped claim still locks every host",
                         "constraints": {"gpu_count": 1},
                     },
-                    headers={"X-ServerPilot-Actor": "agent-a"},
+                    headers={"X-ServerPilot-Actor": "agent-a", "Idempotency-Key": "claim-unscoped-while-a-blocked"},
                 )
             )
             await asyncio.sleep(0.2)
@@ -752,7 +757,7 @@ def test_claims_on_different_server_groups_do_not_block_each_other(
                             "server_group_ids": ["group-b"],
                         },
                     },
-                    headers={"X-ServerPilot-Actor": "agent-a"},
+                    headers={"X-ServerPilot-Actor": "agent-a", "Idempotency-Key": "claim-group-b-while-a-blocked"},
                 )
             )
             done, _pending = await asyncio.wait({other}, timeout=1)
@@ -799,7 +804,6 @@ def test_periodic_collection_starts_four_endpoints_together_with_existing_limit(
 
     assert collector.calls[0] == (
         ["endpoint-a", "endpoint-b", "endpoint-c", "endpoint-d"],
-        5,
         0.0,
     )
 
@@ -995,7 +999,7 @@ def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
     assert response.status_code == 200, response.text
     assert response.json()["released"] is True
     assert response.json()["lease"]["kind"] == "keepalive"
-    assert collector.calls[-1] == (["endpoint-a"], 1)
+    assert collector.calls[-1] == ["endpoint-a"]
 
 
 def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertain(
@@ -1316,7 +1320,7 @@ def test_keepalive_api_exposes_public_reconcile_hook(
 
     assert result["keepalive"]["active_gpu_count"] == len(GPU_UUIDS)
     assert adapter.calls == [("endpoint-a", True, GPU_UUIDS)]
-    assert collector.calls == [(["endpoint-a"], 1)]
+    assert collector.calls == [["endpoint-a"]]
 
 
 def test_keepalive_reconcile_starts_eight_gpus_with_one_helper_call_and_collection(
@@ -1357,7 +1361,7 @@ def test_keepalive_reconcile_starts_eight_gpus_with_one_helper_call_and_collecti
     assert result["keepalive"]["active_gpu_count"] == 8
     assert activation_transactions == 1
     assert adapter.calls == [("endpoint-a", True, EIGHT_GPU_UUIDS)]
-    assert collector.calls == [(["endpoint-a"], 1)]
+    assert collector.calls == [["endpoint-a"]]
     with service.database.session() as session:
         assert len(session.scalars(select(Lease).where(Lease.kind == "keepalive")).all()) == 8
 
@@ -1437,7 +1441,7 @@ def test_unexpected_mid_transaction_activation_failure_cleans_batch_and_rolls_ba
         ("endpoint-a", True, GPU_UUIDS),
         ("endpoint-a", False, GPU_UUIDS),
     ]
-    assert collector.calls == [(["endpoint-a"], 1), (["endpoint-a"], 1)]
+    assert collector.calls == [["endpoint-a"], ["endpoint-a"]]
     assert adapter.active_pids == {}
     with service.database.session() as session:
         assert session.scalars(select(Lease).where(Lease.kind == "keepalive")).all() == []
@@ -1468,7 +1472,7 @@ def test_partial_batch_start_cleans_all_eight_gpus_with_no_keepalive_lease(
         ("endpoint-a", True, EIGHT_GPU_UUIDS),
         ("endpoint-a", False, EIGHT_GPU_UUIDS),
     ]
-    assert collector.calls == [(["endpoint-a"], 1)]
+    assert collector.calls == [["endpoint-a"]]
     assert adapter.active_pids == {}
     with service.database.session() as session:
         assert session.scalars(select(Lease).where(Lease.kind == "keepalive")).all() == []
@@ -1644,7 +1648,7 @@ def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(
     assert stop_calls[0][0] == "endpoint-a"
     assert set(stop_calls[0][2]) == set(EIGHT_GPU_UUIDS)
     assert len(collector.calls) == collects_after_enable + 1
-    assert collector.calls[-1] == (["endpoint-a"], 1)
+    assert collector.calls[-1] == ["endpoint-a"]
 
 
 def test_eight_gpu_reclaim_stop_failure_does_not_allocate(

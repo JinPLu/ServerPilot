@@ -112,16 +112,18 @@ def test_mcp_process_namespace_prevents_request_id_reuse_across_sessions(
     assert first != second
 
 
-def test_gpu_apply_retries_one_http_transport_failure_with_the_same_key(
+def test_gpu_apply_retries_one_unsent_request_with_the_same_key(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Only a request that never reached the control plane may be replayed."""
+
     monkeypatch.setattr(mcp_server, "ensure_broker_ready_for_mcp", lambda: None)
     calls: list[dict[str, object]] = []
 
     def request(_method: str, _url: str, **kwargs: object) -> httpx.Response:
         calls.append(kwargs)
         if len(calls) == 1:
-            raise httpx.ReadError("response interrupted")
+            raise httpx.ConnectError("connection refused")
         return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
@@ -244,13 +246,13 @@ def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) ->
             "purpose": "训练任务",
             "constraints": {"gpu_count": 1, "placement": "pack"},
         },
-        headers=headers,
+        headers={**headers, "Idempotency-Key": "routine-call-three"},
     )
     assert claimed_again.status_code == 200
     assert claimed_again.json()["lease"]["id"] != lease["id"]
     with app.state.service.database.engine.connect() as connection:
         assert (
-            connection.execute(text("SELECT COUNT(*) FROM idempotency_records")).scalar_one() == 2
+            connection.execute(text("SELECT COUNT(*) FROM idempotency_records")).scalar_one() == 3
         )
 
 

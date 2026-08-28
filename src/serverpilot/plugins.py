@@ -43,14 +43,19 @@ PROFILE_LIMIT_KEYS = frozenset(
     {"lease_ends", "max_lease_seconds", "apply_max_seconds", "queues"}
 )
 MAX_PROFILE_LEASE_SECONDS = 30 * 24 * 3600
-MAX_PROFILE_APPLY_SECONDS = 3600
+# A plugin may not declare an apply that outlasts what a caller will wait for.
+# `client.CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS` is the caller's side of this
+# bound, and `tests/test_client.py` holds the two together.
+MAX_PROFILE_APPLY_SECONDS = 180
 
 # ServerPilot's own per-card allocator: it holds the cards until the caller
-# releases them, it answers immediately, and it never queues.
+# releases them, and it never queues. It declares no `apply_max_seconds`:
+# unlike a plugin, its cost is not published by the profile but derived from
+# the adapter and collector timeouts a direct claim actually spends, which the
+# server group projects.
 DIRECT_PROFILE_LIMITS: dict[str, Any] = {
     "lease_ends": "on_release",
     "max_lease_seconds": None,
-    "apply_max_seconds": None,
     "queues": False,
 }
 
@@ -208,6 +213,34 @@ def discover_plugins(
     return plugins
 
 
+# One remembered verdict per plugin file, keyed on what a stat already tells us
+# changed. ``info`` is a subprocess, and discovery runs on the collector loop
+# and on every claim, so re-forking an interpreter per candidate per call is
+# what stalled the control plane. The directory listing stays live so a plugin
+# dropped in while the daemon runs is still found; only the fork is remembered.
+_PROBE_CACHE: dict[str, tuple[tuple[int, int, PluginSource], PluginInfo | str]] = {}
+
+
+def _probe_plugin_cached(path: Path, *, source: PluginSource) -> PluginInfo | str:
+    """Return the plugin's ``info``, or the failure text, without re-forking."""
+
+    resolved = path.resolve()
+    try:
+        stat = resolved.stat()
+    except OSError as exc:
+        return f"plugin could not be read: {type(exc).__name__}"
+    fingerprint = (stat.st_mtime_ns, stat.st_size, source)
+    cached = _PROBE_CACHE.get(str(resolved))
+    if cached is not None and cached[0] == fingerprint:
+        return cached[1]
+    try:
+        verdict: PluginInfo | str = probe_plugin(path, source=source)
+    except PluginError as exc:
+        verdict = str(exc)
+    _PROBE_CACHE[str(resolved)] = (fingerprint, verdict)
+    return verdict
+
+
 def discover_plugins_with_failures(
     *,
     home: Path | None = None,
@@ -221,19 +254,18 @@ def discover_plugins_with_failures(
         for path in sorted(directory.iterdir()):
             if not _is_plugin_candidate(path):
                 continue
-            try:
-                info = probe_plugin(path, source=source)
-            except PluginError as exc:
+            verdict = _probe_plugin_cached(path, source=source)
+            if isinstance(verdict, str):
                 failures.append(
                     PluginDiscoveryFailure(
                         path=path.resolve(),
                         source=source,
-                        error=str(exc),
+                        error=verdict,
                         plugin_id=path.name if is_valid_plugin_id(path.name) else None,
                     )
                 )
                 continue
-            found[info.plugin_id] = info
+            found[verdict.plugin_id] = verdict
     return sorted(found.values(), key=lambda item: item.plugin_id), failures
 
 
@@ -256,22 +288,6 @@ def require_plugin(plugin_id: str) -> PluginInfo:
     if plugin is None:
         raise PluginError(f"unknown observation profile: {plugin_id}")
     return plugin
-
-
-def profile_limits(
-    profile_id: str,
-    *,
-    home: Path | None = None,
-    environment: Mapping[str, str] | None = None,
-) -> dict[str, Any]:
-    """Return the declared lease/apply limits for a builtin or plugin profile."""
-
-    if profile_id in BUILTIN_OBSERVATION_PROFILES:
-        return dict(DIRECT_PROFILE_LIMITS)
-    plugin = get_plugin(profile_id, home=home, environment=environment)
-    if plugin is None:
-        raise PluginError(f"unknown observation profile: {profile_id}")
-    return dict(plugin.limits)
 
 
 def parse_plugin_limits(value: Any) -> dict[str, Any]:
@@ -413,10 +429,17 @@ def apply_plugin(plugin_id: str, *, gpu_count: int, task_ref: str) -> dict[str, 
         raise PluginError("plugin apply gpu_count must be a positive integer")
     if not isinstance(task_ref, str) or not TASK_REF_PATTERN.fullmatch(task_ref):
         raise PluginError("plugin apply task_ref is invalid")
+    # The plugin declares how long its own apply may take. Enforcing the
+    # declaration instead of a generic ceiling is what lets the caller's budget
+    # be derived from it: a plugin that overruns what it published is a failure,
+    # not something to keep waiting on.
+    declared = plugin.limits.get("apply_max_seconds")
     raw = invoke_plugin(
         plugin.path,
         ["apply", "--gpu-count", str(gpu_count), "--task-ref", task_ref],
-        timeout_seconds=PLUGIN_MUTATION_TIMEOUT_SECONDS,
+        timeout_seconds=(
+            float(declared) if isinstance(declared, int) else PLUGIN_MUTATION_TIMEOUT_SECONDS
+        ),
     )
     return parse_apply_payload(raw, plugin_id=plugin_id)
 

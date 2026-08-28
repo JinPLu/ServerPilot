@@ -25,6 +25,8 @@ from serverpilot.client import (
     BrokerClientError,
     control_plane_async_httpx_client,
     control_plane_request_timeout,
+    parse_broker_response,
+    request_was_never_sent,
 )
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
@@ -60,9 +62,9 @@ MCP_INSTRUCTIONS = """Five tools cover GPU work: gpu_status; gpu_apply picks the
 Assess group workspace/environment/data-weight notes, capacity and limits first; choose server_group_id for grouped hosts; the broker best-fits within that group. server_id is for ungrouped compatibility and must not pin a grouped host.
 Connection and working directory are projected once per server: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.
 cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
-gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus(task) with no telemetry; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards. gpu_count is exact job parallelism from launch script/config (devices, --nproc_per_node, num_processes, --gres), never server/free capacity.
-Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Load on a free card is ServerPilot's own hold, stopped before allocation, and is not evidence the card is taken.
-no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. Claim only cards you will use: an idle card is reclaimed on its own.
+gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus(task) with no telemetry; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.
+Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now. Load on a free card is ServerPilot's own hold, stopped before allocation, not evidence it is taken.
+no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. Idle reclaim is a backstop, not how a card comes back.
 ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
 
 
@@ -107,30 +109,11 @@ class _AsyncBroker:
                 timeout=control_plane_request_timeout(path, json_body, timeout=timeout),
             )
         except httpx.HTTPError as exc:
-            raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc
-        try:
-            payload = response.json()
-        except ValueError as exc:
-            content_type = response.headers.get("content-type", "unknown")
             raise BrokerClientError(
-                f"broker returned non-JSON HTTP {response.status_code} ({content_type})"
+                f"broker request failed: {type(exc).__name__}",
+                unsent=request_was_never_sent(exc),
             ) from exc
-        if response.is_error:
-            error = payload.get("error", {}) if isinstance(payload, dict) else {}
-            code = error.get("code")
-            message = error.get("message", "request failed")
-            details = error.get("details") if isinstance(error, dict) else None
-            exc = BrokerClientError(
-                f"broker HTTP {response.status_code}: {code or 'unknown'}: {message}",
-                code=code if isinstance(code, str) else None,
-                status_code=response.status_code,
-            )
-            if details is not None:
-                exc.details = details
-            raise exc
-        if not isinstance(payload, dict):
-            raise BrokerClientError("broker returned an invalid JSON envelope")
-        return payload
+        return parse_broker_response(response)
 
     async def get(self, path: str, *, params: dict[str, Any] | None = None) -> dict[str, Any]:
         return await self.request("GET", path, params=params)
@@ -252,6 +235,36 @@ def _routine_no_capacity(
     }
 
 
+async def _routine_attach_open_leases(documented: dict[str, Any], client: Any) -> None:
+    """Give a no_capacity answer the one thing that makes it actionable."""
+
+    detail = documented.get("no_capacity")
+    if not isinstance(detail, dict):
+        return
+    open_leases = await _routine_open_leases_now(client)
+    if open_leases:
+        detail["open_leases"] = open_leases
+
+
+async def _routine_open_leases_now(client: Any) -> list[dict[str, Any]]:
+    """Leases the caller could release, fetched only when a claim found nothing.
+
+    ``no_capacity`` is an answer, but on its own it is not one anybody can act
+    on. What makes it actionable is the set of leases still holding cards and
+    whether any of them has stopped working, so the caller can free the cards
+    itself instead of waiting out idle reclaim. Costing one read here and none
+    on the path that succeeds is the point.
+    """
+
+    try:
+        payload = await _client_call(
+            client, "snapshot", compact=False, endpoint_id=None, only_available=False
+        )
+    except Exception:
+        return []
+    return _routine_gpu_status(payload, lease_id=None).get("open_leases", [])
+
+
 def _routine_group_selection_required(
     exc: BrokerClientError,
     *,
@@ -268,12 +281,10 @@ def _routine_group_selection_required(
         "server_id": server_id,
         "server_group_id": server_group_id,
     }
-    details = getattr(exc, "details", None)
-    if isinstance(details, dict):
-        for key, value in details.items():
-            if key in payload and payload[key] is not None:
-                continue
-            payload[key] = value
+    for key, value in exc.details.items():
+        if key in payload and payload[key] is not None:
+            continue
+        payload[key] = value
     return {"group_selection_required": payload}
 
 
@@ -462,7 +473,6 @@ def _routine_gpu_telemetry(gpu: dict[str, Any], *, vram_mib: Any) -> dict[str, A
         "gpu_utilization_pct": _routine_integer(source.get("gpu_utilization_pct")),
         "memory_utilization_pct": _routine_integer(source.get("memory_utilization_pct")),
         "temperature_c": _routine_integer(source.get("temperature_c")),
-        "recent_average": _routine_recent_telemetry_average(source.get("recent_average")),
     }
 
 
@@ -479,12 +489,9 @@ def _routine_lease_gpu_telemetry(gpu: dict[str, Any], *, vram_mib: Any) -> dict[
     source = gpu.get("telemetry")
     if not isinstance(source, dict):
         return None
-    current = _routine_gpu_telemetry(gpu, vram_mib=vram_mib)
-    if isinstance(current, dict):
-        current.pop("recent_average", None)
     return {
-        "recent_average": _routine_recent_telemetry_average(source.get("recent_average")),
-        "current": current,
+        "recent_average": _routine_recent_telemetry_average(source.get("lease_recent_average")),
+        "current": _routine_gpu_telemetry(gpu, vram_mib=vram_mib),
     }
 
 
@@ -540,13 +547,6 @@ def _routine_lease_utilization(rows: list[dict[str, Any]]) -> dict[str, Any]:
             "gpu_utilization_pct": slowest_value,
         }
     return summary
-
-
-def _require_endpoint_admin_contract(approval_ref: str, idempotency_key: str) -> None:
-    if not isinstance(approval_ref, str) or not approval_ref.strip():
-        raise ValueError("server administration needs explicit authorisation for this task and a non-empty approval_ref")
-    if not isinstance(idempotency_key, str) or not idempotency_key.strip():
-        raise ValueError("server administration needs a stable, non-empty idempotency_key")
 
 
 def _routine_group_catalog(data: dict[str, Any]) -> list[dict[str, Any]]:
@@ -687,6 +687,42 @@ def _routine_has_available_capacity(
     )
 
 
+def _routine_open_leases(
+    data: dict[str, Any], status_by_gpu_id: dict[str, str]
+) -> list[dict[str, Any]]:
+    """Name the leases that are still holding cards, so one can be released.
+
+    ``gpu_apply`` returns a lease id exactly once. A caller that comes back in
+    a later turn, or a second caller on the same machine, can see from
+    ``busy_gpus`` that cards are held and even whose task holds them, but has
+    no way to name the lease, and ``gpu_release`` takes nothing else. Releasing
+    a finished lease was therefore impossible and idle reclaim was the only way
+    a card ever came back. ``running_gpu_count`` is what separates a lease
+    still doing work from one that is only holding.
+    """
+
+    leases: list[dict[str, Any]] = []
+    for lease in data.get("leases", []) or []:
+        if not isinstance(lease, dict) or lease.get("kind") != "workload":
+            continue
+        gpu_ids = [item for item in lease.get("gpu_ids", []) or [] if isinstance(item, str)]
+        if not gpu_ids:
+            continue
+        leases.append(
+            {
+                "lease_id": lease.get("id"),
+                "task": lease.get("task_ref") or ROUTINE_UNNAMED_TASK,
+                "servers": sorted({item.split(":", 1)[0] for item in gpu_ids}),
+                "gpu_count": len(gpu_ids),
+                "running_gpu_count": sum(
+                    1 for item in gpu_ids if status_by_gpu_id.get(item) == "running"
+                ),
+                "held_since": lease.get("issued_at"),
+            }
+        )
+    return leases
+
+
 def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dict[str, Any]:
     """Project the routine status view as grouped capacity plus occupancy.
 
@@ -716,6 +752,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
     busy_gpus: list[dict[str, Any]] = []
     lease_windows: list[dict[str, Any] | None] = []
     lease_task: str | None = None
+    status_by_gpu_id: dict[str, str] = {}
 
     for gpu in values:
         if not isinstance(gpu, dict):
@@ -729,6 +766,9 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
             if available
             else ROUTINE_GPU_STATUS.get(state, ROUTINE_GPU_STATUS_UNKNOWN)
         )
+        gpu_row_id = gpu.get("id")
+        if isinstance(gpu_row_id, str):
+            status_by_gpu_id[gpu_row_id] = status
         lease = gpu.get("lease")
         lease = lease if isinstance(lease, dict) else None
         server_id = gpu.get("endpoint_id")
@@ -751,7 +791,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
                 row.update(telemetry)
             source = gpu.get("telemetry")
             lease_windows.append(
-                _routine_telemetry_window(source.get("recent_average"))
+                _routine_telemetry_window(source.get("lease_recent_average"))
                 if isinstance(source, dict)
                 else None
             )
@@ -817,6 +857,9 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         result["ungrouped_servers"] = ungrouped_servers
     if lease_id is not None:
         result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
+    open_leases = _routine_open_leases(data if isinstance(data, dict) else {}, status_by_gpu_id)
+    if open_leases:
+        result["open_leases"] = open_leases
     if busy_gpus:
         result["busy_gpus"] = busy_gpus
     cpu_only_servers: list[dict[str, Any]] = []
@@ -1048,12 +1091,15 @@ async def gpu_apply(
             server_group_id=server_group_id,
         )
         if documented is not None:
+            await _routine_attach_open_leases(documented, client)
             return documented
-        if not str(exc).startswith("broker request failed:"):
+        if not exc.unsent:
             raise
-        # The broker may have committed before the local HTTP response was
-        # interrupted. Retry once with the same key so it cannot allocate a
-        # second lease for this tool invocation.
+        # The connection never reached the control plane, so nothing can have
+        # been committed. Retry once with the same key so a broker that did
+        # somehow see it cannot allocate a second lease for this invocation.
+        # A read timeout is deliberately not retried: the request did arrive,
+        # and replaying it only doubles the wait for an answer already coming.
         try:
             payload = await _client_call(
                 client,
@@ -1071,6 +1117,7 @@ async def gpu_apply(
             )
             if documented is None:
                 raise
+            await _routine_attach_open_leases(documented, client)
             return documented
     return _routine_gpu_allocation(payload)
 
@@ -1128,12 +1175,9 @@ OBSERVATION_PROFILE_DESCRIPTION = (
     )
 )
 async def gpu_add_server(
-    agent_name: str,
     project_id: str,
     host: str,
     workspace_path: str,
-    approval_ref: str,
-    idempotency_key: str,
     port: int = 22,
     ssh_user: str = "root",
     server_id: str | None = None,
@@ -1146,13 +1190,17 @@ async def gpu_add_server(
     storage_group: str | None = None,
     expected_gpu_count: int | None = None,
     expected_gpu_total_vram_mib: int | None = None,
+    context: Context | None = None,
 ) -> dict[str, Any]:
     """Create a shared endpoint after explicit current-task human approval; observation_profile accepts linux-nvidia, linux-host, server-script-v1, or a local plugin ID."""
 
     if not project_id.strip():
         raise ValueError("project_id must not be empty")
-    _require_endpoint_admin_contract(approval_ref, idempotency_key)
-    client = _client(agent_name)
+    # The replay key is this call's own, like every other tool's. Asking the
+    # caller for one asked it to supply a REST concept the instructions
+    # deliberately never teach, so the tool could not be called as documented.
+    replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
+    client = _client("agent")
     generated_id = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96]
     generated_id = f"{generated_id}-p{port}"
     return await _client_call(
@@ -1173,7 +1221,7 @@ async def gpu_add_server(
             "expected_gpu_total_vram_mib": expected_gpu_total_vram_mib,
             "owner_project_id": project_id,
         },
-        idempotency_key=idempotency_key,
+        idempotency_key=replay_key,
     )
 
 
@@ -1186,10 +1234,7 @@ async def gpu_add_server(
     )
 )
 async def gpu_update_server(
-    agent_name: str,
     server_id: str,
-    approval_ref: str,
-    idempotency_key: str,
     ssh_user: str | None = None,
     ssh_alias: str | None = None,
     workspace_path: str | None = None,
@@ -1202,10 +1247,10 @@ async def gpu_update_server(
     expected_gpu_count: int | None = None,
     expected_gpu_total_vram_mib: int | None = None,
     owner_project_id: str | None = None,
+    context: Context | None = None,
 ) -> dict[str, Any]:
     """Update safe endpoint metadata; endpoint id, host, and port are immutable."""
 
-    _require_endpoint_admin_contract(approval_ref, idempotency_key)
     body = {
         key: value
         for key, value in {
@@ -1223,12 +1268,13 @@ async def gpu_update_server(
     }
     if not body:
         raise ValueError("gpu_update_server requires at least one safe metadata field")
+    replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
     return await _client_call(
-        _client(agent_name),
+        _client("agent"),
         "patch",
         f"/api/v1/endpoints/{server_id}",
         body,
-        idempotency_key=idempotency_key,
+        idempotency_key=replay_key,
     )
 
 

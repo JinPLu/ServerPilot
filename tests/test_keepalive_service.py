@@ -401,6 +401,46 @@ def test_reclaim_plan_selects_only_complete_verified_per_gpu_keepalive_set(servi
     ]
 
 
+def test_stale_keeper_is_not_reclaimable_capacity_and_reports_error(service, admin) -> None:
+    """A host that stopped answering must not be chosen for a claim.
+
+    Reclaiming a keeper needs that host to accept an adapter stop and then
+    answer a fresh observation. When its telemetry has gone stale we can no
+    longer assert the keeper is running, so the card leaves the candidate set
+    instead of sending the claim into an SSH timeout.
+    """
+
+    _configure_idle_policy(service, admin)
+    begun = _begin(service, admin, 0)
+    _confirm(service, admin, begun, 0)
+
+    gpu_id = "endpoint-a:GPU-endpoint-a-0"
+    assert _gpus(service.snapshot(admin))[gpu_id]["keepalive"]["actual"] == "ON"
+
+    stale = utcnow() - timedelta(seconds=service.inventory.collector.stale_after_seconds + 60)
+    with service.database.session() as session:
+        current = session.get(TelemetryCurrent, gpu_id)
+        assert current is not None
+        current.observed_at = stale
+        session.commit()
+
+    assert _gpus(service.snapshot(admin))[gpu_id]["keepalive"]["actual"] == "ERROR"
+
+    request = RequestCreate.model_validate(
+        {
+            "project_id": "project-a",
+            "task_ref": "two-gpu-workload",
+            "purpose": "needs both test GPUs",
+            "duration_seconds": 600,
+            "constraints": {"gpu_count": 2},
+        }
+    )
+    plan = service.plan_keepalive_reclaim(request)
+    assert plan["complete"] is False
+    assert plan["transitions"] == []
+    assert plan["excluded"].get("unknown_stale") == 1
+
+
 def test_stop_is_per_gpu_and_requires_fresh_empty_target_observation(service, admin) -> None:
     _configure_idle_policy(service, admin)
     begun = _begin(service, admin)
@@ -640,3 +680,158 @@ def test_active_keepalive_workspace_cannot_change(service, admin) -> None:
         )
     assert blocked.value.code == "keepalive_endpoint_connection_in_use"
     assert blocked.value.details == {"fields": ["workspace_path"]}
+
+
+def test_lease_telemetry_never_reports_a_previous_holders_load(service, admin) -> None:
+    """A holder may only be shown its own load.
+
+    The plain ten-minute window starts before the claim, so a card taken a
+    moment ago used to report whatever ran on it just before — a previous job,
+    or ServerPilot's own keepalive hold — as the caller's. An agent sizing a
+    batch from that sizes it against somebody else's work.
+    """
+
+    from serverpilot.models import TelemetrySnapshot
+
+    service.ingest_observation(observation(count=1))
+    gpu_id = "endpoint-a:GPU-endpoint-a-0"
+
+    # Somebody else's heavy run, well inside the ten-minute window.
+    earlier = utcnow() - timedelta(minutes=5)
+    with service.database.session() as session:
+        for offset in range(3):
+            session.add(
+                TelemetrySnapshot(
+                    gpu_id=gpu_id,
+                    observed_at=earlier + timedelta(seconds=offset),
+                    collected_at=earlier + timedelta(seconds=offset),
+                    memory_used_mib=70_000,
+                    memory_free_mib=11_920,
+                    gpu_utilization_pct=99,
+                    memory_utilization_pct=90,
+                    temperature_c=80,
+                    power_watts=400,
+                    pstate="P0",
+                    health="OK",
+                    provider="raw-ssh",
+                )
+            )
+        session.commit()
+
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "fresh-claim",
+                "purpose": "a brand new hold",
+                "constraints": {"gpu_count": 1},
+            }
+        ),
+        idempotency_key="fresh-claim",
+    )
+    assert claimed["lease"] is not None
+
+    gpu = _gpus(service.snapshot(admin))[gpu_id]
+    telemetry = gpu["telemetry"]
+    # The unclamped average still describes the card and is still pulled up by
+    # the earlier run; only what the holder is shown is clamped, and there is
+    # nothing yet to show for a hold that just started.
+    assert telemetry["recent_average"]["gpu_utilization_pct"] > 50
+    assert telemetry["lease_recent_average"] is None
+
+
+def test_a_lease_publishes_when_it_last_had_a_process(service, admin) -> None:
+    """Clearing an "empty" lease must be able to tell a gap from an ending.
+
+    A job between two batches is observationally identical to one that
+    finished, and clearing the first wedges its cards: the work comes back to
+    a card that no longer belongs to anyone. This field is read-only and never
+    gates the release — gating here would wedge the very leases that path
+    exists to recover.
+    """
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "batched-job",
+                "purpose": "runs in bursts",
+                "constraints": {"gpu_count": 1},
+            }
+        ),
+        idempotency_key="batched-job",
+    )
+    lease_id = claimed["lease"]["id"]
+
+    def lease_payload() -> dict:
+        data = service.snapshot(admin)["data"]
+        return next(item for item in data["leases"] if item["id"] == lease_id)
+
+    assert lease_payload()["last_process_observed_at"] is None
+
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0", pid=9931)])
+    )
+    while_running = lease_payload()["last_process_observed_at"]
+    assert while_running is not None
+
+    # The burst ends. The lease looks empty, but it is not finished — and the
+    # timestamp still says how recently it was working.
+    service.ingest_observation(observation(count=1))
+    assert lease_payload()["last_process_observed_at"] == while_running
+
+
+def test_a_new_lease_never_inherits_the_previous_holders_process_time(service, admin) -> None:
+    """The card is re-let seconds after the last job stopped; the clock resets.
+
+    Whoever is about to clear a lease reads this to tell a burst gap from an
+    ending. Inheriting the previous holder's timestamp says "this was working
+    moments ago" about a lease that has never run anything, which is the
+    strongest possible signal to leave it alone -- exactly backwards.
+    """
+
+    service.ingest_observation(observation(count=1))
+    gpu_uuid = "GPU-endpoint-a-0"
+
+    def claim(task: str) -> str:
+        claimed = service.create_request(
+            admin,
+            RequestCreate.model_validate(
+                {
+                    "project_id": "project-a",
+                    "task_ref": task,
+                    "purpose": task,
+                    "constraints": {"gpu_count": 1},
+                }
+            ),
+            idempotency_key=task,
+        )
+        assert claimed["lease"] is not None
+        return claimed["lease"]["id"]
+
+    def last_process(lease_id: str) -> str | None:
+        data = service.snapshot(admin)["data"]
+        payload = next(item for item in data["leases"] if item["id"] == lease_id)
+        return payload["last_process_observed_at"]
+
+    first = claim("first-holder")
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu(gpu_uuid, pid=4001)])
+    )
+    assert last_process(first) is not None
+
+    # The job stops and the lease is handed back.
+    service.ingest_observation(observation(count=1))
+    service.release_lease(admin, first, reason="done", idempotency_key="first-release")
+
+    second = claim("second-holder")
+    assert last_process(second) is None, "a brand new hold has run nothing yet"
+
+    # Its own work does show up.
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu(gpu_uuid, pid=4002)])
+    )
+    assert last_process(second) is not None

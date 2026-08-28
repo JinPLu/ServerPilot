@@ -85,7 +85,8 @@
             "fixture-conflict:GPU-fixture-conflict-00-UUID"
           ],
           "task_ref": "conflict",
-          "purpose": "fixture"
+          "purpose": "fixture",
+          "last_process_observed_at": "2026-07-31T21:46:00Z"
         }
       ],
       "requests": [],

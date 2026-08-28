@@ -278,7 +278,7 @@ def test_group_selection_required_on_retry_is_still_data(
     )
     selection.details = {"server_groups": [{"id": "group-a"}]}
     errors = [
-        BrokerClientError("broker request failed: ReadTimeout"),
+        BrokerClientError("broker request failed: ConnectError", unsent=True),
         selection,
     ]
 

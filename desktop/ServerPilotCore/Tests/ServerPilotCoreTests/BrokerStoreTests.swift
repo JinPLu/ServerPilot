@@ -1,11 +1,11 @@
 import Combine
 import Foundation
-import XCTest
+import Testing
 @testable import ServerPilotCore
 
 @MainActor
-final class BrokerStoreTests: XCTestCase {
-    func testManualTriggersCoalesceBehindSingleActiveRefresh() async throws {
+@Suite(.serialized) struct BrokerStoreTests {
+    @Test func testManualTriggersCoalesceBehindSingleActiveRefresh() async throws {
         let client = DelayedSequenceClient(
             snapshots: [try Self.snapshot(named: "1"), try Self.snapshot(named: "8")],
             delayNanoseconds: 50_000_000
@@ -18,13 +18,13 @@ final class BrokerStoreTests: XCTestCase {
 
         try await waitUntil { store.snapshot.summary.totalGPUs == 8 && !store.isRefreshing }
         let metrics = await client.metrics()
-        XCTAssertEqual(metrics.callCount, 2)
-        XCTAssertEqual(metrics.maxConcurrentCalls, 1)
-        XCTAssertEqual(store.snapshot.summary.totalGPUs, 8)
-        XCTAssertEqual(store.freshness, .fresh)
+        #expect(metrics.callCount == 2)
+        #expect(metrics.maxConcurrentCalls == 1)
+        #expect(store.snapshot.summary.totalGPUs == 8)
+        #expect(store.freshness == .fresh)
     }
 
-    func testEquivalentRefreshDoesNotRepublishSnapshotOrLastGoodSnapshot() async throws {
+    @Test func testEquivalentRefreshDoesNotRepublishSnapshotOrLastGoodSnapshot() async throws {
         let initial = try Self.snapshot(named: "1")
         var equivalent = initial
         equivalent.serverTime = "2026-08-10T10:00:00Z"
@@ -55,16 +55,16 @@ final class BrokerStoreTests: XCTestCase {
         try await waitUntilAsync { await client.metrics().callCount == 2 }
         try await waitUntil { !store.isRefreshing }
 
-        XCTAssertEqual(snapshotPublicationCount, 0)
-        XCTAssertEqual(lastGoodPublicationCount, 0)
-        XCTAssertEqual(store.snapshot.serverTime, initial.serverTime)
-        XCTAssertEqual(store.lastGoodSnapshot?.serverTime, initial.serverTime)
-        XCTAssertEqual(store.freshness, .fresh)
-        XCTAssertTrue(store.isConnected)
-        XCTAssertNil(store.errorMessage)
+        #expect(snapshotPublicationCount == 0)
+        #expect(lastGoodPublicationCount == 0)
+        #expect(store.snapshot.serverTime == initial.serverTime)
+        #expect(store.lastGoodSnapshot?.serverTime == initial.serverTime)
+        #expect(store.freshness == .fresh)
+        #expect(store.isConnected)
+        #expect(store.errorMessage == nil)
     }
 
-    func testEquivalentRefreshRecoversFreshnessAndClearsError() async throws {
+    @Test func testEquivalentRefreshRecoversFreshnessAndClearsError() async throws {
         let initial = try Self.snapshot(named: "1")
         var equivalent = initial
         equivalent.serverTime = "2026-08-10T10:00:00Z"
@@ -80,19 +80,19 @@ final class BrokerStoreTests: XCTestCase {
 
         store.reload()
         try await waitUntil { store.freshness == .stale && !store.isRefreshing }
-        XCTAssertFalse(store.isConnected)
-        XCTAssertNotNil(store.errorMessage)
+        #expect(!(store.isConnected))
+        #expect(store.errorMessage != nil)
 
         store.reload()
         try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
 
-        XCTAssertTrue(store.isConnected)
-        XCTAssertNil(store.errorMessage)
-        XCTAssertEqual(store.snapshot.serverTime, initial.serverTime)
-        XCTAssertEqual(store.lastGoodSnapshot?.serverTime, initial.serverTime)
+        #expect(store.isConnected)
+        #expect(store.errorMessage == nil)
+        #expect(store.snapshot.serverTime == initial.serverTime)
+        #expect(store.lastGoodSnapshot?.serverTime == initial.serverTime)
     }
 
-    func testTimeoutDoesNotCommitCancellationIgnoringClient() async throws {
+    @Test func testTimeoutDoesNotCommitCancellationIgnoringClient() async throws {
         let client = CancellationIgnoringClient(
             snapshot: try Self.snapshot(named: "8"),
             delayNanoseconds: 200_000_000
@@ -102,17 +102,17 @@ final class BrokerStoreTests: XCTestCase {
         store.connectForTesting(snapshotClient: client)
 
         try await waitUntil { store.freshness == .failed }
-        XCTAssertEqual(store.snapshot, .empty)
-        XCTAssertFalse(store.isRefreshing)
+        #expect(store.snapshot == .empty)
+        #expect(!(store.isRefreshing))
 
         try await Task.sleep(nanoseconds: 260_000_000)
-        XCTAssertEqual(store.snapshot, .empty)
-        XCTAssertEqual(store.freshness, .failed)
+        #expect(store.snapshot == .empty)
+        #expect(store.freshness == .failed)
         let callCount = await client.metrics()
-        XCTAssertEqual(callCount, 1)
+        #expect(callCount == 1)
     }
 
-    func testLastGoodSnapshotSurvivesStaleFailureAndThenRecovers() async throws {
+    @Test func testLastGoodSnapshotSurvivesStaleFailureAndThenRecovers() async throws {
         let client = ScriptedClient(results: [
             .success(try Self.snapshot(named: "1")),
             .failure(BrokerRefreshError.invalidSnapshot),
@@ -125,29 +125,29 @@ final class BrokerStoreTests: XCTestCase {
 
         store.reload()
         try await waitUntil { store.freshness == .stale }
-        XCTAssertEqual(store.snapshot.summary.totalGPUs, 1)
-        XCTAssertEqual(store.lastGoodSnapshot?.summary.totalGPUs, 1)
-        XCTAssertNotNil(store.errorMessage)
+        #expect(store.snapshot.summary.totalGPUs == 1)
+        #expect(store.lastGoodSnapshot?.summary.totalGPUs == 1)
+        #expect(store.errorMessage != nil)
 
         store.reload()
         try await waitUntil { store.snapshot.summary.totalGPUs == 8 }
-        XCTAssertEqual(store.freshness, .fresh)
-        XCTAssertNil(store.errorMessage)
+        #expect(store.freshness == .fresh)
+        #expect(store.errorMessage == nil)
     }
 
-    func testFailureBeforeAnySnapshotHasFailedFreshness() async throws {
+    @Test func testFailureBeforeAnySnapshotHasFailedFreshness() async throws {
         let client = ScriptedClient(results: [.failure(BrokerRefreshError.invalidSnapshot)])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
         store.connectForTesting(snapshotClient: client)
 
         try await waitUntil { store.freshness == .failed }
-        XCTAssertEqual(store.snapshot, .empty)
-        XCTAssertNil(store.lastGoodSnapshot)
-        XCTAssertNotNil(store.errorMessage)
+        #expect(store.snapshot == .empty)
+        #expect(store.lastGoodSnapshot == nil)
+        #expect(store.errorMessage != nil)
     }
 
-    func testSuccessfulSnapshotKeepsControlPlaneFreshWhenOneEndpointHasOldTelemetry() async throws {
+    @Test func testSuccessfulSnapshotKeepsControlPlaneFreshWhenOneEndpointHasOldTelemetry() async throws {
         let client = ScriptedClient(results: [.success(try Self.snapshot(named: "stale"))])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
@@ -157,69 +157,63 @@ final class BrokerStoreTests: XCTestCase {
         )
 
         try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
-        XCTAssertTrue(store.isConnected)
-        XCTAssertTrue(store.allowsMutations)
-        XCTAssertEqual(store.snapshot.dataAgeSeconds, 94)
-        XCTAssertEqual(store.snapshot.freshnessSeconds, 30)
-        XCTAssertEqual(store.snapshot.endpoints.first?.monitorLabel, "采集延迟")
-        XCTAssertEqual(store.snapshot.endpoints.first?.monitorDetail, "最近一次服务器数据已过期")
+        #expect(store.isConnected)
+        #expect(store.allowsMutations)
+        #expect(store.snapshot.dataAgeSeconds == 94)
+        #expect(store.snapshot.freshnessSeconds == 30)
+        #expect(store.snapshot.endpoints.first?.monitorLabel == "采集延迟")
+        #expect(store.snapshot.endpoints.first?.monitorDetail == "最近一次服务器数据已过期")
     }
 
-    func testEndpointFailureExplainsARecordedObservationTimeout() throws {
+    @Test func testEndpointFailureExplainsARecordedObservationTimeout() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
         store.useFixture(snapshot: try Self.snapshot(named: "error"))
 
-        XCTAssertEqual(store.snapshot.endpoints.first?.monitorLabel, "连接失败")
-        XCTAssertEqual(
-            store.snapshot.endpoints.first?.monitorDetail,
-            "连接或更新超时 · 检查服务器和 SSH"
-        )
+        #expect(store.snapshot.endpoints.first?.monitorLabel == "连接失败")
+        #expect(store.snapshot.endpoints.first?.monitorDetail == "连接或更新超时 · 检查服务器和 SSH")
     }
 
-    func testFixtureWithOldEndpointTelemetryRemainsLoadedAndReadOnly() throws {
+    @Test func testFixtureWithOldEndpointTelemetryRemainsLoadedAndReadOnly() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
         store.useFixture(snapshot: try Self.snapshot(named: "stale"))
 
-        XCTAssertEqual(store.freshness, .fresh)
-        XCTAssertTrue(store.isConnected)
-        XCTAssertFalse(store.allowsMutations)
+        #expect(store.freshness == .fresh)
+        #expect(store.isConnected)
+        #expect(!(store.allowsMutations))
     }
 
-    func testFixtureCommunicatesFixedReadOnlyBehavior() throws {
+    @Test func testFixtureCommunicatesFixedReadOnlyBehavior() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
         store.useFixture(snapshot: try Self.snapshot(named: "8"))
 
-        XCTAssertEqual(store.freshness, .fresh)
-        XCTAssertFalse(store.allowsMutations)
-        XCTAssertFalse(store.canRefresh)
-        XCTAssertEqual(
-            store.mutationUnavailableReason,
-            "当前为只读测试夹具或尚未连接本机服务，不能执行资源变更。"
-        )
+        #expect(store.freshness == .fresh)
+        #expect(!(store.allowsMutations))
+        #expect(!(store.canRefresh))
+        #expect(store.mutationUnavailableReason == "当前为只读测试夹具或尚未连接本机服务，不能执行资源变更。")
     }
 
-    func testSnapshotParsesTenMinuteOverviewMetricsSeparatelyFromCurrentTelemetry() throws {
+    @Test func testSnapshotParsesTenMinuteOverviewMetricsSeparatelyFromCurrentTelemetry() throws {
         let snapshot = try Self.snapshot(named: "resource-ownership")
-        let endpoint = try XCTUnwrap(snapshot.endpoint(id: "gpu-node-01"))
-        let gpu = try XCTUnwrap(snapshot.gpu(id: "gpu-node-01:GPU-FIXTURE-0"))
+        let endpoint = try #require(snapshot.endpoint(id: "gpu-node-01"))
+        let gpu = try #require(snapshot.gpu(id: "gpu-node-01:GPU-FIXTURE-0"))
 
-        XCTAssertNil(endpoint.cpuLoadFraction)
-        XCTAssertEqual(endpoint.recentTelemetryAverage?.windowSeconds, 600)
-        XCTAssertEqual(endpoint.recentTelemetryAverage?.sampleCount, 10)
-        XCTAssertEqual(endpoint.recentTelemetryAverage?.cpuLoadFraction, 0.21)
-        XCTAssertEqual(endpoint.recentTelemetryAverage?.memoryFraction, 0.34)
+        #expect(endpoint.cpuLoadFraction == nil)
+        #expect(endpoint.recentTelemetryAverage?.windowSeconds == 600)
+        #expect(endpoint.recentTelemetryAverage?.sampleCount == 10)
+        #expect(endpoint.recentTelemetryAverage?.cpuLoadFraction == 0.21)
+        #expect(endpoint.recentTelemetryAverage?.memoryFraction == 0.34)
 
-        XCTAssertEqual(gpu.utilization, 67)
-        XCTAssertEqual(gpu.recentTelemetryAverage?.windowSeconds, 600)
-        XCTAssertEqual(gpu.recentTelemetryAverage?.sampleCount, 10)
-        XCTAssertEqual(gpu.recentTelemetryAverage?.utilizationFraction, 0.52)
-        XCTAssertEqual(gpu.recentTelemetryAverage?.memoryFraction, 0.35)
+        #expect(gpu.utilization == 67)
+        #expect(gpu.recentTelemetryAverage?.windowSeconds == 600)
+        #expect(gpu.recentTelemetryAverage?.sampleCount == 10)
+        #expect(gpu.recentTelemetryAverage?.utilizationFraction == 0.52)
+        #expect(gpu.recentTelemetryAverage?.memoryFraction == 0.35)
     }
 
-    func testEndpointDraftUsesServerListedObservationProfileId() throws {
+    @Test func testEndpointDraftUsesServerListedObservationProfileId() throws {
         // Intentionally replaces the former sealed CaseIterable enum: a
         // plugin id cannot be represented by that enum, so drafts now store
         // the server-validated profile id as a String.
@@ -232,27 +226,22 @@ final class BrokerStoreTests: XCTestCase {
             suppliedID: ""
         )
 
-        XCTAssertEqual(draft.id, "gpu-example-test-p2201")
-        XCTAssertEqual(draft.host, "gpu.example.test")
-        XCTAssertEqual(draft.workspacePath, "/srv/storyboard")
-        XCTAssertEqual(draft.observationProfile, "server-script-v1")
-        XCTAssertEqual(
-            ObservationProfileRecord.serverCatalogFallback.first { $0.id == draft.observationProfile }?.displayName,
-            "服务器采集脚本"
-        )
-        XCTAssertThrowsError(
-            try EndpointDraft(
+        #expect(draft.id == "gpu-example-test-p2201")
+        #expect(draft.host == "gpu.example.test")
+        #expect(draft.workspacePath == "/srv/storyboard")
+        #expect(draft.observationProfile == "server-script-v1")
+        #expect(ObservationProfileRecord.serverCatalogFallback.first { $0.id == draft.observationProfile }?.displayName == "服务器采集脚本")
+        #expect(throws: (any Error).self) { try EndpointDraft(
                 host: "",
                 port: 0,
                 sshUser: "collector",
                 workspacePath: "relative/path",
                 observationProfile: "linux-nvidia",
                 suppliedID: "bad id"
-            )
-        )
+            ) }
     }
 
-    func testURLSessionClientFetchesUnifiedStateRoute() async throws {
+    @Test func testURLSessionClientFetchesUnifiedStateRoute() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -266,13 +255,13 @@ final class BrokerStoreTests: XCTestCase {
 
         let snapshot = try await client.snapshot(actorID: "tester")
 
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/state")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor"), "tester")
-        XCTAssertEqual(snapshot.snapshotRevision, 101)
-        XCTAssertEqual(snapshot.summary.totalGPUs, 1)
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/state")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
+        #expect(snapshot.snapshotRevision == 101)
+        #expect(snapshot.summary.totalGPUs == 1)
     }
 
-    func testURLSessionEndpointTelemetryHistoryClientUsesSeparateOptionalRoute() async throws {
+    @Test func testURLSessionEndpointTelemetryHistoryClientUsesSeparateOptionalRoute() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -321,22 +310,22 @@ final class BrokerStoreTests: XCTestCase {
 
         let history = try await client.history(endpointID: "gpu-node-01", range: .oneHour, actorID: "tester")
 
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/gpu-node-01/history")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.query, "window_seconds=3600&points=120")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor"), "tester")
-        XCTAssertEqual(history.endpointID, "gpu-node-01")
-        XCTAssertEqual(history.range, .oneHour)
-        XCTAssertEqual(history.samples.first?.cpuLoadFraction, 0.25)
-        XCTAssertEqual(history.samples.first?.memoryFraction, 0.40)
-        XCTAssertNil(history.samples.first?.gpuUtilizationFraction)
-        XCTAssertEqual(history.gpuSeries.count, 1)
-        XCTAssertEqual(history.gpuSeries.first?.id, "gpu-node-01:GPU-uuid-0")
-        XCTAssertEqual(history.gpuSeries.first?.samples.first?.gpuUtilizationFraction, 0.8)
-        XCTAssertEqual(history.gpuSeries.first?.samples.first?.memoryFraction, 0.25)
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/gpu-node-01/history")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.query == "window_seconds=3600&points=120")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
+        #expect(history.endpointID == "gpu-node-01")
+        #expect(history.range == .oneHour)
+        #expect(history.samples.first?.cpuLoadFraction == 0.25)
+        #expect(history.samples.first?.memoryFraction == 0.40)
+        #expect(history.samples.first?.gpuUtilizationFraction == nil)
+        #expect(history.gpuSeries.count == 1)
+        #expect(history.gpuSeries.first?.id == "gpu-node-01:GPU-uuid-0")
+        #expect(history.gpuSeries.first?.samples.first?.gpuUtilizationFraction == 0.8)
+        #expect(history.gpuSeries.first?.samples.first?.memoryFraction == 0.25)
     }
 
-    func testEndpointCpuLoadUsesUtilizationAndDoesNotFallBackToHostLoad() throws {
-        let utilized = try XCTUnwrap(EndpointRecord(raw: [
+    @Test func testEndpointCpuLoadUsesUtilizationAndDoesNotFallBackToHostLoad() throws {
+        let utilized = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -347,9 +336,9 @@ final class BrokerStoreTests: XCTestCase {
                 "cpu_utilization_pct": 25
             ]
         ]))
-        XCTAssertEqual(utilized.cpuLoadFraction, 0.25)
+        #expect(utilized.cpuLoadFraction == 0.25)
 
-        let loadOnly = try XCTUnwrap(EndpointRecord(raw: [
+        let loadOnly = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -359,28 +348,28 @@ final class BrokerStoreTests: XCTestCase {
                 "load_1m": 380
             ]
         ]))
-        XCTAssertNotEqual(loadOnly.cpuLoadFraction, 1.0)
-        XCTAssertNil(loadOnly.cpuLoadFraction)
+        #expect(loadOnly.cpuLoadFraction != 1.0)
+        #expect(loadOnly.cpuLoadFraction == nil)
 
-        let utilizedSample = try XCTUnwrap(EndpointTelemetrySample(raw: [
+        let utilizedSample = try #require(EndpointTelemetrySample(raw: [
             "observed_at": "2026-08-19T06:00:00Z",
             "cpu_count": 128,
             "load_1m": 380,
             "cpu_utilization_pct": 25
         ]))
-        XCTAssertEqual(utilizedSample.cpuLoadFraction, 0.25)
+        #expect(utilizedSample.cpuLoadFraction == 0.25)
 
-        let loadOnlySample = try XCTUnwrap(EndpointTelemetrySample(raw: [
+        let loadOnlySample = try #require(EndpointTelemetrySample(raw: [
             "observed_at": "2026-08-19T06:00:00Z",
             "cpu_count": 128,
             "load_1m": 380
         ]))
-        XCTAssertNotEqual(loadOnlySample.cpuLoadFraction, 1.0)
-        XCTAssertNil(loadOnlySample.cpuLoadFraction)
+        #expect(loadOnlySample.cpuLoadFraction != 1.0)
+        #expect(loadOnlySample.cpuLoadFraction == nil)
     }
 
-    func testEndpointMemoryUsesCgroupLimitInsteadOfHostMemTotal() throws {
-        let cgroup = try XCTUnwrap(EndpointRecord(raw: [
+    @Test func testEndpointMemoryUsesCgroupLimitInsteadOfHostMemTotal() throws {
+        let cgroup = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -392,9 +381,9 @@ final class BrokerStoreTests: XCTestCase {
                 "memory_current_mib": 51_200
             ]
         ]))
-        XCTAssertEqual(cgroup.memoryFraction!, 51_200.0 / 249_856.0, accuracy: 0.0001)
+        #expect(abs((cgroup.memoryFraction!) - (51_200.0 / 249_856.0)) < 0.0001)
 
-        let unlimited = try XCTUnwrap(EndpointRecord(raw: [
+        let unlimited = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
@@ -405,22 +394,22 @@ final class BrokerStoreTests: XCTestCase {
                 "memory_current_mib": 51_200
             ]
         ]))
-        XCTAssertEqual(unlimited.memoryFraction!, 1 - 921_600.0 / 1_029_120.0, accuracy: 0.0001)
+        #expect(abs((unlimited.memoryFraction!) - (1 - 921_600.0 / 1_029_120.0)) < 0.0001)
     }
 
-    func testEndpointTelemetryHistoryCapabilityGateDegradesWithoutChangingSnapshot() throws {
+    @Test func testEndpointTelemetryHistoryCapabilityGateDegradesWithoutChangingSnapshot() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         let snapshot = try Self.snapshot(named: "1")
 
         store.useFixture(snapshot: snapshot)
         store.requestEndpointTelemetryHistory(endpointID: "fixture-1", range: .oneHour)
 
-        XCTAssertEqual(store.snapshot, snapshot)
-        XCTAssertEqual(store.endpointTelemetryHistoryErrors["fixture-1"], "当前本机服务未提供资源历史能力。")
-        XCTAssertFalse(store.endpointTelemetryHistoryLoading.contains("fixture-1"))
+        #expect(store.snapshot == snapshot)
+        #expect(store.endpointTelemetryHistoryErrors["fixture-1"] == "当前本机服务未提供资源历史能力。")
+        #expect(!(store.endpointTelemetryHistoryLoading.contains("fixture-1")))
     }
 
-    func testEndpointTelemetryHistoryCancelsOlderRequestAndIgnoresOutOfOrderCompletion() async throws {
+    @Test func testEndpointTelemetryHistoryCancelsOlderRequestAndIgnoresOutOfOrderCompletion() async throws {
         let endpointID = "fixture-1"
         let snapshotClient = ScriptedClient(results: [.success(try Self.snapshot(named: "1"))])
         let historyClient = DelayedEndpointHistoryClient(
@@ -460,11 +449,11 @@ final class BrokerStoreTests: XCTestCase {
         }
         try await Task.sleep(nanoseconds: 220_000_000)
 
-        XCTAssertEqual(store.endpointTelemetryHistory(endpointID: endpointID, range: .oneHour)?.samples.first?.gpuUtilizationFraction, 0.8)
-        XCTAssertNil(store.endpointTelemetryHistory(endpointID: endpointID, range: .twentyFourHours))
+        #expect(store.endpointTelemetryHistory(endpointID: endpointID, range: .oneHour)?.samples.first?.gpuUtilizationFraction == 0.8)
+        #expect(store.endpointTelemetryHistory(endpointID: endpointID, range: .twentyFourHours) == nil)
     }
 
-    func testEndpointTelemetryHistoryReusesFreshCachedRange() async throws {
+    @Test func testEndpointTelemetryHistoryReusesFreshCachedRange() async throws {
         let endpointID = "fixture-1"
         let snapshotClient = ScriptedClient(results: [.success(try Self.snapshot(named: "1"))])
         let historyClient = CountingEndpointHistoryClient()
@@ -487,11 +476,11 @@ final class BrokerStoreTests: XCTestCase {
         store.requestEndpointTelemetryHistory(endpointID: endpointID, range: .oneHour)
 
         let historyCallCount = await historyClient.callCount()
-        XCTAssertEqual(historyCallCount, 1)
-        XCTAssertNil(store.endpointTelemetryHistoryErrors[endpointID])
+        #expect(historyCallCount == 1)
+        #expect(store.endpointTelemetryHistoryErrors[endpointID] == nil)
     }
 
-    func testEndpointTelemetryHistoryCancelsInactiveDetailRequest() async throws {
+    @Test func testEndpointTelemetryHistoryCancelsInactiveDetailRequest() async throws {
         let firstEndpointID = "fixture-1"
         let secondEndpointID = "fixture-2"
         let snapshotClient = ScriptedClient(results: [.success(try Self.snapshot(named: "1"))])
@@ -511,7 +500,7 @@ final class BrokerStoreTests: XCTestCase {
 
         store.requestEndpointTelemetryHistory(endpointID: firstEndpointID, range: .oneHour)
         try await waitUntilAsync { await historyClient.metrics().callCount == 1 }
-        XCTAssertTrue(store.endpointTelemetryHistoryLoading.contains(firstEndpointID))
+        #expect(store.endpointTelemetryHistoryLoading.contains(firstEndpointID))
 
         store.requestEndpointTelemetryHistory(endpointID: secondEndpointID, range: .oneHour)
         try await waitUntil {
@@ -520,12 +509,12 @@ final class BrokerStoreTests: XCTestCase {
         }
         try await waitUntilAsync { await historyClient.metrics().cancellationCount == 1 }
 
-        XCTAssertFalse(store.endpointTelemetryHistoryLoading.contains(firstEndpointID))
-        XCTAssertNil(store.endpointTelemetryHistory(endpointID: firstEndpointID, range: .oneHour))
-        XCTAssertNil(store.endpointTelemetryHistoryErrors[firstEndpointID])
+        #expect(!(store.endpointTelemetryHistoryLoading.contains(firstEndpointID)))
+        #expect(store.endpointTelemetryHistory(endpointID: firstEndpointID, range: .oneHour) == nil)
+        #expect(store.endpointTelemetryHistoryErrors[firstEndpointID] == nil)
     }
 
-    func testUnifiedStateEnvelopeParsesCurrentAndHistory() throws {
+    @Test func testUnifiedStateEnvelopeParsesCurrentAndHistory() throws {
         let history = [
             "summary": ["total_gpus": 1],
             "data_age_seconds": 8,
@@ -555,13 +544,13 @@ final class BrokerStoreTests: XCTestCase {
             ]
         ])
 
-        XCTAssertEqual(snapshot.snapshotRevision, 150)
-        XCTAssertEqual(snapshot.summary.totalGPUs, 8)
-        XCTAssertEqual(snapshot.history, .empty)
-        XCTAssertEqual(snapshot.dataAgeSeconds, 2)
+        #expect(snapshot.snapshotRevision == 150)
+        #expect(snapshot.summary.totalGPUs == 8)
+        #expect(snapshot.history == .empty)
+        #expect(snapshot.dataAgeSeconds == 2)
     }
 
-    func testMutationRevisionFloorRejectsRollbackSnapshotAndLaterCommitsRequiredRevision() async throws {
+    @Test func testMutationRevisionFloorRejectsRollbackSnapshotAndLaterCommitsRequiredRevision() async throws {
         var beforeMutation = try Self.snapshot(named: "1")
         beforeMutation.snapshotRevision = 101
         var rollback = try Self.snapshot(named: "8")
@@ -583,21 +572,18 @@ final class BrokerStoreTests: XCTestCase {
         store.reload()
         try await waitUntil { store.freshness == .stale && !store.isRefreshing }
 
-        XCTAssertEqual(store.snapshot.snapshotRevision, 101)
-        XCTAssertEqual(store.lastGoodSnapshot?.snapshotRevision, 101)
-        XCTAssertEqual(
-            store.errorMessage,
-            "无法更新资源：\(BrokerRefreshError.snapshotRevisionBehind(required: 150, received: 120).localizedDescription)"
-        )
+        #expect(store.snapshot.snapshotRevision == 101)
+        #expect(store.lastGoodSnapshot?.snapshotRevision == 101)
+        #expect(store.errorMessage == "无法更新资源：\(BrokerRefreshError.snapshotRevisionBehind(required: 150, received: 120).localizedDescription)")
 
         store.reload()
         try await waitUntil { store.snapshot.snapshotRevision == 150 && !store.isRefreshing }
 
-        XCTAssertEqual(store.freshness, .fresh)
-        XCTAssertNil(store.errorMessage)
+        #expect(store.freshness == .fresh)
+        #expect(store.errorMessage == nil)
     }
 
-    func testOrdinaryRefreshRejectsRevisionRollbackAndPreservesLastGoodSnapshot() async throws {
+    @Test func testOrdinaryRefreshRejectsRevisionRollbackAndPreservesLastGoodSnapshot() async throws {
         var accepted = try Self.snapshot(named: "8")
         accepted.snapshotRevision = 150
         var rollback = try Self.snapshot(named: "1")
@@ -611,15 +597,12 @@ final class BrokerStoreTests: XCTestCase {
         store.reload()
         try await waitUntil { store.freshness == .stale && !store.isRefreshing }
 
-        XCTAssertEqual(store.snapshot.snapshotRevision, 150)
-        XCTAssertEqual(store.lastGoodSnapshot?.snapshotRevision, 150)
-        XCTAssertEqual(
-            store.errorMessage,
-            "无法更新资源：\(BrokerRefreshError.snapshotRevisionBehind(required: 150, received: 120).localizedDescription)"
-        )
+        #expect(store.snapshot.snapshotRevision == 150)
+        #expect(store.lastGoodSnapshot?.snapshotRevision == 150)
+        #expect(store.errorMessage == "无法更新资源：\(BrokerRefreshError.snapshotRevisionBehind(required: 150, received: 120).localizedDescription)")
     }
 
-    func testEndpointLifecycleActionsUseDistinctDocumentedRoutes() async throws {
+    @Test func testEndpointLifecycleActionsUseDistinctDocumentedRoutes() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
@@ -628,7 +611,7 @@ final class BrokerStoreTests: XCTestCase {
         // repeating snapshot that stays behind that floor fail-closes the
         // store, so later mutations never reach the network.
         snapshot.snapshotRevision = 102
-        let endpoint = try XCTUnwrap(snapshot.endpoints.first)
+        let endpoint = try #require(snapshot.endpoints.first)
         let capabilities: Set<String> = ["endpoint_update", "endpoint_delete", "endpoint_keepalive", "endpoint_conflict_cleanup"]
         let serviceInfo = ServiceInfo(schemaVersion: "v1", capabilities: capabilities)
         let store = BrokerStore(
@@ -659,14 +642,14 @@ final class BrokerStoreTests: XCTestCase {
             updateRecorder.message = message
         }
         try await waitUntil { updateRecorder.success != nil }
-        XCTAssertEqual(updateRecorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1")
-        let updateBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
-        let updatePayload = try XCTUnwrap(try JSONSerialization.jsonObject(with: updateBody) as? [String: Any])
-        XCTAssertEqual(updatePayload["ssh_user"] as? String, "collector")
-        XCTAssertEqual(updatePayload["workspace_path"] as? String, "/srv/storyboard")
-        XCTAssertEqual(updatePayload["observation_profile"] as? String, "server-script-v1")
+        #expect(updateRecorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1")
+        let updateBody = try #require(StateRouteURLProtocol.lastBody)
+        let updatePayload = try #require(try JSONSerialization.jsonObject(with: updateBody) as? [String: Any])
+        #expect(updatePayload["ssh_user"] as? String == "collector")
+        #expect(updatePayload["workspace_path"] as? String == "/srv/storyboard")
+        #expect(updatePayload["observation_profile"] as? String == "server-script-v1")
 
         let keepaliveRecorder = CompletionRecorder()
         store.setEndpointKeepalive(endpoint, enabled: true) { success, message in
@@ -674,13 +657,13 @@ final class BrokerStoreTests: XCTestCase {
             keepaliveRecorder.message = message
         }
         try await waitUntil { keepaliveRecorder.success != nil }
-        XCTAssertEqual(keepaliveRecorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1/keepalive")
-        let keepaliveBody = try XCTUnwrap(StateRouteURLProtocol.lastBody)
-        let keepalivePayload = try XCTUnwrap(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
-        XCTAssertEqual(keepalivePayload["enabled"] as? Bool, true)
-        XCTAssertEqual(Set(keepalivePayload.keys), Set(["enabled"]))
+        #expect(keepaliveRecorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1/keepalive")
+        let keepaliveBody = try #require(StateRouteURLProtocol.lastBody)
+        let keepalivePayload = try #require(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
+        #expect(keepalivePayload["enabled"] as? Bool == true)
+        #expect(Set(keepalivePayload.keys) == Set(["enabled"]))
 
         let conflictRecorder = CompletionRecorder()
         store.clearEmptyConflictedLease(
@@ -691,12 +674,9 @@ final class BrokerStoreTests: XCTestCase {
             conflictRecorder.message = message
         }
         try await waitUntil { conflictRecorder.success != nil }
-        XCTAssertEqual(conflictRecorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.url?.path,
-            "/api/v1/endpoints/fixture-1/leases/lease-conflict/release-empty"
-        )
+        #expect(conflictRecorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1/leases/lease-conflict/release-empty")
 
         let deleteRecorder = CompletionRecorder()
         store.deleteEndpoint(endpoint) { success, message in
@@ -704,18 +684,18 @@ final class BrokerStoreTests: XCTestCase {
             deleteRecorder.message = message
         }
         try await waitUntil { deleteRecorder.success != nil }
-        XCTAssertEqual(deleteRecorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "DELETE")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/endpoints/fixture-1")
+        #expect(deleteRecorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "DELETE")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1")
 
     }
 
-    func testHumanTaskGPUReassignmentUsesExactPatchRoute() async throws {
+    @Test func testHumanTaskGPUReassignmentUsesExactPatchRoute() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
         let snapshot = try Self.snapshot(named: "1")
-        let lease = try XCTUnwrap(LeaseRecord(raw: [
+        let lease = try #require(LeaseRecord(raw: [
             "id": "lease-manual-move",
             "actor_id": "agent-a",
             "project_id": "project-a",
@@ -747,30 +727,22 @@ final class BrokerStoreTests: XCTestCase {
         }
 
         try await waitUntil { recorder.success != nil }
-        XCTAssertEqual(recorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.url?.path,
-            "/api/v1/operator/leases/lease-manual-move/gpus"
-        )
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client"),
-            "desktop-app"
-        )
-        let body = try XCTUnwrap(StateRouteURLProtocol.lastBody)
-        let payload = try XCTUnwrap(
-            try JSONSerialization.jsonObject(with: body) as? [String: Any]
-        )
-        XCTAssertEqual(payload["gpu_ids"] as? [String], ["fixture-1:GPU-new"])
-        XCTAssertTrue(store.notice?.contains("对应 Agent") == true)
+        #expect(recorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/operator/leases/lease-manual-move/gpus")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client") == "desktop-app")
+        let body = try #require(StateRouteURLProtocol.lastBody)
+        let payload = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(payload["gpu_ids"] as? [String] == ["fixture-1:GPU-new"])
+        #expect(store.notice?.contains("对应 Agent") == true)
     }
 
-    func testHumanReleaseUsesOperatorCorrectionRoute() async throws {
+    @Test func testHumanReleaseUsesOperatorCorrectionRoute() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
         let snapshot = try Self.snapshot(named: "1")
-        let lease = try XCTUnwrap(LeaseRecord(raw: [
+        let lease = try #require(LeaseRecord(raw: [
             "id": "lease-owned-by-agent",
             "actor_id": "agent-a",
             "project_id": "project-a",
@@ -802,23 +774,14 @@ final class BrokerStoreTests: XCTestCase {
         }
 
         try await waitUntil { recorder.success != nil }
-        XCTAssertEqual(recorder.success, true)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "POST")
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.url?.path,
-            "/api/v1/operator/leases/lease-owned-by-agent/release"
-        )
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor"),
-            "human"
-        )
-        XCTAssertEqual(
-            StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client"),
-            "desktop-app"
-        )
+        #expect(recorder.success == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/operator/leases/lease-owned-by-agent/release")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "human")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client") == "desktop-app")
     }
 
-    func testCollectorIntervalReadsAndUpdatesServerSetting() async throws {
+    @Test func testCollectorIntervalReadsAndUpdatesServerSetting() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -846,8 +809,8 @@ final class BrokerStoreTests: XCTestCase {
         ])
         store.requestCollectorSettings()
         try await waitUntil { store.collectorSettings?.intervalSeconds == 10 }
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "GET")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/settings/collector")
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "GET")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/settings/collector")
 
         StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
             "snapshot_revision": 102,
@@ -863,26 +826,26 @@ final class BrokerStoreTests: XCTestCase {
             recorder.message = message
         }
         try await waitUntil { recorder.success != nil }
-        XCTAssertEqual(recorder.success, true)
-        XCTAssertEqual(store.collectorSettings?.intervalSeconds, 5)
-        XCTAssertEqual(store.collectorSettings?.staleAfterSeconds, 15)
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "PATCH")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/settings/collector")
-        XCTAssertNotNil(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key"))
+        #expect(recorder.success == true)
+        #expect(store.collectorSettings?.intervalSeconds == 5)
+        #expect(store.collectorSettings?.staleAfterSeconds == 15)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/settings/collector")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key") != nil)
     }
 
-    func testCollectorIntervalRemainsVisibleButReadOnlyInFixtureMode() throws {
+    @Test func testCollectorIntervalRemainsVisibleButReadOnlyInFixtureMode() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         store.useFixture(snapshot: try Self.snapshot(named: "1"))
 
-        XCTAssertTrue(store.supportsCollectorSettings)
-        XCTAssertFalse(store.canUpdateCollectorSettings)
-        XCTAssertEqual(store.collectorSettings?.intervalSeconds, 10)
-        XCTAssertEqual(store.collectorSettings?.allowedIntervals, [5, 10, 30])
+        #expect(store.supportsCollectorSettings)
+        #expect(!(store.canUpdateCollectorSettings))
+        #expect(store.collectorSettings?.intervalSeconds == 10)
+        #expect(store.collectorSettings?.allowedIntervals == [5, 10, 30])
     }
 
-    func testMCPEntryRecordAcceptsResolvedEntryAndRejectsContradictoryPayload() throws {
-        let available = try XCTUnwrap(MCPEntryRecord(raw: [
+    @Test func testMCPEntryRecordAcceptsResolvedEntryAndRejectsContradictoryPayload() throws {
+        let available = try #require(MCPEntryRecord(raw: [
             "available": true,
             "command": "/opt/serverpilot/bin/serverpilot-mcp",
             "mcpServers": [
@@ -892,26 +855,26 @@ final class BrokerStoreTests: XCTestCase {
                 ]
             ],
         ]))
-        XCTAssertTrue(available.available)
-        XCTAssertEqual(available.command, "/opt/serverpilot/bin/serverpilot-mcp")
-        XCTAssertNotNil(available.configJSON)
-        XCTAssertTrue(available.configJSON?.contains("\"mcpServers\"") == true)
-        XCTAssertTrue(available.configJSON?.contains("/opt/serverpilot/bin/serverpilot-mcp") == true)
-        XCTAssertTrue(available.configJSON?.contains("SERVERPILOT_URL") == true)
+        #expect(available.available)
+        #expect(available.command == "/opt/serverpilot/bin/serverpilot-mcp")
+        #expect(available.configJSON != nil)
+        #expect(available.configJSON?.contains("\"mcpServers\"") == true)
+        #expect(available.configJSON?.contains("/opt/serverpilot/bin/serverpilot-mcp") == true)
+        #expect(available.configJSON?.contains("SERVERPILOT_URL") == true)
 
-        XCTAssertNil(MCPEntryRecord(raw: [
+        #expect(MCPEntryRecord(raw: [
             "available": true,
             "command": "/opt/serverpilot/bin/serverpilot-mcp",
-        ]))
-        XCTAssertNil(MCPEntryRecord(raw: [
+        ]) == nil)
+        #expect(MCPEntryRecord(raw: [
             "available": false,
             "command": "/opt/serverpilot/bin/serverpilot-mcp",
             "mcpServers": NSNull(),
             "hint": "cannot find serverpilot-mcp",
-        ]))
+        ]) == nil)
     }
 
-    func testMCPEntryReadsAbsolutePathAndPasteableConfig() async throws {
+    @Test func testMCPEntryReadsAbsolutePathAndPasteableConfig() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -945,14 +908,14 @@ final class BrokerStoreTests: XCTestCase {
         ])
         store.requestMcpEntry()
         try await waitUntil { store.mcpEntry?.available == true }
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.httpMethod, "GET")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.url?.path, "/api/v1/mcp-entry")
-        XCTAssertEqual(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor"), "tester")
-        XCTAssertEqual(store.mcpEntry?.command, "/opt/serverpilot/bin/serverpilot-mcp")
-        XCTAssertTrue(store.mcpEntry?.configJSON?.contains("\"mcpServers\"") == true)
+        #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "GET")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/mcp-entry")
+        #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
+        #expect(store.mcpEntry?.command == "/opt/serverpilot/bin/serverpilot-mcp")
+        #expect(store.mcpEntry?.configJSON?.contains("\"mcpServers\"") == true)
     }
 
-    func testMCPEntryUnavailablePayloadDoesNotInventAPath() async throws {
+    @Test func testMCPEntryUnavailablePayloadDoesNotInventAPath() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let session = URLSession(configuration: configuration)
@@ -981,21 +944,21 @@ final class BrokerStoreTests: XCTestCase {
         ])
         store.requestMcpEntry()
         try await waitUntil { store.mcpEntry != nil }
-        XCTAssertEqual(store.mcpEntry?.available, false)
-        XCTAssertNil(store.mcpEntry?.command)
-        XCTAssertNil(store.mcpEntry?.configJSON)
-        XCTAssertTrue(store.mcpEntry?.hint?.contains("uv tool install") == true)
+        #expect(store.mcpEntry?.available == false)
+        #expect(store.mcpEntry?.command == nil)
+        #expect(store.mcpEntry?.configJSON == nil)
+        #expect(store.mcpEntry?.hint?.contains("uv tool install") == true)
     }
 
-    func testMCPEntryStaysHiddenInFixtureMode() throws {
+    @Test func testMCPEntryStaysHiddenInFixtureMode() throws {
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         store.useFixture(snapshot: try Self.snapshot(named: "1"))
 
-        XCTAssertFalse(store.supportsMcpEntry)
-        XCTAssertNil(store.mcpEntry)
+        #expect(!(store.supportsMcpEntry))
+        #expect(store.mcpEntry == nil)
     }
 
-    func testEndpointAndControlPlaneMutationsStayAvailableWhenOneEndpointHasOldTelemetry() async throws {
+    @Test func testEndpointAndControlPlaneMutationsStayAvailableWhenOneEndpointHasOldTelemetry() async throws {
         let client = ScriptedClient(results: [.success(try Self.snapshot(named: "stale"))])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
@@ -1005,33 +968,33 @@ final class BrokerStoreTests: XCTestCase {
         )
 
         try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
-        XCTAssertTrue(store.allowsMutations)
-        XCTAssertTrue(store.allowsEndpointLifecycleMutations)
+        #expect(store.allowsMutations)
+        #expect(store.allowsEndpointLifecycleMutations)
     }
 
-    func testEndpointLifecycleCapabilityGateAndErrorParsingRemainSafe() throws {
+    @Test func testEndpointLifecycleCapabilityGateAndErrorParsingRemainSafe() throws {
         let payload = try JSONSerialization.data(withJSONObject: ["snapshot_revision": 250])
-        XCTAssertEqual(BrokerStore.snapshotRevision(from: payload), 250)
+        #expect(BrokerStore.snapshotRevision(from: payload) == 250)
 
         let errorPayload = try JSONSerialization.data(withJSONObject: [
             "error": ["code": "endpoint_not_found"]
         ])
-        XCTAssertEqual(BrokerStore.apiErrorCode(from: errorPayload), "endpoint_not_found")
+        #expect(BrokerStore.apiErrorCode(from: errorPayload) == "endpoint_not_found")
 
         let advertised = ServiceInfo(schemaVersion: "v1", capabilities: ["endpoint_update"])
-        XCTAssertTrue(advertised.supportsEndpointUpdate)
-        XCTAssertFalse(advertised.supportsEndpointDelete)
+        #expect(advertised.supportsEndpointUpdate)
+        #expect(!(advertised.supportsEndpointDelete))
 
         let fixture = ServiceInfo.fixture
-        XCTAssertTrue(fixture.supportsEndpointDelete)
+        #expect(fixture.supportsEndpointDelete)
     }
 
-    func testDeleteEndpointKeepsActionableConflictError() async throws {
+    @Test func testDeleteEndpointKeepsActionableConflictError() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
         let mutationSession = URLSession(configuration: configuration)
         let snapshot = try Self.snapshot(named: "1")
-        let endpoint = try XCTUnwrap(snapshot.endpoints.first)
+        let endpoint = try #require(snapshot.endpoints.first)
         let store = BrokerStore(
             actorID: "tester",
             refreshTimeoutSeconds: 1,
@@ -1059,14 +1022,14 @@ final class BrokerStoreTests: XCTestCase {
             recorder.message = message
         }
         try await waitUntil { recorder.success != nil }
-        XCTAssertEqual(recorder.success, false)
-        XCTAssertTrue(recorder.message?.contains("先结束") == true)
-        XCTAssertTrue(store.snapshot.endpoints.contains(where: { $0.id == endpoint.id }))
+        #expect(recorder.success == false)
+        #expect(recorder.message?.contains("先结束") == true)
+        #expect(store.snapshot.endpoints.contains(where: { $0.id == endpoint.id }))
     }
 
-    func testDeleteEndpointFailsClosedWithoutCapability() async throws {
+    @Test func testDeleteEndpointFailsClosedWithoutCapability() async throws {
         let snapshot = try Self.snapshot(named: "1")
-        let endpoint = try XCTUnwrap(snapshot.endpoints.first)
+        let endpoint = try #require(snapshot.endpoints.first)
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
         store.connectForTesting(
             snapshotClient: ScriptedClient(results: [.success(snapshot)]),
@@ -1081,29 +1044,29 @@ final class BrokerStoreTests: XCTestCase {
             recorder.message = message
         }
         try await waitUntil { recorder.success != nil }
-        XCTAssertEqual(recorder.success, false)
-        XCTAssertTrue(recorder.message?.contains("删除服务器") == true)
-        XCTAssertFalse(store.supportsEndpointDelete)
+        #expect(recorder.success == false)
+        #expect(recorder.message?.contains("删除服务器") == true)
+        #expect(!(store.supportsEndpointDelete))
     }
 
-    func testKeepaliveSnapshotUsesPerGPUCoverageAndRedactsInternalLease() throws {
+    @Test func testKeepaliveSnapshotUsesPerGPUCoverageAndRedactsInternalLease() throws {
         let fixture = try Self.snapshot(named: "keepalive")
-        let endpoint = try XCTUnwrap(fixture.endpoints.first)
-        XCTAssertTrue(endpoint.keepalive.configured)
-        XCTAssertEqual(endpoint.keepalive.policy, "idle_keepalive")
-        XCTAssertEqual(endpoint.keepalive.state, "ON")
-        XCTAssertEqual(endpoint.keepalive.label, "已开启")
-        XCTAssertTrue(endpoint.keepalive.hasResidualLease)
-        XCTAssertEqual(endpoint.keepalive.coverageSummary(totalGPUCount: 2, taskGPUCount: 1), "已开启 · 1/2 占卡，1 卡任务中")
-        XCTAssertEqual(endpoint.keepalive.coverageSummary(totalGPUCount: 0, taskGPUCount: 0), "无 GPU")
-        XCTAssertEqual(fixture.gpus.map(\.state), ["KEEPALIVE", "RUNNING_MANAGED"])
-        XCTAssertTrue(try XCTUnwrap(fixture.gpus.first).isPubliclyAvailable)
-        XCTAssertEqual(fixture.gpus.first?.keepalive.desired, "ON")
-        XCTAssertEqual(fixture.gpus.first?.keepalive.presentationLabel, "空闲占卡")
-        XCTAssertEqual(fixture.gpus.last?.keepalive.reason, "managed workload is running")
-        XCTAssertTrue(fixture.leases.isEmpty)
+        let endpoint = try #require(fixture.endpoints.first)
+        #expect(endpoint.keepalive.configured)
+        #expect(endpoint.keepalive.policy == "idle_keepalive")
+        #expect(endpoint.keepalive.state == "ON")
+        #expect(endpoint.keepalive.label == "已开启")
+        #expect(endpoint.keepalive.hasResidualLease)
+        #expect(endpoint.keepalive.coverageSummary(totalGPUCount: 2, taskGPUCount: 1) == "已开启 · 1/2 占卡，1 卡任务中")
+        #expect(endpoint.keepalive.coverageSummary(totalGPUCount: 0, taskGPUCount: 0) == "无 GPU")
+        #expect(fixture.gpus.map(\.state) == ["KEEPALIVE", "RUNNING_MANAGED"])
+        #expect(try #require(fixture.gpus.first).isPubliclyAvailable)
+        #expect(fixture.gpus.first?.keepalive.desired == "ON")
+        #expect(fixture.gpus.first?.keepalive.presentationLabel == "空闲占卡")
+        #expect(fixture.gpus.last?.keepalive.reason == "managed workload is running")
+        #expect(fixture.leases.isEmpty)
 
-        let missingKeeper = try XCTUnwrap(GPURecord(raw: [
+        let missingKeeper = try #require(GPURecord(raw: [
             "id": "fixture-1:GPU-missing-keeper",
             "endpoint_id": "fixture-1",
             "gpu_uuid": "GPU-missing-keeper",
@@ -1120,14 +1083,14 @@ final class BrokerStoreTests: XCTestCase {
                 "lease_id": "keepalive-missing-lease"
             ],
         ]))
-        XCTAssertFalse(missingKeeper.isTaskOccupancy)
-        XCTAssertTrue(missingKeeper.isPubliclyAvailable)
-        XCTAssertEqual(missingKeeper.keepalive.desired, "ON")
-        XCTAssertEqual(missingKeeper.keepalive.presentationLabel, "占卡未运行")
-        XCTAssertEqual(missingKeeper.keepalive.leaseID, "keepalive-missing-lease")
-        XCTAssertTrue(try XCTUnwrap(fixture.gpus.last).isTaskOccupancy)
+        #expect(!(missingKeeper.isTaskOccupancy))
+        #expect(missingKeeper.isPubliclyAvailable)
+        #expect(missingKeeper.keepalive.desired == "ON")
+        #expect(missingKeeper.keepalive.presentationLabel == "占卡未运行")
+        #expect(missingKeeper.keepalive.leaseID == "keepalive-missing-lease")
+        #expect(try #require(fixture.gpus.last).isTaskOccupancy)
 
-        let conflictedKeeper = try XCTUnwrap(GPURecord(raw: [
+        let conflictedKeeper = try #require(GPURecord(raw: [
             "id": "fixture-1:GPU-conflicted-keeper",
             "endpoint_id": "fixture-1",
             "gpu_uuid": "GPU-conflicted-keeper",
@@ -1146,13 +1109,13 @@ final class BrokerStoreTests: XCTestCase {
                 "lease_id": "keepalive-conflicted-lease"
             ],
         ]))
-        XCTAssertEqual(conflictedKeeper.publicStatus, "任务占用")
-        XCTAssertEqual(conflictedKeeper.projectedPubliclyAvailable, false)
-        XCTAssertFalse(conflictedKeeper.isPubliclyAvailable)
-        XCTAssertEqual(conflictedKeeper.keepalive.desired, "ON")
-        XCTAssertEqual(conflictedKeeper.keepalive.state, "ERROR")
+        #expect(conflictedKeeper.publicStatus == "任务占用")
+        #expect(conflictedKeeper.projectedPubliclyAvailable == false)
+        #expect(!(conflictedKeeper.isPubliclyAvailable))
+        #expect(conflictedKeeper.keepalive.desired == "ON")
+        #expect(conflictedKeeper.keepalive.state == "ERROR")
 
-        XCTAssertNil(GPURecord(raw: [
+        #expect(GPURecord(raw: [
             "id": "fixture-1:GPU-invalid-public-projection",
             "endpoint_id": "fixture-1",
             "gpu_uuid": "GPU-invalid-public-projection",
@@ -1168,7 +1131,7 @@ final class BrokerStoreTests: XCTestCase {
                 "desired": "ON",
                 "actual": "ERROR"
             ],
-        ]))
+        ]) == nil)
 
         let defensiveSnapshot = BrokerSnapshot(envelope: [
             "data": [
@@ -1184,74 +1147,78 @@ final class BrokerStoreTests: XCTestCase {
                 ]]
             ]
         ])
-        XCTAssertTrue(defensiveSnapshot.leases.isEmpty)
+        #expect(defensiveSnapshot.leases.isEmpty)
     }
 
-    func testKeepaliveProtocolRejectsUnknownPolicyAndState() {
-        XCTAssertNil(EndpointKeepaliveSummary(
+    @Test func testKeepaliveProtocolRejectsUnknownPolicyAndState() {
+        #expect(EndpointKeepaliveSummary(
             raw: ["configured": true, "policy": "unknown", "state": "OFF"],
             fallbackConfigured: true
-        ))
-        XCTAssertNil(EndpointKeepaliveSummary(
+        ) == nil)
+        #expect(EndpointKeepaliveSummary(
             raw: ["configured": true, "policy": "disabled", "state": "UNKNOWN"],
             fallbackConfigured: true
-        ))
-        XCTAssertNil(GPUKeepaliveStatus(
+        ) == nil)
+        #expect(GPUKeepaliveStatus(
             raw: ["policy": "unknown", "state": "OFF"],
             fallbackConfigured: true,
             fallbackState: "OFF"
-        ))
-        XCTAssertNil(GPUKeepaliveStatus(
+        ) == nil)
+        #expect(GPUKeepaliveStatus(
             raw: ["policy": "disabled", "state": "UNKNOWN"],
             fallbackConfigured: true,
             fallbackState: "OFF"
-        ))
-        XCTAssertNil(GPUKeepaliveStatus(
+        ) == nil)
+        #expect(GPUKeepaliveStatus(
             raw: ["policy": "idle_keepalive", "desired": "UNKNOWN", "state": "OFF"],
             fallbackConfigured: true,
             fallbackState: "OFF"
-        ))
+        ) == nil)
     }
 
-    func testStableSelectionFallsBackToFirstAvailableRecord() throws {
+    @Test func testStableSelectionFallsBackToFirstAvailableRecord() throws {
         let snapshot = try Self.snapshot(named: "queued")
 
-        XCTAssertEqual(snapshot.stableEndpointSelection(currentID: "missing"), "fixture-queued")
-        XCTAssertEqual(snapshot.stableEndpointSelection(currentID: "fixture-queued"), "fixture-queued")
-        XCTAssertEqual(
-            snapshot.stableRequestSelection(currentID: "missing"),
-            "request-fixture-queued"
-        )
-        XCTAssertEqual(BrokerSnapshot.empty.stableEndpointSelection(currentID: "missing"), "")
+        #expect(snapshot.stableEndpointSelection(currentID: "missing") == "fixture-queued")
+        #expect(snapshot.stableEndpointSelection(currentID: "fixture-queued") == "fixture-queued")
+        #expect(snapshot.stableRequestSelection(currentID: "missing") == "request-fixture-queued")
+        #expect(BrokerSnapshot.empty.stableEndpointSelection(currentID: "missing") == "")
     }
 
-    func testFixturesResolveInsideDesktopFixturesAndRejectProjectState() throws {
+    @Test func testFixturesResolveInsideDesktopFixturesAndRejectProjectState() throws {
         let fixturesRoot = Self.fixturesRoot
         let projectRoot = fixturesRoot.deletingLastPathComponent().deletingLastPathComponent()
 
         let fixtureURL = try FixtureSnapshots.resolve("64", fixturesRoot: fixturesRoot, projectRoot: projectRoot)
-        XCTAssertEqual(try FixtureSnapshots.load(from: fixtureURL).summary.totalGPUs, 64)
+        #expect(try FixtureSnapshots.load(from: fixtureURL).summary.totalGPUs == 64)
 
         let stateURL = projectRoot.appendingPathComponent("state/live.json").path
-        XCTAssertThrowsError(try FixtureSnapshots.resolve(stateURL, fixturesRoot: fixturesRoot, projectRoot: projectRoot)) { error in
-            XCTAssertEqual(error as? FixtureSnapshotError, .rejectedProductionState(URL(fileURLWithPath: stateURL).standardizedFileURL))
+        let rejected = #expect(throws: FixtureSnapshotError.self) {
+            try FixtureSnapshots.resolve(
+                stateURL,
+                fixturesRoot: fixturesRoot,
+                projectRoot: projectRoot
+            )
         }
+        #expect(
+            rejected == .rejectedProductionState(URL(fileURLWithPath: stateURL).standardizedFileURL)
+        )
     }
 
-    func testEndpointHistoryFixtureIsSeparateFromAllocationSnapshotFixture() throws {
+    @Test func testEndpointHistoryFixtureIsSeparateFromAllocationSnapshotFixture() throws {
         let fixturesRoot = Self.fixturesRoot
         let historyURL = try FixtureSnapshots.resolve("8-history", fixturesRoot: fixturesRoot)
 
         let history = try FixtureSnapshots.loadEndpointTelemetryHistory(from: historyURL)
 
-        XCTAssertEqual(history.endpointID, "fixture-8")
-        XCTAssertEqual(history.range, .oneHour)
-        XCTAssertEqual(history.samples.count, 6)
-        XCTAssertEqual(history.gpuSeries.count, 8)
-        XCTAssertTrue(history.gpuSeries.allSatisfy { $0.samples.count == 6 })
+        #expect(history.endpointID == "fixture-8")
+        #expect(history.range == .oneHour)
+        #expect(history.samples.count == 6)
+        #expect(history.gpuSeries.count == 8)
+        #expect(history.gpuSeries.allSatisfy { $0.samples.count == 6 })
     }
 
-    func testFixtureSymlinkIntoProjectStateIsRejected() throws {
+    @Test func testFixtureSymlinkIntoProjectStateIsRejected() throws {
         let fileManager = FileManager.default
         let projectRoot = fileManager.temporaryDirectory
             .appendingPathComponent("serverpilot-fixture-test-\(UUID().uuidString)", isDirectory: true)
@@ -1266,17 +1233,18 @@ final class BrokerStoreTests: XCTestCase {
         let fixtureSymlink = fixtureRoot.appendingPathComponent("linked.json")
         try fileManager.createSymbolicLink(at: fixtureSymlink, withDestinationURL: stateFixture)
 
-        XCTAssertThrowsError(
-            try FixtureSnapshots.resolve("linked.json", fixturesRoot: fixtureRoot, projectRoot: projectRoot)
-        ) { error in
-            guard
-                let fixtureError = error as? FixtureSnapshotError,
-                case .rejectedProductionState(let rejectedURL) = fixtureError
-            else {
-                return XCTFail("Expected rejectedProductionState, got \(error)")
-            }
-            XCTAssertEqual(rejectedURL, stateFixture.resolvingSymlinksInPath())
+        let linkedError = #expect(throws: FixtureSnapshotError.self) {
+            try FixtureSnapshots.resolve(
+                "linked.json",
+                fixturesRoot: fixtureRoot,
+                projectRoot: projectRoot
+            )
         }
+        guard case .rejectedProductionState(let rejectedURL) = linkedError else {
+            Issue.record("Expected rejectedProductionState, got \(String(describing: linkedError))")
+            return
+        }
+        #expect(rejectedURL == stateFixture.resolvingSymlinksInPath())
     }
 
     private static var fixturesRoot: URL {
@@ -1300,7 +1268,7 @@ final class BrokerStoreTests: XCTestCase {
         let started = DispatchTime.now().uptimeNanoseconds
         while !predicate() {
             if DispatchTime.now().uptimeNanoseconds - started > timeoutNanoseconds {
-                XCTFail("Timed out waiting for condition")
+                Issue.record("Timed out waiting for condition")
                 return
             }
             try await Task.sleep(nanoseconds: 5_000_000)
@@ -1314,11 +1282,37 @@ final class BrokerStoreTests: XCTestCase {
         let started = DispatchTime.now().uptimeNanoseconds
         while !(await predicate()) {
             if DispatchTime.now().uptimeNanoseconds - started > timeoutNanoseconds {
-                XCTFail("Timed out waiting for asynchronous condition")
+                Issue.record("Timed out waiting for asynchronous condition")
                 return
             }
             try await Task.sleep(nanoseconds: 5_000_000)
         }
+    }
+
+    @Test func testLeaseRecordCarriesWhenItLastRanSomething() throws {
+        // Whoever is about to clear an "idle" lease reads this to tell a burst
+        // gap from an ending. A lease that has never run anything decodes to
+        // nil rather than to a fabricated time, so the dialog says so plainly.
+        let ran = try #require(LeaseRecord(raw: [
+            "id": "lease-with-history",
+            "actor_id": "agent-a",
+            "project_id": "project-a",
+            "kind": "workload",
+            "state": "ACTIVE",
+            "gpu_ids": ["fixture-1:GPU-a"],
+            "last_process_observed_at": "2026-07-31T23:59:52Z",
+        ]))
+        #expect(ran.lastProcessObservedAt == "2026-07-31T23:59:52Z")
+
+        let neverRan = try #require(LeaseRecord(raw: [
+            "id": "lease-never-ran",
+            "actor_id": "agent-a",
+            "project_id": "project-a",
+            "kind": "workload",
+            "state": "HELD",
+            "gpu_ids": ["fixture-1:GPU-b"],
+        ]))
+        #expect(neverRan.lastProcessObservedAt == nil)
     }
 }
 

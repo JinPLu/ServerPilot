@@ -251,7 +251,7 @@ def test_fake_collector_never_needs_a_shell(service, inventory) -> None:
         raise AssertionError(f"unexpected command {command}")
 
     collector = SSHCollector(inventory, runner=fake_runner)
-    result = asyncio.run(collector.collect_once(service, concurrency=1))
+    result = asyncio.run(collector.collect_once(service))
     assert result["endpoint-a"]["gpu_count"] == 1
     snapshot = service.snapshot(service.local_actor("human"))["data"]
     assert snapshot["endpoints"][0]["host_telemetry"]["memory_available_mib"] == 196608
@@ -333,7 +333,7 @@ def test_hung_probe_timeout_is_recorded_as_endpoint_failure(
     collector = SSHCollector(inventory)
 
     result = asyncio.run(
-        collector.collect_once(service, endpoints=[inventory.endpoints[0]], concurrency=1)
+        collector.collect_once(service, endpoints=[inventory.endpoints[0]])
     )
     endpoint = service.snapshot(service.local_actor("human"))["data"]["endpoints"][0]
 

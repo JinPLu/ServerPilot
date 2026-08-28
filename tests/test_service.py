@@ -2569,3 +2569,317 @@ def test_idle_reclaim_keeps_a_gpu_whose_process_appears_before_the_window(servic
     marks = service._read(idle_marks)
     assert late_id in marks, "the GPU that started working must stay in the claim"
     assert marks[late_id] is None, "its idle streak must be cleared"
+
+
+def _active_alerts(service) -> set[tuple[str, str]]:  # noqa: ANN001
+    with service.database.session() as session:
+        return {
+            (alert.alert_type, alert.resource_id)
+            for alert in session.scalars(select(Alert).where(Alert.active.is_(True))).all()
+        }
+
+
+def test_alerts_do_not_outlive_the_lease_or_server_they_describe(service, admin) -> None:
+    """An alert about something that no longer exists is noise, not a warning.
+
+    Nothing used to close a released lease's idle warning or a deleted
+    server's collector warning, so the state page filled with warnings about
+    resources that were gone and the real ones stopped standing out.
+    """
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    service.record_provider_failure("endpoint-b", "CollectionError: timed out")
+    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
+
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "alert-lifetime",
+                "purpose": "an idle lease raises a warning",
+                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
+            }
+        ),
+        idempotency_key="alert-lifetime-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+    with service.database.session() as session:
+        service._upsert_alert(
+            session,
+            alert_type="idle_lease",
+            severity="warning",
+            resource_type="lease",
+            resource_id=lease_id,
+            message="idle for over 10 minutes",
+            now=utcnow(),
+        )
+        session.commit()
+    assert ("idle_lease", lease_id) in _active_alerts(service)
+
+    service.release_lease(
+        admin, lease_id, reason="finished", idempotency_key="alert-lifetime-release"
+    )
+    assert ("idle_lease", lease_id) not in _active_alerts(service)
+
+    service.delete_endpoint(admin, "endpoint-b", idempotency_key="alert-lifetime-delete")
+    assert _active_alerts(service) == set()
+
+
+def _present_uuid_owners(service, gpu_uuid: str) -> set[str]:  # noqa: ANN001
+    with service.database.session() as session:
+        return {
+            gpu.endpoint_id
+            for gpu in session.scalars(
+                select(GPUDevice).where(
+                    GPUDevice.gpu_uuid == gpu_uuid, GPUDevice.present.is_(True)
+                )
+            ).all()
+        }
+
+
+def test_one_physical_gpu_belongs_to_exactly_one_endpoint(service, admin) -> None:
+    """Re-registering a machine on a new port must not duplicate its cards.
+
+    A GPU UUID is one physical card. Two endpoint rows for it would let two
+    callers lease the same card, so the endpoint that still sees it keeps it
+    and a second registration stands down until the first goes stale.
+    """
+
+    shared = ["GPU-shared-0"]
+    service.ingest_observation(observation("endpoint-a", gpu_uuids=shared))
+    assert _present_uuid_owners(service, "GPU-shared-0") == {"endpoint-a"}
+
+    # The same container reached through a second registration stands down.
+    service.ingest_observation(observation("endpoint-b", gpu_uuids=shared))
+    assert _present_uuid_owners(service, "GPU-shared-0") == {"endpoint-a"}
+
+    # The incumbent keeps it for as long as it keeps answering.
+    service.ingest_observation(observation("endpoint-a", gpu_uuids=shared))
+    service.ingest_observation(observation("endpoint-b", gpu_uuids=shared))
+    assert _present_uuid_owners(service, "GPU-shared-0") == {"endpoint-a"}
+
+    # Once the old registration stops answering the new one takes over: this is
+    # the restarted-container case, where only the forwarded port changed.
+    with service.database.session() as session:
+        gpu = session.scalar(
+            select(GPUDevice).where(
+                GPUDevice.endpoint_id == "endpoint-a", GPUDevice.gpu_uuid == "GPU-shared-0"
+            )
+        )
+        assert gpu is not None
+        gpu.last_seen_at = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 60
+        )
+        session.commit()
+
+    service.ingest_observation(observation("endpoint-b", gpu_uuids=shared))
+    assert _present_uuid_owners(service, "GPU-shared-0") == {"endpoint-b"}
+
+
+def test_a_card_leased_through_one_endpoint_is_not_allocatable_through_another(
+    service, admin
+) -> None:
+    """The allocator stays fail-closed even before ownership converges."""
+
+    shared = ["GPU-shared-0"]
+    service.ingest_observation(observation("endpoint-a", gpu_uuids=shared))
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "hold-shared-card",
+                "purpose": "hold the only card",
+                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-a"]},
+            }
+        ),
+        idempotency_key="hold-shared-card",
+    )
+    assert claimed["lease"] is not None
+
+    # An incomplete observation never converges ownership, so a duplicate row
+    # can exist; the allocator must still refuse to hand out the same card.
+    service.ingest_observation(
+        observation("endpoint-b", gpu_uuids=shared, observation_complete=False)
+    )
+    with pytest.raises(BrokerError) as error:
+        service.create_request(
+            admin,
+            RequestCreate.model_validate(
+                {
+                    "project_id": "project-b",
+                    "task_ref": "double-claim-shared-card",
+                    "purpose": "must not get the same physical card",
+                    "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
+                }
+            ),
+            idempotency_key="double-claim-shared-card",
+        )
+    assert error.value.code == "no_capacity"
+
+
+def test_registering_the_same_host_twice_is_refused_by_the_domain(service, admin) -> None:
+    """The replay key never deduplicated a registration; two domain rules do.
+
+    gpu_add_server now generates its own key, so a second call carries a
+    different one. What stops a duplicate is the endpoint id derived from
+    host:port, and the address rule behind it — and the caller gets a named
+    409 it can act on, not a silently duplicated server.
+    """
+
+    created = service.create_endpoint(
+        admin,
+        EndpointCreate.model_validate(
+            {
+                "id": "server-10-0-0-8-p22",
+                "host": "10.0.0.8",
+                "port": 22,
+                "ssh_user": "root",
+                "workspace_path": "/srv/work",
+                "owner_project_id": "project-a",
+            }
+        ),
+        idempotency_key="register-once",
+    )
+    assert created["endpoint"]["id"] == "server-10-0-0-8-p22"
+
+    with pytest.raises(BrokerError) as same_id:
+        service.create_endpoint(
+            admin,
+            EndpointCreate.model_validate(
+                {
+                    "id": "server-10-0-0-8-p22",
+                    "host": "10.0.0.8",
+                    "port": 22,
+                    "ssh_user": "root",
+                    "workspace_path": "/srv/work",
+                    "owner_project_id": "project-a",
+                }
+            ),
+            idempotency_key="register-again-different-key",
+        )
+    assert same_id.value.code == "endpoint_exists"
+    assert same_id.value.status_code == 409
+
+    with pytest.raises(BrokerError) as same_address:
+        service.create_endpoint(
+            admin,
+            EndpointCreate.model_validate(
+                {
+                    "id": "server-renamed",
+                    "host": "10.0.0.8",
+                    "port": 22,
+                    "ssh_user": "root",
+                    "workspace_path": "/srv/work",
+                    "owner_project_id": "project-a",
+                }
+            ),
+            idempotency_key="register-under-a-new-id",
+        )
+    assert same_address.value.code == "endpoint_address_exists"
+    assert same_address.value.status_code == 409
+
+
+def _make_unreachable(service, endpoint_id: str) -> None:  # noqa: ANN001
+    """Stop the endpoint answering, the way a withdrawn container does."""
+    from serverpilot.models import ProviderState
+
+    service.record_provider_failure(endpoint_id, "TimeoutError: SSH observation timed out")
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == endpoint_id)
+        )
+        assert state is not None
+        state.last_success_at = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 600
+        )
+        session.commit()
+
+
+def test_a_server_that_stopped_answering_can_still_be_cleared_and_deleted(service, admin) -> None:
+    """Otherwise a withdrawn container wedges its cards permanently.
+
+    Every recovery path asks the machine for proof. When the machine is gone
+    the proof can never arrive: the cards cannot be shown free, so the lease
+    cannot be released, so the endpoint cannot be deleted. Holding the ledger
+    protects nothing — ServerPilot cannot reach those processes either.
+    """
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "stranded",
+                "purpose": "the host disappears under it",
+                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
+            }
+        ),
+        idempotency_key="stranded-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+
+    # While the host answers, the proof is still required.
+    with pytest.raises(BrokerError) as still_live:
+        service.release_empty_conflicted_lease(
+            admin,
+            "endpoint-b",
+            lease_id,
+            observation_not_before=utcnow(),
+            idempotency_key="clear-while-live",
+        )
+    assert still_live.value.code == "conflict_observation_stale"
+
+    _make_unreachable(service, "endpoint-b")
+
+    released = service.release_empty_conflicted_lease(
+        admin,
+        "endpoint-b",
+        lease_id,
+        observation_not_before=utcnow(),
+        idempotency_key="clear-when-gone",
+    )
+    assert released["lease"]["state"] == "RELEASED"
+    # The reason states what happened; it must not claim the cards were seen empty.
+    assert released["lease"]["release_reason"] == "server unreachable; operator settled the ledger"
+
+    deleted = service.delete_endpoint(admin, "endpoint-b", idempotency_key="delete-when-gone")
+    assert deleted["changed"] is True
+    assert "endpoint-b" not in {e["id"] for e in service.list_endpoints(admin)["data"]}
+
+
+def test_deleting_an_unreachable_server_settles_the_leases_it_still_holds(service, admin) -> None:
+    """The delete is the operator saying the machine is gone; nothing may dangle."""
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "still-held",
+                "purpose": "never released by hand",
+                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
+            }
+        ),
+        idempotency_key="still-held-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+
+    # A reachable host still refuses, so a live server cannot be deleted out
+    # from under a running job.
+    with pytest.raises(BrokerError) as live:
+        service.delete_endpoint(admin, "endpoint-b", idempotency_key="delete-while-live")
+    assert live.value.code == "endpoint_has_active_leases"
+
+    _make_unreachable(service, "endpoint-b")
+
+    deleted = service.delete_endpoint(admin, "endpoint-b", idempotency_key="delete-gone")
+    assert deleted["settled_lease_ids"] == [lease_id]
+    with service.database.session() as session:
+        settled = session.get(Lease, lease_id)
+        assert settled is not None
+        assert settled.state == "RELEASED"
+        assert settled.release_reason == "server deleted while unreachable"

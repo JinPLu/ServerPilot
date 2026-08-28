@@ -26,7 +26,21 @@ target_triple="${target_arch}-apple-macosx${deployment_target}"
 
 if [[ "${1:-}" == "test" ]]; then
   cd "${core_dir}"
-  swift test
+  # The tests use swift-testing, not XCTest, so they need no Xcode: the Command
+  # Line Tools ship Testing.framework and its interop library, just not on the
+  # default search paths. Passing them here is what lets a machine with only
+  # the Command Line Tools run the desktop suite at all.
+  developer_frameworks="$(xcode-select -p)/Library/Developer/Frameworks"
+  developer_lib="$(xcode-select -p)/Library/Developer/usr/lib"
+  if [[ -d "${developer_frameworks}" ]]; then
+    swift test \
+      -Xswiftc -F"${developer_frameworks}" \
+      -Xlinker -F"${developer_frameworks}" \
+      -Xlinker -rpath -Xlinker "${developer_frameworks}" \
+      -Xlinker -rpath -Xlinker "${developer_lib}"
+  else
+    swift test
+  fi
   exit 0
 fi
 

@@ -63,7 +63,8 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
    这里的读数与 GUI 来自 daemon 同一份 REST 快照，不会另行 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影，不受本路径约束。首次只读采集还会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；确认是纯 CPU 的 endpoint 会在 `cpu_only_servers` 中返回服务器标识、在线状态、CPU 数和可用内存，但仅供说明，永不参与 GPU 分配。插件接入的集群（Slurm / LSF 等）**没有**平行的 `scheduler_servers` 顶层桶：登录节点以和裸机相同的 `{server_id, workspace_path, workspace, ssh, gpus[]}` 形状出现在所属 `server_groups[]` 里，组名和共享工作目录不会丢。未知的 `total_count` 会省略而不是填 `null`，该登录节点也不会同时出现在 `cpu_only_servers`。每个分组另带三个字段：
 
    - `allocation`：`direct`（本机逐卡分配）或 `delegated`（交给该组声明了 `apply` 的插件）。
-   - `limits`：组级上限，形状对两种分配相同。键为 `max_gpus_per_lease`、`max_lease_seconds`、`lease_ends`、`cpu_cores_per_gpu`、`memory_mib_per_gpu`、`apply_max_seconds`、`queues`。裸机组从本机卡数推导，`lease_ends` 为 `on_release`；委托组来自插件 `info.limits`，并可用采集里的 `scheduler` 容量补 `max_gpus_per_lease` / 每卡 CPU / 每卡内存。
+   - `limits`：组级上限，形状对两种分配相同。键为 `max_gpus_per_lease`、`max_lease_seconds`、`lease_ends`、`cpu_cores_per_gpu`、`memory_mib_per_gpu`、`apply_max_seconds`、`queues`。裸机组从本机卡数推导，`lease_ends` 为 `on_release`，`apply_max_seconds` 由一次直连申请实际花掉的超时推导（停一台主机再采集一次）；委托组来自插件 `info.limits`，并可用采集里的 `scheduler` 容量补 `max_gpus_per_lease` / 每卡 CPU / 每卡内存。`apply_max_seconds` 是**服务端这次申请最多花多久**，两类分组含义相同：调用方据此决定等多久，不要按 `gpu_count` 估算——服务端的成本与卡数无关。
+   - 租约遥测（`gpu_status(lease_id=…)`）只覆盖**你自己持有这张卡期间**的样本：窗口下界是本次租约的签发时刻，所以刚拿到手时 `recent_average` 与 `telemetry_window` 都是 `null`，那是正常状态而不是错误——此时读 `current` 拿这一刻的读数。不夹紧的那份仍描述这张卡本身，供 App 使用。
    - `largest_allocatable_block`：**一次 `gpu_apply` 能拿到的最大卡数**，不是池子里还剩多少张。裸机组取组内单台机器上当前可申请卡数的最大值（一份租约只落一台主机）。委托组取插件报告的 `largest_free_block`，否则在已知时取 `min(free_gpu_count, max_gpus_per_lease)`。一个跨节点还剩 27 张卡的分区，若作业必须落在单节点，很可能一张 8 卡都开不出来。未知时该字段为 `null`——此时不要向用户或 Agent 编造数字；`0` 表示组里真的一张都申请不到。
 
    `workspace` 固定表达「远端工作目录」语义：`{path, kind=working_directory, use_as_cwd=true, code_location=not_provided}`。没有 GPU 时返回「无 GPU」；有 GPU 但一张都申请不到时返回 `no_capacity`。
@@ -84,7 +85,7 @@ ServerPilot 只协调 GPU。申请成功后直接 SSH 上去跑工作负载是�
 
 ## 边界
 
-- 服务器登记走 `gpu_add_server` / `gpu_update_server`；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。
+- 服务器登记走 `gpu_add_server`（必填 `project_id`、`host`、`workspace_path`）/ `gpu_update_server`（必填 `server_id`，其余安全元数据至少给一项）；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。两者的重放键由工具自己生成，调用方不传；重复登记同一台机器由 `endpoint_exists` / `endpoint_address_exists` 两条 409 挡住，拿到它们就改用 `gpu_update_server`。
 - App 负责人工查看和纠错；默认 Agent 路径不需要额外生命周期步骤。
 - ServerPilot 返回 SSH 连接参数但不提供密码、私钥或 shell；它复用当前用户已有凭据，也不代替项目自己的远端执行授权。
 
