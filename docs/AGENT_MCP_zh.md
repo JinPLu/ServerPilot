@@ -47,7 +47,7 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 
 daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgent；daemon 不兼容或未就绪时，调用会明确失败，不会创建备用数据库，也不会改走 SSH。
 
-`serverpilot-mcp` 只暴露五个工具：`gpu_status`、`gpu_apply`、`gpu_release`、`gpu_add_server`、`gpu_update_server`。这就是全部 MCP 表面。`gpu_add_server` 的 `observation_profile` 直接写在参数 schema 里，接受内置 `linux-nvidia`、`linux-host`、`server-script-v1`，或本机已发现的插件 ID。默认配置不需要 `enabled_tools` 白名单。服务器删除和其他生命周期操作走 App 或 REST。
+`serverpilot-mcp` 只暴露五个工具：`gpu_status`、`gpu_apply`、`gpu_release`、`gpu_add_server`、`gpu_update_server`。这就是全部 MCP 表面。`gpu_add_server` 的 `observation_profile` 直接写在参数 schema 里，接受内置 `linux-nvidia`（默认，装了 NVIDIA 卡的普通机器）、`linux-host`（纯 CPU 节点）、`server-script-v1`（仅限远端已带 ServerPilot 采集脚本的主机），或本机已发现的插件 ID；选错会登记出一台连得上却读不到卡的服务器。默认配置不需要 `enabled_tools` 白名单。服务器删除和其他生命周期操作走 App 或 REST。
 
 ## 日常 GPU 路径
 
@@ -85,7 +85,7 @@ ServerPilot 只协调 GPU。申请成功后直接 SSH 上去跑工作负载是�
 
 ## 边界
 
-- 服务器登记走 `gpu_add_server`（必填 `project_id`、`host`、`workspace_path`）/ `gpu_update_server`（必填 `server_id`，其余安全元数据至少给一项）；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。两者的重放键由工具自己生成，调用方不传；重复登记同一台机器由 `endpoint_exists` / `endpoint_address_exists` 两条 409 挡住，拿到它们就改用 `gpu_update_server`。
+- 服务器登记走 `gpu_add_server`（必填 `project_id`、`host`、`workspace_path`；分组主机同时给 `server_group_id`，不给就是未分组，`gpu_apply(server_group_id=...)` 永远选不到它）/ `gpu_update_server`（必填 `server_id`，其余安全元数据至少给一项）；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。登记会当场观测一次并在返回体的 `observation` 里给出结果（`observed` / `gpu_count` / `error`）：`observed=false` 说明记录建好了但机器没连上，原因在 `error` 里（例如 host key 未知），修好后下一轮采集自己接上，不要重复登记。两者的重放键由工具自己生成，调用方不传；重复登记同一台机器由 `endpoint_exists` / `endpoint_address_exists` 两条 409 挡住，拿到它们就改用 `gpu_update_server`。
 - App 负责人工查看和纠错；默认 Agent 路径不需要额外生命周期步骤。
 - ServerPilot 返回 SSH 连接参数但不提供密码、私钥或 shell；它复用当前用户已有凭据，也不代替项目自己的远端执行授权。
 

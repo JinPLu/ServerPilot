@@ -921,6 +921,47 @@ class BrokerService:
 
         return self._read(operation)
 
+    def endpoint_reachability(self, endpoint_id: str) -> dict[str, Any]:
+        """Report whether this endpoint has ever been observed, and what failed.
+
+        Registering a host and reaching one are different events, and until
+        now only the first had an answer. A registration whose SSH never
+        succeeds -- an unknown host key, a withdrawn port, the wrong profile --
+        was accepted, reported as created, and then sat as a red row nobody
+        was told about. This is the second event, read from what collection
+        already records.
+        """
+
+        def operation(session: Session) -> dict[str, Any]:
+            if session.get(Endpoint, endpoint_id) is None:
+                raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
+            state = session.scalar(
+                select(ProviderState).where(
+                    ProviderState.provider == "raw-ssh",
+                    ProviderState.endpoint_id == endpoint_id,
+                )
+            )
+            observed_at = _as_utc(state.last_success_at) if state is not None else None
+            gpu_count = (
+                session.scalar(
+                    select(func.count())
+                    .select_from(GPUDevice)
+                    .where(
+                        GPUDevice.endpoint_id == endpoint_id,
+                        GPUDevice.present.is_(True),
+                    )
+                )
+                or 0
+            )
+            return {
+                "observed": observed_at is not None,
+                "observed_at": _iso(observed_at),
+                "gpu_count": gpu_count,
+                "error": state.last_error if state is not None else None,
+            }
+
+        return self._read(operation)
+
     def _write(self, operation: Callable[[Session], T]) -> T:
         """Execute one serialized SQLite write."""
 

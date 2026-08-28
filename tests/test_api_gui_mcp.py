@@ -595,7 +595,7 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
     )
     assert created.status_code == 200
     assert created.json()["endpoint"]["lifecycle_state"] == "active"
-    assert created.json()["endpoint"]["observation_profile"] == "server-script-v1"
+    assert created.json()["endpoint"]["observation_profile"] == "linux-nvidia"
     assert created.json()["endpoint"]["workspace_path"] == "/srv/endpoint-lifecycle"
     duplicate = client.post(
         "/api/v1/endpoints",
@@ -718,13 +718,25 @@ def test_mcp_exposes_required_tools() -> None:
         "pass lease_id for per-card telemetry on cards you hold."
     )
     add_schema = by_name["gpu_add_server"].inputSchema
-    assert add_schema["properties"]["observation_profile"]["default"] == "server-script-v1"
+    # A server registered without saying what it is is a GPU host. The old
+    # default named the one profile that cannot work on a plain NVIDIA box --
+    # the host-carries-its-own-script contract -- so a caller that omitted the
+    # field registered a machine that connects and reports no GPUs.
+    assert add_schema["properties"]["observation_profile"]["default"] == "linux-nvidia"
     add_profile = add_schema["properties"]["observation_profile"]["description"]
     assert "linux-nvidia" in add_profile
     assert "linux-host" in add_profile
     assert "server-script-v1" in add_profile
     assert "plugin" in add_profile.lower()
-    assert "linux-nvidia" in by_name["gpu_add_server"].description
+    # Both tools must be able to place a host in a group. The domain and REST
+    # have carried server_group_id since grouping existed; MCP exposed it on
+    # neither tool, so a server registered by an agent could never be selected
+    # by gpu_apply(server_group_id=...) -- the tool could create a server, but
+    # never a usable one.
+    for tool_name in ("gpu_add_server", "gpu_update_server"):
+        group_property = by_name[tool_name].inputSchema["properties"]["server_group_id"]
+        assert "gpu_apply" in group_property["description"], tool_name
+    assert "server_group_id" in by_name["gpu_add_server"].description
     # The two administration tools must be callable exactly as the instructions
     # describe them. They used to demand agent_name / approval_ref /
     # idempotency_key, none of which the instructions teach — and two of which
@@ -803,7 +815,8 @@ def test_mcp_endpoint_administration_uses_rest_with_its_own_replay_key(monkeypat
             "ssh_user": "root",
             "ssh_alias": None,
             "workspace_path": "/srv/server-a",
-            "observation_profile": "server-script-v1",
+            "server_group_id": None,
+            "observation_profile": "linux-nvidia",
             "labels": [],
             "storage_group": None,
             "expected_gpu_count": None,
@@ -1742,3 +1755,120 @@ def test_routine_projections_do_not_repeat_server_facts_per_gpu() -> None:
             assert server_fact not in row
     allocation_size = len(json.dumps(allocation, ensure_ascii=False))
     assert allocation_size < 1_600, allocation_size
+
+
+class _RegistrationCollector:
+    """Stand in for the one collection a registration now performs."""
+
+    def __init__(self, *, error: str | None) -> None:
+        self.error = error
+        self.collected: list[list[str]] = []
+
+    async def collect_once(
+        self,
+        service,  # noqa: ANN001
+        *,
+        endpoints=None,  # noqa: ANN001
+        stagger_seconds: float = 0.0,
+    ) -> dict[str, object]:
+        self.collected.append([endpoint.id for endpoint in endpoints or []])
+        for endpoint in endpoints or []:
+            if self.error is None:
+                await service.in_domain(
+                    service.ingest_observation, observation(endpoint.id, count=2)
+                )
+            else:
+                await service.in_domain(
+                    service.record_provider_failure, endpoint.id, self.error
+                )
+        return {}
+
+
+def _register(client: TestClient, server_id: str, **extra: object):  # noqa: ANN201
+    body = {
+        "id": server_id,
+        "host": "10.0.0.9",
+        "port": 7770,
+        "ssh_user": "root",
+        "workspace_path": "/srv/new-server",
+        **extra,
+    }
+    return client.post(
+        "/api/v1/endpoints",
+        json=body,
+        headers={"X-ServerPilot-Actor": "operator", "Idempotency-Key": f"create-{server_id}"},
+    )
+
+
+def test_registering_a_host_reports_that_it_could_not_be_reached(build_app, inventory) -> None:
+    # A registration used to answer "created" without ever having connected,
+    # so a host whose SSH can never succeed -- an unknown host key, a withdrawn
+    # port -- was reported as a new server and then sat as a red row nobody was
+    # told about. The answer now carries the observed result.
+    configured = inventory.model_copy(deep=True)
+    configured.collector.enabled = False
+    collector = _RegistrationCollector(
+        error="CollectionError: Host key verification failed."
+    )
+    app = build_app("register-unreachable", inventory_config=configured, collector=collector)
+    client = TestClient(app)
+
+    created = _register(client, "server-unreachable")
+
+    assert created.status_code == 200
+    # Exactly the new endpoint is observed, not every host in the inventory.
+    assert collector.collected == [["server-unreachable"]]
+    result = created.json()["observation"]
+    assert result["observed"] is False
+    assert result["gpu_count"] == 0
+    assert "Host key verification failed" in result["error"]
+    # The endpoint is kept: a host key is the operator's to fix, and the next
+    # cycle picks the machine up with no second registration.
+    listed = client.get("/api/v1/endpoints", headers={"X-ServerPilot-Actor": "operator"})
+    assert "server-unreachable" in {item["id"] for item in listed.json()["data"]}
+
+
+def test_registering_a_reachable_host_reports_the_gpus_it_found(build_app, inventory) -> None:
+    configured = inventory.model_copy(deep=True)
+    configured.collector.enabled = False
+    collector = _RegistrationCollector(error=None)
+    app = build_app("register-reachable", inventory_config=configured, collector=collector)
+    client = TestClient(app)
+
+    created = _register(client, "server-reachable")
+
+    assert created.status_code == 200
+    result = created.json()["observation"]
+    assert result["observed"] is True
+    assert result["observed_at"] is not None
+    assert result["gpu_count"] == 2
+    assert result["error"] is None
+
+
+def test_a_registered_host_can_join_a_group_without_the_desktop_app(build_app, inventory) -> None:
+    # The domain and REST have always carried server_group_id; an ungrouped
+    # host is one no grouped gpu_apply can select, so a registration that
+    # cannot name a group cannot produce a usable server.
+    configured = inventory.model_copy(deep=True)
+    configured.collector.enabled = False
+    app = build_app(
+        "register-grouped",
+        inventory_config=configured,
+        collector=_RegistrationCollector(error=None),
+    )
+    client = TestClient(app)
+    actor = {"X-ServerPilot-Actor": "operator"}
+    client.post(
+        "/api/v1/server-groups",
+        json={
+            "id": "baidu-baige",
+            "display_name": "Baidu Baige",
+            "workspace_path": "/srv/baige",
+        },
+        headers={**actor, "Idempotency-Key": "group-create"},
+    )
+
+    created = _register(client, "server-grouped", server_group_id="baidu-baige")
+
+    assert created.status_code == 200
+    assert created.json()["endpoint"]["server_group_id"] == "baidu-baige"

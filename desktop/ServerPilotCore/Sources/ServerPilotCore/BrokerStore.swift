@@ -559,11 +559,54 @@ public final class BrokerStore: ObservableObject {
             completion(false, message)
             return
         }
-        performMutation(
+        // Registration observes the host once before it answers, so the
+        // outcome is known here rather than "正在确认状态" and a red row a
+        // minute later.
+        performMutationWithPayload(
             path: "api/v1/endpoints",
-            payload: Self.endpointCreatePayload(draft),
-            successMessage: "已添加服务器 \(draft.id)，正在确认状态。",
-            completion: completion
+            payload: Self.endpointCreatePayload(draft)
+        ) { [weak self] payload, error in
+            guard let self else { return }
+            if let error {
+                completion(false, error)
+                return
+            }
+            let outcome = Self.registrationOutcome(id: draft.id, payload: payload)
+            self.notice = outcome.message
+            self.errorMessage = outcome.reachable ? nil : outcome.message
+            self.reload()
+            completion(true, nil)
+        }
+    }
+
+    struct RegistrationOutcome {
+        let reachable: Bool
+        let message: String
+    }
+
+    static func registrationOutcome(id: String, payload: [String: Any]?) -> RegistrationOutcome {
+        let observation = payload?["observation"] as? [String: Any]
+        guard let observation else {
+            return RegistrationOutcome(reachable: true, message: "已添加服务器 \(id)，正在确认状态。")
+        }
+        let observed = observation["observed"] as? Bool ?? false
+        let gpuCount = observation["gpu_count"] as? Int ?? 0
+        if !observed {
+            let reason = (observation["error"] as? String) ?? "未收到采集结果"
+            return RegistrationOutcome(
+                reachable: false,
+                message: "已添加服务器 \(id)，但还没有连上：\(reason)"
+            )
+        }
+        if gpuCount == 0 {
+            return RegistrationOutcome(
+                reachable: true,
+                message: "已添加服务器 \(id)，已连上但没有发现 GPU，请确认观测方式是否选对。"
+            )
+        }
+        return RegistrationOutcome(
+            reachable: true,
+            message: "已添加服务器 \(id)，已连上并发现 \(gpuCount) 张 GPU。"
         )
     }
 
@@ -1322,6 +1365,13 @@ public final class BrokerStore: ObservableObject {
         }
     }
 
+    /// Registering a host waits out the one collection it performs; every
+    /// other mutation is a local database write. Keyed by path, the same way
+    /// the Python client budgets this call.
+    static func mutationTimeout(forPath path: String) -> TimeInterval {
+        path == "api/v1/endpoints" ? 60 : 10
+    }
+
     private func performMutationWithPayload(
         path: String,
         method: String = "POST",
@@ -1350,7 +1400,7 @@ public final class BrokerStore: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = method
         request.httpBody = body
-        request.timeoutInterval = 10
+        request.timeoutInterval = Self.mutationTimeout(forPath: path)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
         request.setValue(UUID().uuidString, forHTTPHeaderField: "Idempotency-Key")

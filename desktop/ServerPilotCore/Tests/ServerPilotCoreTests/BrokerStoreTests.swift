@@ -1549,3 +1549,53 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         statusCode = 200
     }
 }
+
+@MainActor
+@Suite struct RegistrationOutcomeTests {
+    @Test func testReachableHostReportsTheGPUsItFound() {
+        let outcome = BrokerStore.registrationOutcome(
+            id: "server-a",
+            payload: ["observation": ["observed": true, "gpu_count": 8, "error": NSNull()]]
+        )
+
+        #expect(outcome.reachable)
+        #expect(outcome.message.contains("8"))
+    }
+
+    @Test func testUnreachableHostReportsWhyItDidNotConnect() {
+        // The registration succeeded and the row exists; what the operator has
+        // to be told is that the machine never answered, and what said so.
+        let outcome = BrokerStore.registrationOutcome(
+            id: "server-b",
+            payload: [
+                "observation": [
+                    "observed": false,
+                    "gpu_count": 0,
+                    "error": "CollectionError: Host key verification failed.",
+                ]
+            ]
+        )
+
+        #expect(!outcome.reachable)
+        #expect(outcome.message.contains("Host key verification failed"))
+    }
+
+    @Test func testConnectedHostWithoutGPUsPointsAtTheObservationProfile() {
+        let outcome = BrokerStore.registrationOutcome(
+            id: "server-c",
+            payload: ["observation": ["observed": true, "gpu_count": 0]]
+        )
+
+        #expect(outcome.reachable)
+        #expect(outcome.message.contains("观测方式"))
+    }
+
+    @Test func testRegistrationOutlastsTheCollectionItWaitsFor() {
+        // Registration observes the host before answering; a plain mutation is
+        // a local write. The app used to give every mutation ten seconds, so
+        // adding a server would have timed out while the control plane was
+        // still connecting to it.
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v1/endpoints") > 45)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v1/endpoints/server-a") == 10)
+    }
+}

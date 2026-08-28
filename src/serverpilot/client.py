@@ -20,7 +20,20 @@ CONTROL_PLANE_READ_TIMEOUT_SECONDS = 20.0
 # `adapters.direct_claim_budget_seconds` the direct side, and
 # `tests/test_client.py` keeps this value above both.
 CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS = 200.0
-_CONTROL_PLANE_CLAIM_PATHS = frozenset({"/api/v1/claims", "/api/v1/routine/claims"})
+# Registering a host observes it once before answering, so the same rule
+# applies: the caller waits out what that collection can cost the server --
+# `plugins.PLUGIN_OBSERVE_TIMEOUT_SECONDS` for a delegated cluster, one SSH
+# connect timeout for a direct host -- rather than the plain read budget,
+# which a slow cluster would exceed while the endpoint was already created.
+CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS = 60.0
+# One table, so a path that costs more than a read says so in one place. The
+# budget is a ceiling on waiting, not a wait: a healthy loopback call returns
+# in milliseconds whichever entry it matches.
+_CONTROL_PLANE_PATH_TIMEOUTS = {
+    "/api/v1/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+    "/api/v1/routine/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+    "/api/v1/endpoints": CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS,
+}
 
 
 def control_plane_request_timeout(
@@ -30,13 +43,11 @@ def control_plane_request_timeout(
     timeout: float | None = None,
     default: float = CONTROL_PLANE_READ_TIMEOUT_SECONDS,
 ) -> float:
-    """Read calls keep the default; a claim waits out the server's own budget."""
+    """Read calls keep the default; a longer path waits out the server's budget."""
 
     if timeout is not None:
         return timeout
-    if path in _CONTROL_PLANE_CLAIM_PATHS:
-        return CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
-    return default
+    return _CONTROL_PLANE_PATH_TIMEOUTS.get(path, default)
 
 
 def control_plane_http_request(method: str, url: str, **kwargs: Any) -> httpx.Response:

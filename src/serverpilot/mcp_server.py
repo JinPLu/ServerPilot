@@ -1161,8 +1161,18 @@ async def gpu_release(
 
 
 OBSERVATION_PROFILE_DESCRIPTION = (
-    "Built-in observation profiles: linux-nvidia, linux-host, server-script-v1. "
-    "A locally discovered plugin ID is also accepted."
+    "How this host is observed. linux-nvidia: an ordinary machine with NVIDIA "
+    "GPUs -- the default, and the answer for almost every server. linux-host: "
+    "a CPU-only node. server-script-v1: only for a host that already carries "
+    "ServerPilot's own collection script. A locally discovered plugin ID names "
+    "a delegated cluster. The wrong profile registers a server that connects "
+    "but reports no GPUs."
+)
+
+SERVER_GROUP_DESCRIPTION = (
+    "The server group this host joins, from gpu_status. A grouped host is what "
+    "gpu_apply(server_group_id=...) can reach; left out, the server is "
+    "registered ungrouped and no grouped apply will ever select it."
 )
 
 
@@ -1182,17 +1192,21 @@ async def gpu_add_server(
     ssh_user: str = "root",
     server_id: str | None = None,
     ssh_alias: str | None = None,
+    server_group_id: Annotated[
+        str | None,
+        Field(description=SERVER_GROUP_DESCRIPTION),
+    ] = None,
     observation_profile: Annotated[
         str,
         Field(description=OBSERVATION_PROFILE_DESCRIPTION),
-    ] = "server-script-v1",
+    ] = "linux-nvidia",
     labels: list[str] | None = None,
     storage_group: str | None = None,
     expected_gpu_count: int | None = None,
     expected_gpu_total_vram_mib: int | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Create a shared endpoint after explicit current-task human approval; observation_profile accepts linux-nvidia, linux-host, server-script-v1, or a local plugin ID."""
+    """Register a host after explicit current-task human approval, then observe it once and report what came back. Pass server_group_id to put it in a group; an ungrouped host is unreachable by a grouped gpu_apply."""
 
     if not project_id.strip():
         raise ValueError("project_id must not be empty")
@@ -1214,6 +1228,7 @@ async def gpu_add_server(
             "ssh_user": ssh_user,
             "ssh_alias": ssh_alias,
             "workspace_path": workspace_path,
+            "server_group_id": server_group_id,
             "observation_profile": observation_profile,
             "labels": labels or [],
             "storage_group": storage_group,
@@ -1238,6 +1253,10 @@ async def gpu_update_server(
     ssh_user: str | None = None,
     ssh_alias: str | None = None,
     workspace_path: str | None = None,
+    server_group_id: Annotated[
+        str | None,
+        Field(description=SERVER_GROUP_DESCRIPTION),
+    ] = None,
     observation_profile: Annotated[
         str | None,
         Field(description=OBSERVATION_PROFILE_DESCRIPTION),
@@ -1257,6 +1276,7 @@ async def gpu_update_server(
             "ssh_user": ssh_user,
             "ssh_alias": ssh_alias,
             "workspace_path": workspace_path,
+            "server_group_id": server_group_id,
             "observation_profile": observation_profile,
             "labels": labels,
             "storage_group": storage_group,

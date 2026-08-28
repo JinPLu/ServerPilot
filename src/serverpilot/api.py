@@ -1581,16 +1581,35 @@ def create_app(
         )
 
     @app.post("/api/v1/endpoints")
-    def create_endpoint(
+    async def create_endpoint(
         endpoint_data: EndpointCreate,
         actor: ApiActor,
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
-        return service.create_endpoint(
+        """Register one endpoint, then observe it once and report the result.
+
+        A host that is registered but has never answered is not a usable
+        server, and nothing used to say so: the record appeared, the answer
+        said created, and the failure surfaced minutes later as a red row in
+        the app that the caller had already stopped looking at. The collection
+        that would have run anyway is run here, so "registered" arrives as an
+        observed fact instead of a promise.
+
+        The endpoint is kept either way. It is the operator's record of a
+        machine they mean to use, a host key or a port is theirs to fix, and
+        the next cycle picks it up with no second registration.
+        """
+
+        created = await service.in_domain(
+            service.create_endpoint,
             actor,
             endpoint_data,
             idempotency_key=_idempotency_key(idempotency_key),
         )
+        endpoint = await service.in_domain(service.collector_endpoint, endpoint_data.id)
+        await shared_collector.collect_once(service, endpoints=[endpoint])
+        observation = await service.in_domain(service.endpoint_reachability, endpoint_data.id)
+        return {**created, "observation": observation}
 
     @app.post("/api/v1/server-groups")
     def create_server_group(

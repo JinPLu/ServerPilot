@@ -217,6 +217,25 @@ def test_claim_timeout_outlasts_every_budget_the_server_can_spend() -> None:
             )
 
 
+def test_registration_timeout_outlasts_the_collection_it_waits_for() -> None:
+    """Registering a host observes it once before answering.
+
+    The plain read budget would expire on a delegated cluster while the
+    endpoint had already been created, leaving the caller with a timeout and
+    no way to learn whether the machine answered.
+    """
+
+    from serverpilot.client import CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS
+    from serverpilot.plugins import PLUGIN_OBSERVE_TIMEOUT_SECONDS
+
+    assert CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS > PLUGIN_OBSERVE_TIMEOUT_SECONDS
+    assert CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS > CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    assert (
+        control_plane_request_timeout("/api/v1/endpoints")
+        == CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS
+    )
+
+
 def test_broker_client_claim_uses_the_claim_timeout(monkeypatch) -> None:  # type: ignore[no-untyped-def]
     calls = []
 

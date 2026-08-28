@@ -316,7 +316,12 @@ class EndpointCreate(StrictModel):
     ssh_alias: str | None = Field(default=None, min_length=1, max_length=120)
     workspace_path: str | None = Field(default=None, min_length=1, max_length=2000)
     workspace_path_override: str | None = Field(default=None, min_length=1, max_length=2000)
-    observation_profile: str = Field(default="server-script-v1", min_length=1, max_length=40)
+    # One default, shared with ``EndpointConfig``. The two disagreed: YAML
+    # seeded ``linux-nvidia`` while every REST and MCP caller that omitted the
+    # field got ``server-script-v1`` -- the profile for a host that carries its
+    # own collection script, and the one answer that cannot work on a plain
+    # NVIDIA box. A server registered without saying what it is is a GPU host.
+    observation_profile: str = Field(default="linux-nvidia", min_length=1, max_length=40)
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     keepalive_policy: KeepalivePolicy = "disabled"
     labels: list[str] = Field(default_factory=list)

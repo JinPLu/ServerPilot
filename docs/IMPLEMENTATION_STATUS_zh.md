@@ -86,6 +86,25 @@ Python 全量测试 `616 passed`，Ruff 通过。未改数据库 schema，无新
 
 第三轮实机复验（现网控制面）：p4725 的 8 笔遗留占卡租约全部结算、endpoint 删除，账本从 26 张卡收敛到真实存在的 18 张，指向 p4725 的残留 GPU 行为 0，孤儿告警随之消失。Python 全量测试 `618 passed`，Ruff 通过；`zsh desktop/build-macos-app.sh test` 报告 `62 tests in 2 suites passed`。未改数据库 schema，无新迁移。
 
+
+第四轮（登记一台服务器为什么造不出能用的机器）：
+
+起因是一条现网记录：另一个 Agent 线程登记的 `server-10-40-1-28-p7770` 在 App 里是红的，`observation_profile=server-script-v1`、`server_group_id=null`、`keepalive_policy=disabled`，`ProviderState.last_success_at` 为 `null`（`Host key verification failed`，`known_hosts` 里没有 `[10.40.1.28]:7770`）。对照 `EndpointCreate` 与 MCP 工具签名后确认：**四个字段里有三个不是调用方选的。**
+
+- **`server_group_id` 在 MCP 上根本不存在。** `EndpointCreate` 与 `EndpointUpdate` 一直带这个字段，`gpu_add_server` / `gpu_update_server` 两个工具都不暴露它。分组决定这台机器能否被 `gpu_apply(server_group_id=...)` 选中，所以经 MCP 登记的服务器**必然**是不可分配的；补齐前 Agent 无论怎么调都造不出一台能用的机器。两个工具现在都接受它。
+- **`observation_profile` 的默认值本身是错的，而且有两个。** `config.py:EndpointConfig` 默认 `linux-nvidia`，`schemas.py:EndpointCreate` 默认 `server-script-v1` —— 同一字段两个默认值，取决于从 YAML 还是 REST/MCP 进来。后者指向「远端自带采集脚本」这个最特殊的契约，用在裸机上连得上却读不到卡。统一为 `linux-nvidia`；profile 的选择说明从平铺枚举改为「哪种机器选哪个」，放在参数 `Field(description=...)` 上而不是全局 instructions（后者每轮都要付费，且 2400 字符上限未动）。
+- **`keepalive_policy` 刻意不暴露。** 它必须与 `keepalive_adapter_id` 成对设置（现网四台 keepalive 主机是 `policy=idle_keepalive` + `adapter=server-script-v1`，而它们的 `observation_profile` 是 `linux-nvidia`，两者不可互相推导）。把两个耦合字段交给 Agent 正是本轮缺陷的形状；keepalive 仍是人在 App 上设的策略，不影响 apply/release。
+
+**登记即验证。** `POST /api/v1/endpoints` 改为 `async`，创建后对该 endpoint 做一次采集，再返回新增的只读 `observation`（`observed` / `observed_at` / `gpu_count` / `error`，由 `service.endpoint_reachability` 从既有 `ProviderState` 与 `GPUDevice` 派生，无新列、无新迁移）。放在 REST 而不是 MCP 工具里，App、CLI、MCP 因此共用同一条路径。
+
+**失败不回滚。** endpoint 保留：它是操作者「我要用这台机器」的记录，host key 或端口是人自己修的，修好后下一轮采集自己接上，不需要第二次登记；回滚还会与 idempotency 重放相互作用。
+
+**两个客户端的等待时间随之改为按服务端预算。** 登记现在要等一次采集（插件 `PLUGIN_OBSERVE_TIMEOUT_SECONDS=45`，直连一个 SSH connect timeout），超过 `CONTROL_PLANE_READ_TIMEOUT_SECONDS=20`。`client.py` 的 `_CONTROL_PLANE_CLAIM_PATHS` 集合改为 `_CONTROL_PLANE_PATH_TIMEOUTS` 表（claim 200s / 登记 60s），同类判据收进一处。桌面端同形：`BrokerStore.mutationTimeout(forPath:)` 给 `api/v1/endpoints` 60s、其余 mutation 保持 10s —— 此前所有 mutation 固定 10s，登记必然在控制面还在连的时候超时。
+
+**桌面端把这个结果说出来。** `addEndpoint` 改走 `performMutationWithPayload`，`registrationOutcome` 把 `observation` 变成三句人话：已连上并发现 N 张卡 / 已连上但没有发现 GPU（提示确认观测方式）/ 还没有连上（带原因）。未连上时同时写入 `errorMessage`，不再是「正在确认状态」加一分钟后一行红字。
+
+第四轮验证：Python `622 passed`（新增 4 条：登记失败带原因并保留记录、登记成功报告卡数、登记即可归组、登记超时高于它等待的采集预算），Ruff 通过；`zsh desktop/build-macos-app.sh test` 报告 `66 tests in 3 suites passed`（新增 4 条 Swift 用例）；`build-macos-app.sh` 与 `verify-macos-app.sh` 通过。现网 `p7770` 在本轮期间已被外部修好（host key 补齐、profile 改为 `linux-nvidia`、归入 `baidu-baige`），现为 ONLINE / 4 卡，可作为该诊断的事后印证，但不是本轮改动的产物。
+
 仍未做：`api.py` 里 32 个同步 `def` 路由未改为 `async def` + `in_domain`。它们由 FastAPI 自动丢线程池，本来就不在事件循环上，观测到的卡顿不由它们造成；改动会覆盖每个路由体，且把读也串行到单 worker，收益需要先有实测支撑。`hanhai22` 插件依赖一个 12 小时有效期的外部 ControlMaster（由 Storyboard 项目的 `tools/run/hanhai_session.py up --auto` 建立并复用同一个 `~/.ssh/cm/` socket）。socket 过期后该组静默退回上一次成功观测的数字，`largest_allocatable_block` 变 `null`；实测重开 master 后 151 秒内自行恢复（`largest_allocatable_block: 5`，40 张空闲卡分散在多节点）。MCP 目前不投影 `monitor.last_error`，所以 agent 拿到 `null` 时没有可执行的下一步。
 
 ### 2.0.0 候选（当前工作树）
