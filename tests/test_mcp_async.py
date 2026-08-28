@@ -3,10 +3,14 @@ from __future__ import annotations
 import asyncio
 import threading
 
+import httpx
 import pytest
 
 from serverpilot import API_CAPABILITIES, __version__, daemon, mcp_server
-from serverpilot.client import BrokerClientError
+from serverpilot.client import (
+    CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+    BrokerClientError,
+)
 from serverpilot.daemon import DaemonError, ensure_broker_ready_for_mcp
 from serverpilot.mcp_server import mcp
 from tests.helpers import tools
@@ -178,6 +182,32 @@ def test_routine_tool_parameter_names_are_unchanged() -> None:
     release_schema = by_name["gpu_release"].inputSchema
     assert release_schema["required"] == ["lease_id"]
     assert set(release_schema["properties"]) == {"lease_id"}
+
+
+def test_async_broker_claim_overrides_the_shared_read_timeout() -> None:
+    recorded: list[float | None] = []
+
+    class FakeHttp:
+        async def request(self, method: str, url: str, **kwargs: object) -> httpx.Response:
+            del method, url
+            timeout = kwargs.get("timeout")
+            recorded.append(timeout if isinstance(timeout, int | float) else None)
+            return httpx.Response(200, json={"schema_version": "v1", "data": {}})
+
+    async def run() -> None:
+        broker = mcp_server._AsyncBroker(
+            FakeHttp(),  # type: ignore[arg-type]
+            url="http://127.0.0.1:8787",
+            actor="agent",
+        )
+        await broker.get("/api/v1/snapshot")
+        await broker.post(
+            "/api/v1/routine/claims",
+            {"constraints": {"gpu_count": 8}},
+        )
+
+    asyncio.run(run())
+    assert recorded == [CONTROL_PLANE_READ_TIMEOUT_SECONDS, 120.0]
 
 
 def test_object_parameters_publish_nested_schemas() -> None:

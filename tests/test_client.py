@@ -3,7 +3,14 @@ from __future__ import annotations
 import httpx
 import pytest
 
-from serverpilot.client import BrokerClient, BrokerClientError
+from serverpilot.client import (
+    CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS,
+    CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+    BrokerClient,
+    BrokerClientError,
+    control_plane_claim_timeout,
+    control_plane_request_timeout,
+)
 
 
 def test_client_returns_first_gateway_error_without_retry(monkeypatch) -> None:  # type: ignore[no-untyped-def]
@@ -53,7 +60,7 @@ def test_client_patch_sends_endpoint_update_over_rest(monkeypatch) -> None:  # t
                 },
                 "json": {"ssh_user": "gpu"},
                 "params": None,
-                "timeout": 20,
+                "timeout": CONTROL_PLANE_READ_TIMEOUT_SECONDS,
                 "trust_env": False,
             },
         )
@@ -185,3 +192,46 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
     assert client.requests(queued_only=True)["data"] == [{"id": "req-a", "state": "QUEUED"}]
     assert calls.count(("GET", "http://127.0.0.1:8787/api/v1/gpus")) == 1
     assert all(not url.endswith("/api/v1/state") for _method, url in calls)
+
+
+def test_control_plane_claim_timeout_scales_with_gpu_count() -> None:
+    assert control_plane_claim_timeout(1) == CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    assert control_plane_claim_timeout(8) == 120.0
+    assert control_plane_claim_timeout(16) == CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS
+    assert control_plane_request_timeout("/api/v1/snapshot") == CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    assert (
+        control_plane_request_timeout(
+            "/api/v1/routine/claims",
+            {"constraints": {"gpu_count": 8}},
+        )
+        == 120.0
+    )
+    assert (
+        control_plane_request_timeout(
+            "/api/v1/claims",
+            {"constraints": {"gpu_count": 1}},
+        )
+        == CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    )
+
+
+def test_broker_client_claim_uses_scaled_timeout(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    calls = []
+
+    def request(method, url, **kwargs):  # type: ignore[no-untyped-def]
+        calls.append((method, url, kwargs["timeout"]))
+        return httpx.Response(200, json={"schema_version": "v1", "data": {}})
+
+    monkeypatch.setattr("serverpilot.client.httpx.request", request)
+    client = BrokerClient("http://127.0.0.1:8787")
+    client.get("/api/v1/snapshot")
+    client.post(
+        "/api/v1/routine/claims",
+        {"constraints": {"gpu_count": 8}},
+        idempotency_key="claim-eight",
+    )
+
+    assert calls == [
+        ("GET", "http://127.0.0.1:8787/api/v1/snapshot", CONTROL_PLANE_READ_TIMEOUT_SECONDS),
+        ("POST", "http://127.0.0.1:8787/api/v1/routine/claims", 120.0),
+    ]

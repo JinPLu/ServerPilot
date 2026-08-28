@@ -19,7 +19,13 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from serverpilot import __version__
-from serverpilot.client import BrokerClient, BrokerClientError, control_plane_async_httpx_client
+from serverpilot.client import (
+    CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+    BrokerClient,
+    BrokerClientError,
+    control_plane_async_httpx_client,
+    control_plane_request_timeout,
+)
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
 # The agent surface reports the GPU state code, not the control plane's
@@ -86,6 +92,7 @@ class _AsyncBroker:
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {"X-ServerPilot-Actor": self.actor}
         if idempotency_key:
@@ -97,6 +104,7 @@ class _AsyncBroker:
                 headers=headers,
                 json=json_body,
                 params=params,
+                timeout=control_plane_request_timeout(path, json_body, timeout=timeout),
             )
         except httpx.HTTPError as exc:
             raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc
@@ -133,8 +141,15 @@ class _AsyncBroker:
         body: dict[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        return await self.request("POST", path, json_body=body, idempotency_key=idempotency_key)
+        return await self.request(
+            "POST",
+            path,
+            json_body=body,
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
 
     async def patch(
         self,
@@ -185,7 +200,9 @@ async def _mcp_lifespan(_server: FastMCP) -> AsyncIterator[dict[str, Any]]:
     # from another release on every platform — including Windows, where
     # ensure_broker_ready_for_mcp does not start a daemon.
     await anyio.to_thread.run_sync(ensure_broker_ready_for_mcp)
-    async with control_plane_async_httpx_client(timeout=20.0) as client:
+    async with control_plane_async_httpx_client(
+        timeout=CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    ) as client:
         _http_client = client
         try:
             yield {}

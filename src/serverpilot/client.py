@@ -8,6 +8,47 @@ from typing import Any
 
 import httpx
 
+CONTROL_PLANE_READ_TIMEOUT_SECONDS = 20.0
+# Measured 8-card reclaim spent ~8.5s per GPU when each stop re-collected the
+# whole host. Apply calls keep that budget with headroom even after one
+# collection per endpoint, and never wait more than three minutes.
+CONTROL_PLANE_CLAIM_SECONDS_PER_GPU = 15.0
+CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS = 180.0
+_CONTROL_PLANE_CLAIM_PATHS = frozenset({"/api/v1/claims", "/api/v1/routine/claims"})
+
+
+def control_plane_claim_timeout(gpu_count: int) -> float:
+    """HTTP budget for one apply/claim; scales with the requested GPU count."""
+
+    count = gpu_count if type(gpu_count) is int and gpu_count >= 1 else 1
+    return min(
+        CONTROL_PLANE_CLAIM_TIMEOUT_MAX_SECONDS,
+        max(
+            CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+            count * CONTROL_PLANE_CLAIM_SECONDS_PER_GPU,
+        ),
+    )
+
+
+def control_plane_request_timeout(
+    path: str,
+    json_body: dict[str, Any] | None = None,
+    *,
+    timeout: float | None = None,
+    default: float = CONTROL_PLANE_READ_TIMEOUT_SECONDS,
+) -> float:
+    """Read calls keep the default; claim posts scale with ``gpu_count``."""
+
+    if timeout is not None:
+        return timeout
+    if path in _CONTROL_PLANE_CLAIM_PATHS and isinstance(json_body, dict):
+        constraints = json_body.get("constraints")
+        if isinstance(constraints, dict):
+            gpu_count = constraints.get("gpu_count")
+            if type(gpu_count) is int and gpu_count >= 1:
+                return control_plane_claim_timeout(gpu_count)
+    return default
+
 
 def control_plane_http_request(method: str, url: str, **kwargs: Any) -> httpx.Response:
     """Issue one HTTP request to the loopback control plane.
@@ -47,7 +88,7 @@ class BrokerClient:
         url: str,
         actor: str = "agent",
         *,
-        timeout_seconds: float = 20,
+        timeout_seconds: float = CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     ) -> None:
         if not url.startswith(("http://", "https://")):
             raise BrokerClientError("SERVERPILOT_URL must start with http:// or https://")
@@ -72,6 +113,7 @@ class BrokerClient:
         json_body: dict[str, Any] | None = None,
         idempotency_key: str | None = None,
         params: dict[str, Any] | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
         headers = {"X-ServerPilot-Actor": self.actor}
         if idempotency_key:
@@ -83,7 +125,12 @@ class BrokerClient:
                 headers=headers,
                 json=json_body,
                 params=params,
-                timeout=self.timeout_seconds,
+                timeout=control_plane_request_timeout(
+                    path,
+                    json_body,
+                    timeout=timeout,
+                    default=self.timeout_seconds,
+                ),
             )
         except httpx.HTTPError as exc:
             raise BrokerClientError(f"broker request failed: {type(exc).__name__}") from exc
@@ -116,8 +163,15 @@ class BrokerClient:
         body: dict[str, Any] | None = None,
         *,
         idempotency_key: str | None = None,
+        timeout: float | None = None,
     ) -> dict[str, Any]:
-        return self.request("POST", path, json_body=body, idempotency_key=idempotency_key)
+        return self.request(
+            "POST",
+            path,
+            json_body=body,
+            idempotency_key=idempotency_key,
+            timeout=timeout,
+        )
 
     def patch(
         self,

@@ -6,6 +6,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+- **A multi-card apply is no longer killed by a 20-second timeout.** Stopping occupancy helpers now collects each host once; apply calls get a timeout that scales with card count. Applies pinned to different hosts or groups no longer block each other.
 - **A local build no longer packages a plugin that was deleted from the source tree long ago.** setuptools never removes files from its `build/lib` cache, so a plugin that once sat in the tree keeps being packaged by every later local build after git has forgotten it — and if that plugin is a private cluster connector, it ships to whoever installs the wheel. Packaging verification now compares the bundled plugin set against the source tree and fails on extras, naming the stale cache to clear. (Artifacts published from GitHub were never affected: CI checks out clean and has no such cache.)
 
 ## 2.1.0 - 2026-08-28

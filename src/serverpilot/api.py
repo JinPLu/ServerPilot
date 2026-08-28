@@ -284,6 +284,30 @@ def _plugin_overlay_gpu_ids(endpoint_id: str, overlay: Mapping[str, Any]) -> lis
     return gpu_ids
 
 
+def claim_candidate_endpoint_ids(
+    request_data: RequestCreate,
+    endpoints: list[Any],
+) -> set[str]:
+    """Endpoints this claim might select; lock them before the allocator runs.
+
+    The keeper-start / claim race is per endpoint. Pinning or a group narrows
+    the lock to that set. With neither constraint the allocator may pick any
+    host, so every collectable endpoint stays locked.
+    """
+
+    pinned = request_data.constraints.endpoint_ids
+    if pinned:
+        return set(pinned)
+    group_ids = set(request_data.constraints.server_group_ids)
+    if group_ids:
+        return {
+            endpoint.id
+            for endpoint in endpoints
+            if endpoint.server_group_id in group_ids
+        }
+    return {endpoint.id for endpoint in endpoints}
+
+
 def create_app(
     settings: Settings,
     *,
@@ -791,21 +815,38 @@ def create_app(
                     if observed_lease_id != target["lease_id"]:
                         return None
                     prepared.append(target)
+                gpu_uuids = [target["gpu_uuid"] for target in prepared]
+                adapter_code: str | None = None
+                # One helper call covers every target, so a failure cannot be
+                # attributed to one card.  Report the whole targeted set rather
+                # than naming an arbitrary member of it.
+                targeted_gpu_ids = [target["gpu_id"] for target in prepared]
+                try:
+                    # One helper call can stop every target on this host. The
+                    # remote helper may mutate then fail; observation after
+                    # this call is what proves each GPU empty.
+                    adapter_result = await adapter.set_enabled(endpoint, False, gpu_uuids)
+                    result_by_gpu_uuid(adapter_result, gpu_uuids, enabled=False)
+                except AdapterCommandError as exc:
+                    adapter_code = _keepalive_adapter_failure_code(exc)
+                except BrokerError as exc:
+                    adapter_code = exc.code
+                except Exception:
+                    adapter_code = "keepalive_adapter_failed"
+                # After the stop has been issued, before this collection.
+                # finalize_keepalive_stop requires a snapshot newer than the stop.
+                observation_not_before = utcnow()
+                try:
+                    await collect_keepalive_endpoint(endpoint)
+                except BrokerError as exc:
+                    raise BrokerError(
+                        adapter_code or exc.code,
+                        "占卡 GPU 未能确认释放，本次没有分配任务。",
+                        status_code=503,
+                        details={"failed_gpu_ids": targeted_gpu_ids},
+                    ) from None
                 for target in prepared:
-                    gpu_uuid = target["gpu_uuid"]
-                    adapter_code: str | None = None
                     try:
-                        adapter_result = await adapter.set_enabled(endpoint, False, [gpu_uuid])
-                        result_by_gpu_uuid(adapter_result, [gpu_uuid], enabled=False)
-                    except AdapterCommandError as exc:
-                        adapter_code = _keepalive_adapter_failure_code(exc)
-                    except BrokerError as exc:
-                        adapter_code = exc.code
-                    except Exception:
-                        adapter_code = "keepalive_adapter_failed"
-                    observation_not_before = utcnow()
-                    try:
-                        await collect_keepalive_endpoint(endpoint)
                         service.finalize_keepalive_stop(
                             actor,
                             endpoint_id,
@@ -824,13 +865,13 @@ def create_app(
                             status_code=503,
                             details={"gpu_id": target["gpu_id"]},
                         ) from None
-                    if adapter_code is not None:
-                        raise BrokerError(
-                            adapter_code,
-                            "占卡程序停止失败，本次没有分配任务。",
-                            status_code=503,
-                            details={"gpu_id": target["gpu_id"]},
-                        )
+                if adapter_code is not None:
+                    raise BrokerError(
+                        adapter_code,
+                        "占卡程序停止失败，本次没有分配任务。",
+                        status_code=503,
+                        details={"failed_gpu_ids": targeted_gpu_ids},
+                    )
             # Keep the endpoint locks through the ordinary claim.
             # Otherwise collector reconciliation could observe the fresh
             # empty GPU and restart its keeper in the gap.
@@ -838,7 +879,10 @@ def create_app(
 
         if locked_endpoint_ids is not None:
             return await execute_locked()
-        endpoint_ids = {endpoint.id for endpoint in service.collector_endpoints()}
+        endpoint_ids = claim_candidate_endpoint_ids(
+            request_data_provider(),
+            service.collector_endpoints(),
+        )
         async with keepalive_endpoint_locks(endpoint_ids):
             return await execute_locked()
 
@@ -934,10 +978,14 @@ def create_app(
     ) -> dict[str, Any]:
         """Claim through the one shared per-GPU occupancy handoff."""
 
-        endpoint_ids = {endpoint.id for endpoint in service.collector_endpoints()}
+        endpoint_ids = claim_candidate_endpoint_ids(
+            request_data,
+            service.collector_endpoints(),
+        )
         # A keeper start and an ordinary claim must not race between remote
         # start and ownership persistence. Keep this lock through a possible
-        # exact keeper handoff and the ordinary claim.
+        # exact keeper handoff and the ordinary claim. The race is per
+        # endpoint, so only hosts this request could select are locked.
         async with keepalive_endpoint_locks(endpoint_ids):
             try:
                 return service.create_request(
