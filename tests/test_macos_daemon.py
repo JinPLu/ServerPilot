@@ -643,6 +643,7 @@ def test_start_does_not_kick_the_job_launchd_just_spawned(
     difference between a three-second and a twenty-one-second cold start.
     """
 
+    monkeypatch.setattr(daemon.sys, "platform", "darwin")
     config = _config(tmp_path)
     config.plist_path.parent.mkdir(parents=True)
     config.plist_path.write_bytes(b"plist")
@@ -673,6 +674,7 @@ def test_start_restarts_a_loaded_daemon_that_stopped_answering(
 ) -> None:
     """A forced restart is still the recovery path for a hung daemon."""
 
+    monkeypatch.setattr(daemon.sys, "platform", "darwin")
     config = _config(tmp_path)
     config.plist_path.parent.mkdir(parents=True)
     config.plist_path.write_bytes(b"plist")
