@@ -45,6 +45,15 @@
             "load_1m": 7.5,
             "memory_total_mib": 131072,
             "memory_available_mib": 98304,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 32.0,
+              "cpu_available_cores": 24.5,
+              "memory_scope": "host",
+              "memory_total_mib": 131072,
+              "memory_used_mib": 32768,
+              "memory_available_mib": 98304
+            },
             "recent_average": {
               "window_seconds": 600,
               "sample_count": 10,
@@ -78,6 +87,15 @@
             "load_1m": 18.0,
             "memory_total_mib": 262144,
             "memory_available_mib": 163840,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 46.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 98304,
+              "memory_available_mib": 163840
+            },
             "recent_average": {
               "window_seconds": 600,
               "sample_count": 10,

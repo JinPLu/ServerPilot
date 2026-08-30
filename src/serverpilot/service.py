@@ -2130,17 +2130,64 @@ class BrokerService:
         }
 
     @staticmethod
-    def _host_memory_used_pct(
+    def _host_capacity(
         sample: EndpointTelemetryCurrent | EndpointTelemetrySnapshot,
-    ) -> float | None:
-        """Prefer cgroup current/limit; fall back to host MemAvailable only when unlimited."""
+    ) -> dict[str, Any]:
+        """Resolve how much CPU and memory this endpoint may actually use.
+
+        A container reports the whole node's CPU count and MemTotal, so those
+        readings describe the machine rather than the share this endpoint owns.
+        The cgroup budget is that share; the host figures stand in only where no
+        cgroup limit is in force.  Every surface reads capacity from here so the
+        machine-wide reading is never mistaken for the endpoint's own.
+        """
+
+        quota = sample.cpu_quota_usec
+        period = sample.cpu_period_usec
+        if quota is not None and quota > 0 and period is not None and period > 0:
+            cpu_scope = "container"
+            cpu_cores = round(quota / period, 2)
+        else:
+            cpu_scope = "host"
+            cpu_cores = float(sample.cpu_count)
+        utilization = sample.cpu_utilization_pct
+        if utilization is not None:
+            cpu_available_cores = round(max(cpu_cores * (1 - utilization / 100), 0.0), 2)
+        elif cpu_scope == "host":
+            # The 1-minute load average is machine-wide, so it only describes an
+            # endpoint that owns the whole machine.
+            cpu_available_cores = round(max(cpu_cores - sample.load_1m, 0.0), 2)
+        else:
+            cpu_available_cores = None
 
         limit = sample.memory_limit_mib
         current = sample.memory_current_mib
         if limit is not None and limit > 0 and current is not None:
-            return current * 100 / limit
-        if sample.memory_total_mib > 0:
-            return (1 - sample.memory_available_mib / sample.memory_total_mib) * 100
+            memory_scope = "container"
+            memory_total_mib = limit
+            memory_used_mib = min(current, limit)
+        else:
+            memory_scope = "host"
+            memory_total_mib = sample.memory_total_mib
+            memory_used_mib = max(sample.memory_total_mib - sample.memory_available_mib, 0)
+        return {
+            "cpu_scope": cpu_scope,
+            "cpu_cores": cpu_cores,
+            "cpu_available_cores": cpu_available_cores,
+            "memory_scope": memory_scope,
+            "memory_total_mib": memory_total_mib,
+            "memory_used_mib": memory_used_mib,
+            "memory_available_mib": memory_total_mib - memory_used_mib,
+        }
+
+    @staticmethod
+    def _host_memory_used_pct(
+        sample: EndpointTelemetryCurrent | EndpointTelemetrySnapshot,
+    ) -> float | None:
+        capacity = BrokerService._host_capacity(sample)
+        total = capacity["memory_total_mib"]
+        if total > 0:
+            return capacity["memory_used_mib"] * 100 / total
         return None
 
     @staticmethod
@@ -2164,6 +2211,7 @@ class BrokerService:
             "memory_available_mib": telemetry.memory_available_mib,
             "memory_limit_mib": telemetry.memory_limit_mib,
             "memory_current_mib": telemetry.memory_current_mib,
+            "capacity": BrokerService._host_capacity(telemetry),
             "provider": telemetry.provider,
         }
 
@@ -2276,7 +2324,6 @@ class BrokerService:
             or host_collected_at is None
             or host_collected_at < threshold
             or provider_state is None
-            or provider_state.last_error is not None
             or last_success_at is None
             or last_success_at < threshold
         ):
@@ -4028,14 +4075,20 @@ class BrokerService:
                     # NVIDIA runtime data is unavailable.  Keepalive-enabled
                     # GPU endpoints still require a complete observation.
                     monitor_status = "ONLINE"
-                elif last_success is None or provider_state.last_error:
-                    monitor_status = "ERROR"
-                elif now - last_success > timedelta(
+                elif last_success is not None and now - last_success <= timedelta(
                     seconds=self.inventory.collector.stale_after_seconds
                 ):
-                    monitor_status = "STALE"
-                else:
+                    # Connectivity has a single criterion: how old the last
+                    # successful observation is, the same one
+                    # `_endpoint_is_unreachable` uses.  `last_error` describes
+                    # the most recent attempt, not the host, so one failed
+                    # probe against a host we heard from seconds ago leaves it
+                    # ONLINE.
                     monitor_status = "ONLINE"
+                elif provider_state.last_error:
+                    monitor_status = "ERROR"
+                else:
+                    monitor_status = "STALE"
                 host_telemetry = host_telemetry_by_endpoint.get(endpoint.id)
                 host_telemetry_payload = self._host_telemetry_dict(host_telemetry)
                 if host_telemetry_payload is not None:
@@ -4430,17 +4483,21 @@ class BrokerService:
                 direct_cpu, direct_memory = direct_commitments_by_endpoint.get(
                     endpoint.id, (0.0, 0)
                 )
-                if telemetry is None:
+                # `_host_capacity` owns what this endpoint may actually use.
+                # Reading `cpu_count`/`load_1m` here would describe the whole
+                # node, which is a different machine than a container endpoint.
+                capacity = self._host_capacity(telemetry) if telemetry is not None else None
+                if capacity is None:
                     available_cpu = None
                     available_memory = None
                 else:
-                    available_cpu = max(
-                        0.0,
-                        telemetry.cpu_count - telemetry.load_1m - direct_cpu,
+                    observed_cpu = capacity["cpu_available_cores"]
+                    available_cpu = (
+                        None if observed_cpu is None else max(0.0, observed_cpu - direct_cpu)
                     )
                     available_memory = max(
                         0,
-                        telemetry.memory_available_mib - direct_memory,
+                        capacity["memory_available_mib"] - direct_memory,
                     )
                 monitor_reason = {
                     "DRAINING": "endpoint is draining and blocks new claims",
@@ -4461,6 +4518,9 @@ class BrokerService:
                 elif telemetry_stale:
                     admission_state = "blocked"
                     admission_reason = "host telemetry is stale"
+                elif available_cpu is None:
+                    admission_state = "blocked"
+                    admission_reason = "this endpoint's own CPU share is not observable yet"
                 elif available_cpu == 0 and available_memory == 0:
                     admission_state = "blocked"
                     admission_reason = "no uncommitted CPU or memory capacity"
@@ -4474,18 +4534,18 @@ class BrokerService:
                         "admission_reason": admission_reason,
                         "telemetry": self._host_telemetry_dict(telemetry),
                         "capacity": {
-                            "total_cpu_cores": telemetry.cpu_count if telemetry else None,
+                            "total_cpu_cores": capacity["cpu_cores"] if capacity else None,
                             "observed_available_cpu_cores": round(
-                                max(0.0, telemetry.cpu_count - telemetry.load_1m), 1
+                                capacity["cpu_available_cores"], 1
                             )
-                            if telemetry
+                            if capacity and capacity["cpu_available_cores"] is not None
                             else None,
                             "available_cpu_cores": round(available_cpu, 1)
                             if available_cpu is not None
                             else None,
-                            "total_memory_mib": telemetry.memory_total_mib if telemetry else None,
-                            "observed_available_memory_mib": telemetry.memory_available_mib
-                            if telemetry
+                            "total_memory_mib": capacity["memory_total_mib"] if capacity else None,
+                            "observed_available_memory_mib": capacity["memory_available_mib"]
+                            if capacity
                             else None,
                             "available_memory_mib": available_memory,
                             "committed_cpu_cores": round(direct_cpu, 1),
@@ -4525,9 +4585,17 @@ class BrokerService:
                 },
                 "used": {
                     "gpu_count": counts["BUSY_UNMANAGED"] + counts["RUNNING_MANAGED"],
+                    # Used is total minus what the resolver says is still free,
+                    # so it stays on the same scope as the capacity above; the
+                    # machine-wide load average would not.  An endpoint whose
+                    # free share is not observable counts as fully used.
                     "cpu_cores": round(
                         sum(
-                            (card["telemetry"] or {}).get("load_1m") or 0.0
+                            max(
+                                0.0,
+                                (card["capacity"]["total_cpu_cores"] or 0.0)
+                                - (card["capacity"]["observed_available_cpu_cores"] or 0.0),
+                            )
                             for card in host_capacity_payloads
                         ),
                         1,
@@ -5711,6 +5779,7 @@ class BrokerService:
                 )
             )
             first_failure = state is None or state.last_error is None
+            last_success = _as_utc(state.last_success_at) if state is not None else None
             if state is None:
                 session.add(
                     ProviderState(
@@ -5726,15 +5795,22 @@ class BrokerService:
                 state.last_attempt_at = now
                 state.last_error = message[:1000]
                 state.revision = revision
-            self._upsert_alert(
-                session,
-                alert_type="collector_unreachable",
-                severity="warning",
-                resource_type="endpoint",
-                resource_id=endpoint_id,
-                message="collector failed; endpoint will fail closed once telemetry becomes stale",
-                now=now,
-            )
+            # A failed attempt is a fact worth recording, but it is not yet a
+            # host in trouble.  The alert waits for the same criterion the
+            # monitor status uses -- the last successful observation having
+            # gone stale -- so the alert bar cannot contradict an ONLINE host.
+            if last_success is None or now - last_success > timedelta(
+                seconds=self.inventory.collector.stale_after_seconds
+            ):
+                self._upsert_alert(
+                    session,
+                    alert_type="collector_unreachable",
+                    severity="warning",
+                    resource_type="endpoint",
+                    resource_id=endpoint_id,
+                    message="collector failed; endpoint telemetry is stale and fails closed",
+                    now=now,
+                )
             if first_failure:
                 self._audit(
                     session,
@@ -5882,104 +5958,6 @@ class BrokerService:
             )
         return usage
 
-    def _endpoint_monitor_status(
-        self,
-        session: Session,
-        endpoint: Endpoint,
-        now: datetime,
-    ) -> tuple[str, str | None]:
-        provider_state = session.scalar(
-            select(ProviderState).where(
-                ProviderState.provider == "raw-ssh",
-                ProviderState.endpoint_id == endpoint.id,
-            )
-        )
-        last_success = _as_utc(provider_state.last_success_at) if provider_state else None
-        if endpoint.lifecycle_state == "draining":
-            return "DRAINING", "endpoint is draining and blocks new claims"
-        if not endpoint.enabled:
-            return "DISABLED", "endpoint is disabled"
-        if provider_state is None:
-            return "PENDING", "no successful collector observation"
-        if last_success is None or provider_state.last_error:
-            return "ERROR", provider_state.last_error or "collector has no successful observation"
-        if now - last_success > timedelta(seconds=self.inventory.collector.stale_after_seconds):
-            return "STALE", "collector success is stale"
-        return "ONLINE", None
-
-    def _host_capacity_cards(
-        self,
-        session: Session,
-        now: datetime,
-    ) -> list[dict[str, Any]]:
-        direct_usage = self._endpoint_commitment_usage(session)
-        values: list[dict[str, Any]] = []
-        endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
-        for endpoint in endpoints:
-            telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
-            monitor_status, monitor_reason = self._endpoint_monitor_status(session, endpoint, now)
-            observed_at = _as_utc(telemetry.observed_at) if telemetry is not None else None
-            telemetry_stale = (
-                telemetry is None
-                or observed_at is None
-                or now - observed_at
-                > timedelta(seconds=self.inventory.collector.stale_after_seconds)
-            )
-            direct_cpu, direct_memory = direct_usage.get(endpoint.id, (0.0, 0))
-            if telemetry is None:
-                available_cpu = None
-                available_memory = None
-            else:
-                observed_available_cpu = max(0.0, telemetry.cpu_count - telemetry.load_1m)
-                available_cpu = max(0.0, observed_available_cpu - direct_cpu)
-                available_memory = max(
-                    0,
-                    telemetry.memory_available_mib - direct_memory,
-                )
-            admission_state = "available"
-            admission_reason = None
-            if monitor_status != "ONLINE":
-                admission_state = "blocked"
-                admission_reason = monitor_reason or monitor_status.lower()
-            elif telemetry_stale:
-                admission_state = "blocked"
-                admission_reason = "host telemetry is stale"
-            elif available_cpu == 0 and available_memory == 0:
-                admission_state = "blocked"
-                admission_reason = "no uncommitted CPU or memory capacity"
-            values.append(
-                {
-                    "provider": None,
-                    "unit": None,
-                    "endpoint": self._project_endpoint(session, endpoint),
-                    "monitor_status": monitor_status,
-                    "admission_state": admission_state,
-                    "admission_reason": admission_reason,
-                    "telemetry": self._host_telemetry_dict(telemetry),
-                    "capacity": {
-                        "total_cpu_cores": telemetry.cpu_count if telemetry else None,
-                        "observed_available_cpu_cores": (
-                            round(max(0.0, telemetry.cpu_count - telemetry.load_1m), 1)
-                            if telemetry
-                            else None
-                        ),
-                        "available_cpu_cores": round(available_cpu, 1)
-                        if available_cpu is not None
-                        else None,
-                        "total_memory_mib": telemetry.memory_total_mib if telemetry else None,
-                        "observed_available_memory_mib": (
-                            telemetry.memory_available_mib if telemetry else None
-                        ),
-                        "available_memory_mib": available_memory,
-                        "committed_cpu_cores": round(direct_cpu, 1),
-                        "committed_memory_mib": direct_memory,
-                        "direct_lease_cpu_cores": round(direct_cpu, 1),
-                        "direct_lease_memory_mib": direct_memory,
-                    },
-                }
-            )
-        return values
-
     @staticmethod
     def _reserved_gpu_ids(
         session: Session,
@@ -6071,41 +6049,52 @@ class BrokerService:
                 excluded["endpoint_denylist"] += 1
                 continue
             host_telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
+            # The allocator admits against the same figures the interface shows.
+            # A container endpoint owns its cgroup budget, not the node's cores,
+            # so `_host_capacity` is the authority on both sides.
+            host_capacity = (
+                self._host_capacity(host_telemetry) if host_telemetry is not None else None
+            )
             if (
                 constraints.cpu_cores is not None or constraints.memory_mib is not None
-            ) and host_telemetry is None:
+            ) and host_capacity is None:
                 excluded["host_telemetry"] += 1
                 continue
-            if host_telemetry is not None:
+            if host_capacity is not None:
                 direct_cpu, direct_memory = direct_commitment_usage.get(endpoint.id, (0.0, 0))
                 generic_cpu, generic_memory = generic_host_usage.get(endpoint.id, (0.0, 0))
                 committed_cpu = direct_cpu + generic_cpu
                 committed_memory = direct_memory + generic_memory
                 if (
                     constraints.cpu_cores is not None
-                    and committed_cpu + constraints.cpu_cores > host_telemetry.cpu_count
+                    and committed_cpu + constraints.cpu_cores > host_capacity["cpu_cores"]
                 ):
                     excluded["committed_cpu"] += 1
                     continue
                 if (
                     constraints.memory_mib is not None
-                    and committed_memory + constraints.memory_mib > host_telemetry.memory_total_mib
+                    and committed_memory + constraints.memory_mib
+                    > host_capacity["memory_total_mib"]
                 ):
                     excluded["committed_memory"] += 1
                     continue
             if constraints.min_available_cpu_cores is not None:
-                if host_telemetry is None:
+                if host_capacity is None:
                     excluded["host_telemetry"] += 1
                     continue
-                available_cpu_cores = max(0.0, host_telemetry.cpu_count - host_telemetry.load_1m)
+                available_cpu_cores = host_capacity["cpu_available_cores"]
+                # A share we cannot compute is not a share we can promise.
+                if available_cpu_cores is None:
+                    excluded["host_telemetry"] += 1
+                    continue
                 if available_cpu_cores < constraints.min_available_cpu_cores:
                     excluded["available_cpu"] += 1
                     continue
             if constraints.min_available_memory_mib is not None:
-                if host_telemetry is None:
+                if host_capacity is None:
                     excluded["host_telemetry"] += 1
                     continue
-                if host_telemetry.memory_available_mib < constraints.min_available_memory_mib:
+                if host_capacity["memory_available_mib"] < constraints.min_available_memory_mib:
                     excluded["available_memory"] += 1
                     continue
             if constraints.gpu_ids and gpu.id not in constraints.gpu_ids:
@@ -7464,6 +7453,7 @@ class BrokerService:
                 )
             )
             host_collected_at = _as_utc(host.collected_at) if host is not None else None
+            host_observed_at = _as_utc(host.observed_at) if host is not None else None
             last_success_at = (
                 _as_utc(provider_state.last_success_at) if provider_state is not None else None
             )
@@ -7472,7 +7462,6 @@ class BrokerService:
                 or host_collected_at < barrier
                 or host_collected_at < cutoff
                 or provider_state is None
-                or provider_state.last_error is not None
                 or last_success_at is None
                 or last_success_at < barrier
             ):
@@ -7499,6 +7488,11 @@ class BrokerService:
                     or telemetry_collected_at < barrier
                     or observed_at is None
                     or observed_at < cutoff
+                    # This card's reading must belong to the same snapshot as
+                    # the host's, the way `_validate_keepalive_observation`
+                    # requires.  A later probe that refreshed the host but not
+                    # this GPU is not an observation of this GPU.
+                    or observed_at != host_observed_at
                 ):
                     raise BrokerError(
                         "conflict_observation_incomplete",
@@ -8141,17 +8135,21 @@ class BrokerService:
             if endpoint.id in constraints.deny_endpoint_ids:
                 continue
             host_telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
+            host_capacity = (
+                self._host_capacity(host_telemetry) if host_telemetry is not None else None
+            )
             if constraints.min_available_cpu_cores is not None:
-                if host_telemetry is None:
+                if host_capacity is None:
                     continue
+                available_cpu_cores = host_capacity["cpu_available_cores"]
                 if (
-                    max(0.0, host_telemetry.cpu_count - host_telemetry.load_1m)
-                    < constraints.min_available_cpu_cores
+                    available_cpu_cores is None
+                    or available_cpu_cores < constraints.min_available_cpu_cores
                 ):
                     continue
             if constraints.min_available_memory_mib is not None and (
-                host_telemetry is None
-                or host_telemetry.memory_available_mib < constraints.min_available_memory_mib
+                host_capacity is None
+                or host_capacity["memory_available_mib"] < constraints.min_available_memory_mib
             ):
                 continue
             if constraints.gpu_ids and gpu.id not in constraints.gpu_ids:

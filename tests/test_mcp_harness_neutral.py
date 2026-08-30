@@ -443,6 +443,65 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
     }
 
 
+def test_busy_status_distinguishes_a_held_idle_card_from_a_running_one_on_one_server() -> None:
+    status = mcp_server._routine_gpu_status(
+        {
+            "data": {
+                "endpoints": [{"id": "server-a", "workspace_path": "/srv/server-a"}],
+                "gpus": [
+                    {
+                        "endpoint_id": "server-a",
+                        "gpu_uuid": "GPU-a",
+                        "gpu_index": 0,
+                        "name": "A",
+                        "total_vram_mib": 80_000,
+                        "state": "HELD",
+                        "publicly_available": False,
+                        "public_status": "任务占用",
+                        "keepalive": {"state": "OFF", "reason": None},
+                        "lease": {"id": "lease-holder", "task_ref": "占卡"},
+                        "telemetry": {"memory_used_mib": 100, "gpu_utilization_pct": 0},
+                    },
+                    {
+                        "endpoint_id": "server-a",
+                        "gpu_uuid": "GPU-b",
+                        "gpu_index": 1,
+                        "name": "A",
+                        "total_vram_mib": 80_000,
+                        "state": "RUNNING_MANAGED",
+                        "publicly_available": False,
+                        "public_status": "任务占用",
+                        "keepalive": {"state": "OFF", "reason": None},
+                        "lease": {"id": "lease-runner", "task_ref": "训练"},
+                        "telemetry": {"memory_used_mib": 70_000, "gpu_utilization_pct": 90},
+                    },
+                ],
+            }
+        },
+        lease_id=None,
+    )
+
+    # Same server, two different leases: one card is only held, the other is
+    # actually computing.  Presence in busy_gpus does not tell them apart --
+    # status does, and it must not collapse to one value for both.
+    assert status["busy_gpus"] == [
+        {
+            "server_id": "server-a",
+            "gpu_id": "GPU-a",
+            "index": 0,
+            "status": "held_idle",
+            "task": "占卡",
+        },
+        {
+            "server_id": "server-a",
+            "gpu_id": "GPU-b",
+            "index": 1,
+            "status": "running",
+            "task": "训练",
+        },
+    ]
+
+
 def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:
     status = mcp_server._routine_gpu_status(
         {"data": {"summary": {"total_gpus": 0}, "gpus": []}},
@@ -463,8 +522,15 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
                         "resource_kind": "cpu_only",
                         "monitor": {"status": "ONLINE"},
                         "host_telemetry": {
-                            "cpu_count": 104,
-                            "memory_available_mib": 985_798,
+                            "capacity": {
+                                "cpu_scope": "container",
+                                "cpu_cores": 30.0,
+                                "cpu_available_cores": 12.5,
+                                "memory_scope": "container",
+                                "memory_total_mib": 249_856,
+                                "memory_used_mib": 51_200,
+                                "memory_available_mib": 198_656,
+                            },
                         },
                     },
                     {
@@ -485,8 +551,10 @@ def test_routine_status_reports_recognized_cpu_only_servers() -> None:
                 "server_id": "server-cpu",
                 "resource_kind": "cpu_only",
                 "monitor_status": "ONLINE",
-                "cpu_count": 104,
-                "memory_available_mib": 985_798,
+                "cpu_cores": 30.0,
+                "cpu_available_cores": 12.5,
+                "memory_total_mib": 249_856,
+                "memory_available_mib": 198_656,
             }
         ],
         "message": "no GPUs are registered",

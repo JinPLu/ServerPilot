@@ -713,7 +713,8 @@ def test_mcp_exposes_required_tools() -> None:
     assert status_schema["properties"]["lease_id"]["default"] is None
     assert "required" not in status_schema
     assert by_name["gpu_status"].description == (
-        "List grouped allocatable GPU capacity, busy_gpus and who holds them, "
+        "List grouped allocatable GPU capacity, busy_gpus with who holds each "
+        "card and whether it is computing (status), "
         "CPU-only servers, and scheduler clusters you can request on demand; "
         "pass lease_id for per-card telemetry on cards you hold."
     )
@@ -774,7 +775,8 @@ def test_default_stdio_mcp_uses_intent_first_routine_surface() -> None:
         "gpu_update_server",
     }
     assert by_name["gpu_status"].description == (
-        "List grouped allocatable GPU capacity, busy_gpus and who holds them, "
+        "List grouped allocatable GPU capacity, busy_gpus with who holds each "
+        "card and whether it is computing (status), "
         "CPU-only servers, and scheduler clusters you can request on demand; "
         "pass lease_id for per-card telemetry on cards you hold."
     )

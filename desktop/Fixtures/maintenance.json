@@ -37,7 +37,16 @@
             "cpu_count": 32,
             "load_1m": 7.0,
             "memory_total_mib": 131072,
-            "memory_available_mib": 94371
+            "memory_available_mib": 94371,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 32.0,
+              "cpu_available_cores": 25.0,
+              "memory_scope": "host",
+              "memory_total_mib": 131072,
+              "memory_used_mib": 36701,
+              "memory_available_mib": 94371
+            }
           }
         },
         {
@@ -63,7 +72,16 @@
             "cpu_count": 32,
             "load_1m": 7.0,
             "memory_total_mib": 131072,
-            "memory_available_mib": 94371
+            "memory_available_mib": 94371,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 32.0,
+              "cpu_available_cores": 25.0,
+              "memory_scope": "host",
+              "memory_total_mib": 131072,
+              "memory_used_mib": 36701,
+              "memory_available_mib": 94371
+            }
           }
         },
         {
@@ -89,7 +107,16 @@
             "cpu_count": 32,
             "load_1m": 7.0,
             "memory_total_mib": 131072,
-            "memory_available_mib": 94371
+            "memory_available_mib": 94371,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 32.0,
+              "cpu_available_cores": 25.0,
+              "memory_scope": "host",
+              "memory_total_mib": 131072,
+              "memory_used_mib": 36701,
+              "memory_available_mib": 94371
+            }
           }
         }
       ],

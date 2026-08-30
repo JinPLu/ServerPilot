@@ -218,12 +218,10 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
     public var compactLabel: String {
         var parts: [String] = []
         if cpuCores > 0 {
-            let rounded = (cpuCores * 10).rounded() / 10
-            let label = rounded == Double(Int(rounded)) ? "\(Int(rounded))" : String(format: "%.1f", rounded)
-            parts.append("\(label) CPU")
+            parts.append("\(ResourceText.coreCount(cpuCores)) CPU")
         }
         if memoryMiB > 0 {
-            parts.append("\(Self.gibibytes(memoryMiB)) GB RAM")
+            parts.append("\(ResourceText.memory(memoryMiB)) RAM")
         }
         if gpuCount > 0 {
             parts.append("\(gpuCount) GPU")
@@ -240,9 +238,26 @@ public struct ResourceQuantityRecord: Equatable, Sendable {
             memoryMiB: endpoint.memoryAvailableMiB ?? 0
         )
     }
+}
 
-    private static func gibibytes(_ mebibytes: Int) -> Int {
-        Int((Double(mebibytes) / 1024).rounded())
+/// One way to write a core count and an amount of memory. A cgroup quota is not
+/// a whole number of cores, so the fraction survives when it carries meaning.
+public enum ResourceText {
+    public static func coreCount(_ cores: Double) -> String {
+        let rounded = (cores * 10).rounded() / 10
+        return rounded == Double(Int(rounded)) ? "\(Int(rounded))" : String(format: "%.1f", rounded)
+    }
+
+    public static func cores(_ cores: Double) -> String {
+        "\(coreCount(cores)) 核"
+    }
+
+    public static func memory(_ mebibytes: Int) -> String {
+        let gibibytes = Double(mebibytes) / 1024
+        if gibibytes == Double(Int(gibibytes)) {
+            return "\(Int(gibibytes)) GB"
+        }
+        return String(format: "%.1f GB", gibibytes)
     }
 }
 
@@ -541,13 +556,19 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let monitorError: String?
     public let monitorLastSuccessAt: String?
     public let monitorLastAttemptAt: String?
-    public let cpuCount: Int?
-    public let load1m: Double?
     public let cpuUtilizationFraction: Double?
+    /// Effective CPU and memory for this endpoint, resolved by the broker: a
+    /// container's cgroup budget where one is in force, the machine's own
+    /// capacity otherwise.  The raw host readings are deliberately not carried
+    /// here — a node's core count and MemTotal describe the machine, not the
+    /// share this endpoint may use.
+    public let cpuScope: String?
+    public let cpuCores: Double?
+    public let cpuAvailableCores: Double?
+    public let memoryScope: String?
     public let memoryTotalMiB: Int?
+    public let memoryUsedMiB: Int?
     public let memoryAvailableMiB: Int?
-    public let memoryLimitMiB: Int?
-    public let memoryCurrentMiB: Int?
     public let recentTelemetryAverage: HostTelemetryRecentAverage?
     public let schedulerCapacity: SchedulerCapacity?
 
@@ -580,13 +601,15 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.monitorLastSuccessAt = monitor.string("last_success_at")
         self.monitorLastAttemptAt = monitor.string("last_attempt_at")
         let hostTelemetry = raw["host_telemetry"] as? [String: Any] ?? [:]
-        self.cpuCount = hostTelemetry.optionalInt("cpu_count")
-        self.load1m = hostTelemetry.optionalDouble("load_1m")
         self.cpuUtilizationFraction = hostTelemetry.optionalPercent("cpu_utilization_pct")
-        self.memoryTotalMiB = hostTelemetry.optionalInt("memory_total_mib")
-        self.memoryAvailableMiB = hostTelemetry.optionalInt("memory_available_mib")
-        self.memoryLimitMiB = hostTelemetry.optionalInt("memory_limit_mib")
-        self.memoryCurrentMiB = hostTelemetry.optionalInt("memory_current_mib")
+        let capacity = hostTelemetry["capacity"] as? [String: Any] ?? [:]
+        self.cpuScope = capacity.string("cpu_scope")
+        self.cpuCores = capacity.optionalDouble("cpu_cores")
+        self.cpuAvailableCores = capacity.optionalDouble("cpu_available_cores")
+        self.memoryScope = capacity.string("memory_scope")
+        self.memoryTotalMiB = capacity.optionalInt("memory_total_mib")
+        self.memoryUsedMiB = capacity.optionalInt("memory_used_mib")
+        self.memoryAvailableMiB = capacity.optionalInt("memory_available_mib")
         self.recentTelemetryAverage = HostTelemetryRecentAverage(
             raw: hostTelemetry["recent_average"] as? [String: Any] ?? [:]
         )
@@ -624,40 +647,44 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         }
     }
 
+    /// Being stopped by a person and being unreachable are different answers to
+    /// different questions, so the human-set states are answered first.  Only
+    /// after them does `monitorError` -- which describes the most recent probe
+    /// attempt, never the host itself -- get read as a reason for silence.
     public var monitorDetail: String? {
-        if let monitorError, !monitorError.isEmpty {
-            let lowered = monitorError.lowercased()
-            if lowered.contains("timed out") || lowered.contains("timeout") {
-                return "连接或更新超时 · 检查服务器和 SSH"
-            }
-            if lowered.contains("connection refused") {
-                return "连接被拒绝 · 检查 SSH 服务和端口"
-            }
-            if lowered.contains("permission denied") || lowered.contains("authentication") {
-                return "SSH 验证失败 · 检查账号和密钥"
-            }
-            if lowered.contains("no route to host") || lowered.contains("network is unreachable") {
-                return "网络不可达"
-            }
-            return "无法连接服务器 · 检查 SSH"
+        if monitorStatus == "DISABLED" {
+            return "这台服务器已停用，不接收新任务；不会停止远端任务。"
         }
-        if monitorStatus == "STALE" {
-            return "最近一次服务器数据已过期"
+        if lifecycleState == "DRAINING" || monitorStatus == "DRAINING" {
+            return "这台服务器已暂停接收新任务，正在排空；不会停止远端任务。"
         }
         if monitorStatus == "PENDING" {
             return "正在进行首次连接"
         }
-        if monitorStatus == "ERROR" {
-            return "连接或更新失败"
+        if monitorStatus == "ERROR" || monitorStatus == "STALE" {
+            if let monitorError, !monitorError.isEmpty {
+                let lowered = monitorError.lowercased()
+                if lowered.contains("timed out") || lowered.contains("timeout") {
+                    return "连接或更新超时 · 检查服务器和 SSH"
+                }
+                if lowered.contains("connection refused") {
+                    return "连接被拒绝 · 检查 SSH 服务和端口"
+                }
+                if lowered.contains("permission denied") || lowered.contains("authentication") {
+                    return "SSH 验证失败 · 检查账号和密钥"
+                }
+                if lowered.contains("no route to host") || lowered.contains("network is unreachable") {
+                    return "网络不可达"
+                }
+                return "无法连接服务器 · 检查 SSH"
+            }
+            return monitorStatus == "STALE" ? "最近一次服务器数据已过期" : "连接或更新失败"
         }
         if let monitorLastSuccessAt, !monitorLastSuccessAt.isEmpty {
             return "上次连接成功：\(monitorLastSuccessAt)"
         }
         if let monitorLastAttemptAt, !monitorLastAttemptAt.isEmpty {
             return "上次尝试连接：\(monitorLastAttemptAt)"
-        }
-        if lifecycleState == "DRAINING" || monitorStatus == "DRAINING" {
-            return "这台服务器已暂停接收新任务，正在排空；不会停止远端任务。"
         }
         return nil
     }
@@ -668,22 +695,25 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     }
 
     public var availableCPUCores: Double? {
-        guard monitorStatus == "ONLINE", let cpuCount, cpuCount > 0, let load1m else { return nil }
-        return max(0, Double(cpuCount) - load1m)
+        guard monitorStatus == "ONLINE" else { return nil }
+        return cpuAvailableCores
     }
 
     public var memoryFraction: Double? {
-        guard monitorStatus == "ONLINE" else { return nil }
-        if let memoryLimitMiB, memoryLimitMiB > 0, let memoryCurrentMiB {
-            return min(max(Double(memoryCurrentMiB) / Double(memoryLimitMiB), 0), 1)
-        }
         guard
+            monitorStatus == "ONLINE",
             let memoryTotalMiB,
             memoryTotalMiB > 0,
-            let memoryAvailableMiB
+            let memoryUsedMiB
         else { return nil }
-        return min(max(1 - Double(memoryAvailableMiB) / Double(memoryTotalMiB), 0), 1)
+        return min(max(Double(memoryUsedMiB) / Double(memoryTotalMiB), 0), 1)
     }
+
+    /// Says out loud that a container budget, not the machine, is what these
+    /// numbers describe — a node's 128 cores are not this endpoint's to use.
+    public var cpuScopeNote: String? { cpuScope == "container" ? "容器配额" : nil }
+
+    public var memoryScopeNote: String? { memoryScope == "container" ? "容器配额" : nil }
 }
 
 public struct GPURecentTelemetryAverage: Equatable, Sendable {

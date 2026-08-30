@@ -31,8 +31,16 @@ from serverpilot.client import (
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
 # The agent surface reports the GPU state code, not the control plane's
-# localized label. A caller decides on "can I claim this" and, when it cannot,
-# on who is holding it; the desktop app owns how that reads in a human language.
+# localized label; the desktop app owns how that reads in a human language.
+# A caller decides on "can I claim this" and, when it cannot, on two things at
+# once: who is holding the card (the lease task) and whether a compute process
+# is actually on it -- running and busy_unmanaged say there is, held_idle says
+# the card is only held. Both axes have to stay spelled out in
+# MCP_INSTRUCTIONS, or a caller reads a stalled hold as a running job and waits
+# for a card nobody is using. HELD and LEASED_IDLE collapse into held_idle, and
+# BUSY_UNMANAGED and ORPHANED_BUSY into busy_unmanaged, because each pair
+# leaves the caller the same move; splitting them back apart adds vocabulary,
+# not choices.
 ROUTINE_GPU_STATUS = {
     "CONFLICT": "ownership_conflict",
     "BUSY_UNMANAGED": "busy_unmanaged",
@@ -58,13 +66,14 @@ ROUTINE_GPU_COUNT_DESCRIPTION = (
     "`--nproc_per_node`, `num_processes`, `--gres`), never server/free capacity"
 )
 
-MCP_INSTRUCTIONS = """Five tools cover GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=the task name, never the client UI title); gpu_release; gpu_add_server registers a host (observation_profile: linux-nvidia, linux-host, server-script-v1, or local plugin ID); gpu_update_server updates safe host metadata.
+MCP_INSTRUCTIONS = """Five tools cover GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=the task name, never the client UI title); gpu_release; gpu_add_server registers a host; gpu_update_server updates safe host metadata.
 Assess group workspace/environment/data-weight notes, capacity and limits first; choose server_group_id for grouped hosts; the broker best-fits within that group. server_id is for ungrouped compatibility and must not pin a grouped host.
 Connection and working directory are projected once per server: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.
 cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
-gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus(task) with no telemetry; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.
+gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.
 Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now. Load on a free card is ServerPilot's own hold, stopped before allocation, not evidence it is taken.
 no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. Idle reclaim is a backstop, not how a card comes back.
+busy_gpus[]: task=who holds the card, status=whether it is working — running (a compute process under that lease), busy_unmanaged (a process ServerPilot does not own), held_idle (held, nothing computing: ask the holder or pick elsewhere), ownership_conflict (holder unverifiable). Only running and busy_unmanaged mean work is on the card.
 ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
 
 
@@ -729,7 +738,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
     Allocatable capacity is a per-server SKU summary under ``server_groups`` or
     ``ungrouped_servers``, never one free row per card.  ``leased_gpus`` says
     how the caller's own workload is running, and ``busy_gpus`` says who holds
-    the rest.  Telemetry belongs to exactly one of them: a card is only
+    the rest and, in ``status``, whether a compute process is on the card.  Telemetry belongs to exactly one of them: a card is only
     readable where its occupancy provably belongs to the reader.  On an
     unclaimed card the observable load is ServerPilot's own keepalive hold,
     which is stopped before allocation, so publishing it there would read as
@@ -874,15 +883,17 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         monitor = monitor if isinstance(monitor, dict) else {}
         host_telemetry = endpoint.get("host_telemetry")
         host_telemetry = host_telemetry if isinstance(host_telemetry, dict) else {}
+        capacity = host_telemetry.get("capacity")
+        capacity = capacity if isinstance(capacity, dict) else {}
         cpu_only_servers.append(
             {
                 "server_id": endpoint.get("id"),
                 "resource_kind": "cpu_only",
                 "monitor_status": monitor.get("status"),
-                "cpu_count": _routine_integer(host_telemetry.get("cpu_count")),
-                "memory_available_mib": _routine_integer(
-                    host_telemetry.get("memory_available_mib")
-                ),
+                "cpu_cores": _routine_number(capacity.get("cpu_cores")),
+                "cpu_available_cores": _routine_number(capacity.get("cpu_available_cores")),
+                "memory_total_mib": _routine_integer(capacity.get("memory_total_mib")),
+                "memory_available_mib": _routine_integer(capacity.get("memory_available_mib")),
             }
         )
     if cpu_only_servers:
@@ -1002,7 +1013,7 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
 
 @mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
 async def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-    """List grouped allocatable GPU capacity, busy_gpus and who holds them, CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
+    """List grouped allocatable GPU capacity, busy_gpus with who holds each card and whether it is computing (status), CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
 
     if server_id is not None:
         server_id = server_id.strip()

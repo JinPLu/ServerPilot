@@ -1002,16 +1002,11 @@ private func normalizedTask(_ taskReference: String?, purpose: String? = nil) ->
 }
 
 private func usageCPUText(_ cores: Double) -> String {
-    let rounded = (cores * 10).rounded() / 10
-    return rounded == Double(Int(rounded)) ? "\(Int(rounded)) 核" : String(format: "%.1f 核", rounded)
+    ResourceText.cores(cores)
 }
 
 private func usageMemoryText(_ mebibytes: Int) -> String {
-    let gibibytes = Double(mebibytes) / 1024
-    if gibibytes == Double(Int(gibibytes)) {
-        return "\(Int(gibibytes)) GB"
-    }
-    return String(format: "%.1f GB", gibibytes)
+    ResourceText.memory(mebibytes)
 }
 
 private func usageTimestamp(_ value: String?) -> String {

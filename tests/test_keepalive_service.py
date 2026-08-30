@@ -653,6 +653,69 @@ def test_endpoint_operator_can_clear_stale_per_gpu_keepalive_lease(service, admi
     assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "AVAILABLE"
 
 
+def test_probe_failure_after_a_complete_observation_still_activates_keepalive(
+    service, admin
+) -> None:
+    """A later failed attempt does not un-observe the observation that already landed."""
+
+    _configure_idle_policy(service, admin)
+    started = utcnow()
+    service.ingest_observation(
+        observation(count=2, processes=[process_for_gpu("GPU-endpoint-a-0", pid=4321)])
+    )
+    service.record_provider_failure("endpoint-a", "TimeoutError: SSH observation timed out")
+
+    begun = service.activate_keepalive(
+        admin,
+        "endpoint-a",
+        "endpoint-a:GPU-endpoint-a-0",
+        observation_not_before=started,
+        idempotency_key="activate-after-probe-failure",
+    )
+
+    keepalive = begun["keepalive"]
+    assert isinstance(keepalive, dict)
+    assert keepalive["state"] == "ACTIVE"
+    gpus = _gpus(service.snapshot(admin))
+    assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "KEEPALIVE"
+
+
+def test_probe_failure_after_an_empty_observation_still_clears_the_lease(service, admin) -> None:
+    """The proof is one empty observation after the barrier, not an unbroken streak."""
+
+    _configure_idle_policy(service, admin)
+    begun = _begin(service, admin)
+    keepalive = begun["keepalive"]
+    assert isinstance(keepalive, dict)
+    lease_id = str(keepalive["lease_id"])
+
+    service.configure_keepalive_policy(
+        admin,
+        "endpoint-a",
+        "disabled",
+        idempotency_key="probe-failure-policy-disabled",
+    )
+    barrier = utcnow()
+    service.ingest_observation(observation(count=2, processes=[]))
+    service.record_provider_failure("endpoint-a", "TimeoutError: SSH observation timed out")
+
+    released = service.release_empty_conflicted_lease(
+        admin,
+        "endpoint-a",
+        lease_id,
+        observation_not_before=barrier,
+        idempotency_key="probe-failure-release-empty",
+    )
+
+    assert released["released"] is True
+    assert released["lease"]["state"] == "RELEASED"
+    assert (
+        released["lease"]["release_reason"] == "empty fresh observation cleared endpoint ownership"
+    )
+    gpus = _gpus(service.snapshot(admin))
+    assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "AVAILABLE"
+
+
 def test_active_keepalive_adapter_cannot_be_removed(service, admin) -> None:
     _configure_idle_policy(service, admin)
     _begin(service, admin)

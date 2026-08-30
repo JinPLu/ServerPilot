@@ -360,8 +360,15 @@ def test_delegated_cluster_appears_inside_its_server_group() -> None:
                         "resource_kind": "cpu_only",
                         "monitor": {"status": "ONLINE"},
                         "host_telemetry": {
-                            "cpu_count": 104,
-                            "memory_available_mib": 985_798,
+                            "capacity": {
+                                "cpu_scope": "container",
+                                "cpu_cores": 30.0,
+                                "cpu_available_cores": 12.5,
+                                "memory_scope": "container",
+                                "memory_total_mib": 249_856,
+                                "memory_used_mib": 51_200,
+                                "memory_available_mib": 198_656,
+                            },
                         },
                     },
                 ],
@@ -411,8 +418,10 @@ def test_delegated_cluster_appears_inside_its_server_group() -> None:
             "server_id": "server-cpu",
             "resource_kind": "cpu_only",
             "monitor_status": "ONLINE",
-            "cpu_count": 104,
-            "memory_available_mib": 985_798,
+            "cpu_cores": 30.0,
+            "cpu_available_cores": 12.5,
+            "memory_total_mib": 249_856,
+            "memory_available_mib": 198_656,
         }
     ]
     assert "message" not in status
@@ -518,8 +527,15 @@ def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
                         "resource_kind": "cpu_only",
                         "monitor": {"status": "ONLINE"},
                         "host_telemetry": {
-                            "cpu_count": 104,
-                            "memory_available_mib": 985_798,
+                            "capacity": {
+                                "cpu_scope": "container",
+                                "cpu_cores": 30.0,
+                                "cpu_available_cores": 12.5,
+                                "memory_scope": "container",
+                                "memory_total_mib": 249_856,
+                                "memory_used_mib": 51_200,
+                                "memory_available_mib": 198_656,
+                            },
                         },
                     },
                     _endpoint("legacy-a"),
@@ -542,8 +558,10 @@ def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
             "server_id": "server-cpu",
             "resource_kind": "cpu_only",
             "monitor_status": "ONLINE",
-            "cpu_count": 104,
-            "memory_available_mib": 985_798,
+            "cpu_cores": 30.0,
+            "cpu_available_cores": 12.5,
+            "memory_total_mib": 249_856,
+            "memory_available_mib": 198_656,
         }
     ]
 
@@ -612,8 +630,15 @@ def test_narrowed_status_keeps_ungrouped_or_cpu_only_only_when_they_are_the_memb
                         "resource_kind": "cpu_only",
                         "monitor": {"status": "ONLINE"},
                         "host_telemetry": {
-                            "cpu_count": 104,
-                            "memory_available_mib": 985_798,
+                            "capacity": {
+                                "cpu_scope": "container",
+                                "cpu_cores": 30.0,
+                                "cpu_available_cores": 12.5,
+                                "memory_scope": "container",
+                                "memory_total_mib": 249_856,
+                                "memory_used_mib": 51_200,
+                                "memory_available_mib": 198_656,
+                            },
                         },
                     }
                 ],

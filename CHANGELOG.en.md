@@ -4,6 +4,14 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## 2.3.0 - 2026-08-31
+
+**The numbers you see are the numbers you can claim, and a card's state reads at a glance.**
+
+- **CPU and memory now show what the machine actually gives this endpoint.** A containerized server reports the whole node's cores and memory, so the interface read "128 cores, 974 GB, 121 free" for an endpoint that only owns 60 cores and 480 GB — sizing parallelism off that number oversubscribes the job. The GUI, MCP, and the allocator now read one resolved figure, labelled as a container quota where it comes from a cgroup budget; CPU and memory requests are admitted against that same budget instead of the node's core count.
+- **A network blip no longer makes a healthy server show as unreachable.** A single failed SSH probe used to turn a server red immediately, even one that had reported in seconds earlier; it now takes a sustained silence to call it unreachable. A disabled or draining server is also no longer shown as a connection failure.
+- **An agent can now tell "held but idle" apart from "actually running a job."** The MCP status values existed in code but were never explained in words, so an agent could see a card was held but not whether anything was computing on it.
+
 ## 2.2.0 - 2026-08-29
 
 **Cards can be claimed, released, and deleted, and the interface stops stalling.**

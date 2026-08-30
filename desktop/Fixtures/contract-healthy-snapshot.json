@@ -22,10 +22,14 @@
         "port": 2221,
         "ssh_user": "gpu",
         "workspace_path": "/srv/serverpilot-fixtures",
-        "labels": {"fixture": "true"},
+        "labels": {
+          "fixture": "true"
+        },
         "lifecycle_state": "active",
         "enabled": true,
-        "monitor": {"status": "ONLINE"}
+        "monitor": {
+          "status": "ONLINE"
+        }
       }
     ],
     "gpus": [
@@ -36,7 +40,9 @@
         "gpu_index": 0,
         "name": "Fixture GPU",
         "total_vram_mib": 81920,
-        "labels": {"fixture": "true"},
+        "labels": {
+          "fixture": "true"
+        },
         "health": "OK",
         "enabled": true,
         "state": "AVAILABLE",

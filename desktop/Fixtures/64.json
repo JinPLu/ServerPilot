@@ -37,7 +37,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -63,7 +72,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -89,7 +107,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -115,7 +142,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -141,7 +177,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -167,7 +212,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -193,7 +247,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         },
         {
@@ -219,7 +282,16 @@
             "cpu_count": 64,
             "load_1m": 7.0,
             "memory_total_mib": 262144,
-            "memory_available_mib": 188743
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
           }
         }
       ],

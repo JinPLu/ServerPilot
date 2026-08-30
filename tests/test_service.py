@@ -21,6 +21,7 @@ from serverpilot.models import (
     GPUDevice,
     Lease,
     LeaseResource,
+    ProviderState,
     TelemetryCurrent,
     TelemetrySnapshot,
 )
@@ -1672,6 +1673,15 @@ def test_endpoint_cpu_and_memory_telemetry_is_exposed_in_snapshot(service, admin
         "memory_available_mib": 196_608,
         "memory_limit_mib": None,
         "memory_current_mib": None,
+        "capacity": {
+            "cpu_scope": "host",
+            "cpu_cores": 64.0,
+            "cpu_available_cores": 60.0,
+            "memory_scope": "host",
+            "memory_total_mib": 262_144,
+            "memory_used_mib": 65_536,
+            "memory_available_mib": 196_608,
+        },
         "provider": "raw-ssh",
         "recent_average": {
             "window_seconds": 600,
@@ -1751,6 +1761,129 @@ def test_endpoint_history_is_throttled_and_calculates_cgroup_cpu_utilization(
     assert len(gpu_series[0]["points"]) == 2
     assert gpu_series[0]["points"][1]["gpu_utilization_pct"] == 0.0
     assert gpu_series[0]["points"][1]["memory_used_pct"] == 0.0
+
+
+def test_host_capacity_reports_the_cgroup_budget_instead_of_the_whole_machine(
+    service, admin
+) -> None:
+    start = utcnow() - timedelta(minutes=10)
+    cgroup_host = {
+        "cpu_quota_usec": 6_000_000,
+        "cpu_period_usec": 100_000,
+        "memory_total_mib": 1_029_910,
+        "memory_available_mib": 819_837,
+        "memory_limit_mib": 491_520,
+        "memory_current_mib": 132_337,
+    }
+    service.ingest_observation(
+        observation(
+            count=1,
+            observed_at=start,
+            host={**cgroup_host, "cpu_usage_usec": 1_000_000_000},
+        )
+    )
+    service.ingest_observation(
+        observation(
+            count=1,
+            observed_at=start + timedelta(seconds=60),
+            # 30 of the 60 quota cores busy over the interval.
+            host={**cgroup_host, "cpu_usage_usec": 1_000_000_000 + 30_000_000 * 60},
+        )
+    )
+
+    host = service.snapshot(admin)["data"]["endpoints"][0]["host_telemetry"]
+
+    assert host["cpu_count"] == 64
+    assert host["capacity"] == {
+        "cpu_scope": "container",
+        "cpu_cores": 60.0,
+        "cpu_available_cores": 30.0,
+        "memory_scope": "container",
+        "memory_total_mib": 491_520,
+        "memory_used_mib": 132_337,
+        "memory_available_mib": 359_183,
+    }
+
+
+def test_admission_sizes_a_container_endpoint_by_its_cgroup_budget(service, admin) -> None:
+    """The allocator admits against the same figures the interface shows.
+
+    The node has 64 cores and about 1 TiB; this endpoint owns 60 cores and
+    480 GiB of it.  A request that only fits the node must not be admitted.
+    """
+
+    now = utcnow()
+    cgroup_host = {
+        "cpu_quota_usec": 6_000_000,
+        "cpu_period_usec": 100_000,
+        "memory_total_mib": 1_029_910,
+        "memory_available_mib": 819_837,
+        "memory_limit_mib": 491_520,
+        "memory_current_mib": 132_337,
+    }
+    service.ingest_observation(
+        observation(
+            count=1,
+            observed_at=now - timedelta(seconds=60),
+            host={**cgroup_host, "cpu_usage_usec": 1_000_000_000},
+        )
+    )
+    # The latest observation stays fresh so the cards remain allocatable; only
+    # the CPU share is at issue here.
+    service.ingest_observation(
+        observation(
+            count=1,
+            observed_at=now,
+            # 30 of the 60 quota cores busy over the interval.
+            host={**cgroup_host, "cpu_usage_usec": 1_000_000_000 + 30_000_000 * 60},
+        )
+    )
+
+    capacity = service.snapshot(admin)["data"]["host_capacity"][0]["capacity"]
+    assert capacity["total_cpu_cores"] == 60.0
+    assert capacity["observed_available_cpu_cores"] == 30.0
+    assert capacity["total_memory_mib"] == 491_520
+    assert capacity["observed_available_memory_mib"] == 359_183
+
+    # 40 free cores exist on the node but not in this endpoint's share.
+    beyond_share = RequestCreate.model_validate(
+        {
+            "project_id": "project-a",
+            "task_ref": "beyond-container-share",
+            "purpose": "ask for more free cores than the cgroup budget leaves",
+            "constraints": {"gpu_count": 1, "min_available_cpu_cores": 40},
+        }
+    )
+    with pytest.raises(BrokerError) as cpu_error:
+        service.create_request(admin, beyond_share, idempotency_key="beyond-container-cpu")
+    assert cpu_error.value.code == "no_capacity"
+
+    beyond_memory = RequestCreate.model_validate(
+        {
+            "project_id": "project-a",
+            "task_ref": "beyond-container-memory",
+            "purpose": "ask for more free memory than the cgroup budget leaves",
+            "constraints": {"gpu_count": 1, "min_available_memory_mib": 400 * 1024},
+        }
+    )
+    with pytest.raises(BrokerError) as memory_error:
+        service.create_request(admin, beyond_memory, idempotency_key="beyond-container-memory")
+    assert memory_error.value.code == "no_capacity"
+
+    within_share = RequestCreate.model_validate(
+        {
+            "project_id": "project-a",
+            "task_ref": "within-container-share",
+            "purpose": "ask for resources the cgroup budget actually leaves free",
+            "constraints": {
+                "gpu_count": 1,
+                "min_available_cpu_cores": 25,
+                "min_available_memory_mib": 300 * 1024,
+            },
+        }
+    )
+    allocated = service.create_request(admin, within_share, idempotency_key="within-container")
+    assert allocated["lease"] is not None
 
 
 def test_host_memory_used_pct_prefers_cgroup_limit_over_host_memtotal(service, admin) -> None:
@@ -2588,6 +2721,18 @@ def test_alerts_do_not_outlive_the_lease_or_server_they_describe(service, admin)
     """
 
     service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    # The alert waits for the same staleness criterion the monitor status
+    # uses: a single failed probe right after a fresh observation must not
+    # raise it, so age the last success before failing the probe.
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
+        )
+        assert state is not None
+        state.last_success_at = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 60
+        )
+        session.commit()
     service.record_provider_failure("endpoint-b", "CollectionError: timed out")
     assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
 
@@ -2624,6 +2769,103 @@ def test_alerts_do_not_outlive_the_lease_or_server_they_describe(service, admin)
 
     service.delete_endpoint(admin, "endpoint-b", idempotency_key="alert-lifetime-delete")
     assert _active_alerts(service) == set()
+
+
+def _endpoint_monitor(service, endpoint_id: str) -> dict[str, object]:  # noqa: ANN001
+    snapshot = service.snapshot(service.local_actor("human"))["data"]
+    endpoint = next(item for item in snapshot["endpoints"] if item["id"] == endpoint_id)
+    return endpoint["monitor"]
+
+
+def test_single_failed_probe_within_stale_window_stays_online(service, admin) -> None:
+    """One dropped probe is not proof the host is gone.
+
+    GPU eligibility already keys off telemetry age (`_eligible_gpus`), not
+    `provider_state.last_error`. The endpoint monitor status must use the
+    same clock, or a server reads as unreachable while its cards still
+    allocate just fine.
+    """
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
+
+    monitor = _endpoint_monitor(service, "endpoint-b")
+    assert monitor["status"] == "ONLINE"
+    assert monitor["last_error"] == "TimeoutError: SSH observation timed out"
+    assert ("collector_unreachable", "endpoint-b") not in _active_alerts(service)
+
+
+def test_stale_last_success_with_error_reports_error_and_alerts(service, admin) -> None:
+    """Once the last successful observation is itself stale, the failure is believed."""
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
+        )
+        assert state is not None
+        state.last_success_at = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 60
+        )
+        session.commit()
+
+    service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
+
+    monitor = _endpoint_monitor(service, "endpoint-b")
+    assert monitor["status"] == "ERROR"
+    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
+
+
+def test_recovering_observation_clears_error_status_and_alert(service, admin) -> None:
+    """A complete observation is what proves the host is back, and only that."""
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    with service.database.session() as session:
+        state = session.scalar(
+            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
+        )
+        assert state is not None
+        state.last_success_at = utcnow() - timedelta(
+            seconds=service.inventory.collector.stale_after_seconds + 60
+        )
+        session.commit()
+    service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
+    assert _endpoint_monitor(service, "endpoint-b")["status"] == "ERROR"
+    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+
+    monitor = _endpoint_monitor(service, "endpoint-b")
+    assert monitor["status"] == "ONLINE"
+    assert monitor["last_error"] is None
+    assert ("collector_unreachable", "endpoint-b") not in _active_alerts(service)
+
+
+def test_gpus_stay_allocatable_through_a_single_probe_jitter(service, admin) -> None:
+    """A dropped probe must not take a server's cards off the table.
+
+    `_eligible_gpus` was already clock-consistent with telemetry age; this
+    pins that the endpoint-level monitor status no longer disagrees with it
+    for the duration of the claim.
+    """
+
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+    service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
+    assert _endpoint_monitor(service, "endpoint-b")["status"] == "ONLINE"
+
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "jitter-still-allocatable",
+                "purpose": "one failed probe must not block allocation",
+                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
+            }
+        ),
+        idempotency_key="jitter-still-allocatable-claim",
+    )
+    assert len(claimed["lease"]["gpu_ids"]) == 1
 
 
 def _present_uuid_owners(service, gpu_uuid: str) -> set[str]:  # noqa: ANN001

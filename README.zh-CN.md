@@ -155,7 +155,7 @@ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, tas
 - 已分组主机（裸机 `direct` 和插件 `delegated`）传 `server_group_id`，再由分配器在组内 best-fit；`server_id` 只留给未分组主机。插件接入的集群以正常分组出现，带 `allocation`、`limits` 和 `largest_allocatable_block`（一次申请能拿到的最大卡数，不是池子剩余总数；`null` 表示未知，不要编造数字）。
 - 登记和更新主机用 `gpu_add_server`、`gpu_update_server`。MCP 不提供删除；在 App 或 REST 移除服务器，有进行中租约时会拒绝。
 - 申请前先看分组的工作目录、环境说明和数据/权重说明。成员继承组工作目录，或按服务器覆盖。环境说明只供阅读，不会被执行或注入。
-- `gpu_status` 按 组 → 服务器 → SKU 讲可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，也不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配。
+- `gpu_status` 按 组 → 服务器 → SKU 讲可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，也不带遥测：空闲卡上能看到的负载来自 ServerPilot 自己的占卡程序，分配前会被停掉，不能据此认为这张卡被占用。遥测跟着租约走——`gpu_status(lease_id=…)` 返回 `leased_gpus` 的近 10 分钟均值和 `lease` 汇总（`min_memory_free_mib`、`slowest_gpu`），用来判断自己的任务有没有把卡用好。GUI 与 MCP 读的都是 daemon 同一份 REST 快照，不会重复 SSH 采集；GUI 的逐卡瞬时遥测另有 REST 投影。首次只读采集会把 endpoint 标记为 GPU、纯 CPU 或尚未确认；纯 CPU 服务器保留 CPU/内存监控，会在 `cpu_only_servers` 里列出供参考，但不参与 GPU 分配；这里和 GUI 的 CPU/内存都按该服务器实际拥有的额度算——容器上是 cgroup 配额，不是宿主机的核数和 MemTotal。
 - SSH 后先进入返回的 `workspace.path`，再使用 CUDA selector。`workspace.path` 是远端工作目录，不是代码仓库。
 - CUDA 初始化或工作负载启动失败时，立即 `gpu_release`。
 - `no_capacity` 表示不分配、不排队；不要在同一轮反复申请。

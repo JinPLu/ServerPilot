@@ -1412,7 +1412,7 @@ private struct ResourcesDashboard: View {
                 case .keepalive:
                     endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning
                 case .connectionFailed:
-                    endpoint.monitorStatus != "ONLINE"
+                    ["ERROR", "STALE"].contains(endpoint.monitorStatus)
                 }
             }
             .filter { endpoint in
@@ -2249,14 +2249,19 @@ private struct EndpointTableRow: View {
         return hostScale
     }
 
-    private var reachable: Bool { endpoint.monitorStatus == "ONLINE" && isSnapshotFresh }
-
     /// First match wins.  A free card outranks a busy sibling: the contract's
     /// fault-isolation rule says one conflicted GPU must never hide the rest.
     /// Scheduler-backed endpoints have no local GPU inventory; they are not
     /// CPU nodes.
+    ///
+    /// Unreachable is not one thing: a stale local snapshot is this machine's
+    /// loopback hop, not the remote server, and monitorLabel already carries
+    /// the distinct words for connection trouble versus a human-set
+    /// disabled/draining state — collapsing either into "无响应" would relabel
+    /// a deliberate pause as a failure.
     private var statusWord: String {
-        if !reachable { return "无响应" }
+        if !isSnapshotFresh { return "本机未更新" }
+        if endpoint.monitorStatus != "ONLINE" { return endpoint.monitorLabel }
         if isOnDemandEndpoint {
             if let limit = onDemandApplyLimit {
                 return "按需申请 · 一次最多 \(limit) 卡"
@@ -2271,7 +2276,8 @@ private struct EndpointTableRow: View {
     }
 
     private var statusColor: Color {
-        if !reachable { return DesignTokens.danger }
+        if !isSnapshotFresh { return DesignTokens.danger }
+        if endpoint.monitorStatus != "ONLINE" { return endpointMonitorStatusColor(endpoint.monitorStatus) }
         if isOnDemandEndpoint {
             return onDemandHasCapacity ? DesignTokens.success : DesignTokens.mutedInk
         }
@@ -2405,21 +2411,25 @@ private struct EndpointTableRow: View {
         return "未检测到 GPU"
     }
 
-    /// A CPU node's identity: how much machine it is.
+    /// A CPU node's identity: how much machine this endpoint actually owns.
     private var hostScale: String {
         var parts: [String] = []
-        if let cores = endpoint.cpuCount { parts.append("\(cores) 核") }
+        if let cores = endpoint.cpuCores {
+            parts.append(scopedFact(ResourceText.cores(cores), note: endpoint.cpuScopeNote))
+        }
         if let total = endpoint.memoryTotalMiB, total > 0 {
-            parts.append("\(Int((Double(total) / 1024).rounded())) GB 内存")
+            parts.append(scopedFact("\(ResourceText.memory(total)) 内存", note: endpoint.memoryScopeNote))
         }
         return parts.isEmpty ? "无主机遥测" : parts.joined(separator: " · ")
     }
 
     private var hostFacts: String {
         var facts: [String] = []
-        if let cores = endpoint.cpuCount { facts.append("\(cores) 核") }
+        if let cores = endpoint.cpuCores {
+            facts.append(scopedFact(ResourceText.cores(cores), note: endpoint.cpuScopeNote))
+        }
         if let total = endpoint.memoryTotalMiB, total > 0 {
-            facts.append("\(Int((Double(total) / 1024).rounded())) GB 内存")
+            facts.append(scopedFact("\(ResourceText.memory(total)) 内存", note: endpoint.memoryScopeNote))
         }
         if let peak = gpus.compactMap(\.temperature).max() { facts.append("最高 \(peak) °C") }
         return facts.isEmpty ? "无主机遥测" : facts.joined(separator: " · ")
@@ -3335,6 +3345,13 @@ private func onDemandApplyLimit(group: ServerGroupRecord?, endpoints: [EndpointR
     return endpointLimits.max()
 }
 
+/// "60 核（容器配额）".  Without the note a container's budget reads as the
+/// size of the whole machine, which is the number a caller must not plan with.
+private func scopedFact(_ text: String, note: String?) -> String {
+    guard let note else { return text }
+    return "\(text)（\(note)）"
+}
+
 private func endpointGPUModelSummary(_ gpus: [GPURecord]) -> String {
     guard !gpus.isEmpty else { return "无 GPU" }
     let names = Array(Set(gpus.map(\.name))).sorted()
@@ -3524,6 +3541,29 @@ private func endpointStateIcon(_ state: String) -> String {
     }
 }
 
+/// DISABLED/DRAINING are a human's own setting, not a connection failure;
+/// painting them danger-red would say the opposite of what happened. Shared
+/// by every non-ONLINE status color so the mapping lives in one table.
+private func endpointMonitorStatusColor(_ state: String) -> Color {
+    switch state {
+    case "ERROR": return DesignTokens.danger
+    case "DISABLED", "DRAINING": return DesignTokens.mutedInk
+    default: return DesignTokens.warning
+    }
+}
+
+/// The footer says why the sheet is not offering a claim.  A server a person
+/// stopped is not a server that went quiet, so the two get different sentences.
+private func endpointFooterMessage(_ endpoint: EndpointRecord) -> String {
+    switch endpoint.monitorStatus {
+    case "ONLINE": return "状态按设定周期自动更新"
+    case "DISABLED": return "这台服务器已停用，暂不可申请 GPU"
+    case "DRAINING": return "这台服务器正在排空，暂不接收新申请"
+    case "PENDING": return "正在进行首次连接，暂不可申请 GPU"
+    default: return "当前数据已过期，暂不可申请 GPU"
+    }
+}
+
 private func localizedStateReason(_ reason: String) -> String {
     if reason == "no fresh telemetry after service start" {
         return "正在进行首次连接"
@@ -3687,7 +3727,7 @@ private struct ServerDetailSheet: View {
                         if endpoint.monitorStatus != "ONLINE" {
                             DetailCallout(
                                 icon: endpointStateIcon(endpoint.monitorStatus),
-                                color: endpoint.monitorStatus == "PENDING" ? DesignTokens.warning : DesignTokens.danger,
+                                color: endpointMonitorStatusColor(endpoint.monitorStatus),
                                 message: endpoint.monitorDetail ?? endpoint.monitorLabel
                             )
                         }
@@ -3795,7 +3835,7 @@ private struct ServerDetailSheet: View {
 
                         HStack {
                             Label(
-                                endpoint.monitorStatus == "ONLINE" ? "状态按设定周期自动更新" : "当前数据已过期，暂不可申请 GPU",
+                                endpointFooterMessage(endpoint),
                                 systemImage: endpoint.monitorStatus == "ONLINE" ? "arrow.clockwise" : "hand.raised.fill"
                             )
                                 .font(.subheadline.weight(.medium))
@@ -3853,11 +3893,11 @@ private struct ServerDetailSheet: View {
 
     private func hostFacts(_ endpoint: EndpointRecord) -> [(String, String)] {
         var facts: [(String, String)] = []
-        if let cores = endpoint.cpuCount {
-            facts.append(("CPU 核数", "\(cores) 核"))
+        if let cores = endpoint.cpuCores {
+            facts.append(("CPU 核数", scopedFact(ResourceText.cores(cores), note: endpoint.cpuScopeNote)))
         }
         if let total = endpoint.memoryTotalMiB, total > 0 {
-            facts.append(("内存总量", "\(Int((Double(total) / 1024).rounded())) GB"))
+            facts.append(("内存总量", scopedFact(ResourceText.memory(total), note: endpoint.memoryScopeNote)))
         }
         if let peak = gpus.compactMap(\.temperature).max() {
             facts.append(("最高温度", "\(peak) °C"))

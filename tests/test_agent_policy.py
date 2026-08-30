@@ -212,6 +212,10 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "no_capacity is an answer, not a failure",
         "group_selection_required is the same kind of answer",
         "nothing is queued",
+        "held_idle",
+        "busy_unmanaged",
+        "ownership_conflict",
+        "only running and busy_unmanaged mean work is on the card",
         "serverpilot only coordinates gpus",
         "needs no lease",
         "server_group_id",
@@ -244,7 +248,16 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # release -- and that made the backstop read as the mechanism.  Deleting
     # the duplicated gpu_count definition paid most of the increase: the
     # gpu_apply parameter already carries it.
-    assert len(mcp.instructions) < 2400
+    # It moved from 2400 to 2800 when busy_gpus[].status got a vocabulary. The
+    # response already separated a card that is computing from a card that is
+    # only held -- running versus held_idle -- but no sentence here named the
+    # key or any of its values, so a caller read "somebody holds it" as
+    # "somebody is running on it" and waited on a card nobody was using. The
+    # values are the words the caller acts on and are not shortened to fit this
+    # bound. Two duplications paid part of the increase: the observation_profile
+    # list, which the gpu_add_server parameter description already spells out in
+    # full, and "with no telemetry", which the next line already says.
+    assert len(mcp.instructions) < 2800
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -294,8 +307,36 @@ def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contrac
     )
 
     # Claude inherits the repository rule instead of maintaining a second,
-    # drift-prone ServerPilot contract.
-    assert CLAUDE_RULE.read_text(encoding="utf-8").strip() == "@AGENTS.md"
+    # drift-prone ServerPilot contract. A Teamwork bridge block is allowed
+    # alongside it, but only as a pointer: everything outside the bridge
+    # markers must be exactly "@AGENTS.md", and everything inside them must
+    # be either a comment or an "@" reference -- never rule prose that could
+    # itself drift out of sync with AGENTS.md.
+    claude_text = CLAUDE_RULE.read_text(encoding="utf-8")
+    bridge_start, bridge_end = (
+        "<!-- TEAMWORK_CLAUDE_BRIDGE_START -->",
+        "<!-- TEAMWORK_CLAUDE_BRIDGE_END -->",
+    )
+    if bridge_start in claude_text:
+        before, remainder = claude_text.split(bridge_start, 1)
+        bridge_body, after = remainder.split(bridge_end, 1)
+        assert before.strip() == "@AGENTS.md"
+        assert after.strip() == ""
+        lines = [line.strip() for line in bridge_body.strip().splitlines() if line.strip()]
+        # A pointer, not a second contract: one "@" reference at the Teamwork
+        # entry point, and any remaining line is a short comment.  Prose smuggled
+        # into a single HTML comment would reach the model exactly like rules do,
+        # so the comment is length-bounded rather than merely comment-shaped.
+        assert [line for line in lines if line.startswith("@")] == [
+            "@docs/teamwork/README.md"
+        ]
+        for line in lines:
+            if line.startswith("@"):
+                continue
+            assert line.startswith("<!--") and line.endswith("-->"), line
+            assert len(line) <= 120, line
+    else:
+        assert claude_text.strip() == "@AGENTS.md"
 
 
 def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:

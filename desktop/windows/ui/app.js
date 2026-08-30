@@ -77,11 +77,11 @@
   }
 
   function hostMemoryUsedPct(endpoint) {
-    const host = endpoint.host_telemetry || {};
-    const limit = host.memory_limit_mib;
-    const current = host.memory_current_mib;
-    if (typeof limit === "number" && limit > 0 && typeof current === "number") {
-      return current * 100 / limit;
+    const capacity = endpoint.host_telemetry?.capacity || {};
+    const total = capacity.memory_total_mib;
+    const used = capacity.memory_used_mib;
+    if (typeof total === "number" && total > 0 && typeof used === "number") {
+      return used * 100 / total;
     }
     return hostMetric(endpoint, "memory_used_pct");
   }
@@ -121,8 +121,11 @@
 
   function endpointStatus(endpoint) {
     const monitor = endpoint.monitor || {};
+    if (endpoint.enabled === false) return { label: "已停用", className: "disabled" };
+    if (endpoint.lifecycle_state === "draining") return { label: "已暂停", className: "disabled" };
     if (monitor.status === "ONLINE") return { label: "在线", className: "online" };
-    if (endpoint.enabled === false || endpoint.lifecycle_state === "draining") return { label: "已暂停", className: "disabled" };
+    if (monitor.status === "PENDING") return { label: "正在连接", className: "disabled" };
+    if (monitor.status === "STALE") return { label: "采集延迟", className: "disabled" };
     return { label: "连接失败", className: "error" };
   }
 

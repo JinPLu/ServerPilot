@@ -368,33 +368,72 @@ import Testing
         #expect(loadOnlySample.cpuLoadFraction == nil)
     }
 
-    @Test func testEndpointMemoryUsesCgroupLimitInsteadOfHostMemTotal() throws {
-        let cgroup = try #require(EndpointRecord(raw: [
+    @Test func testEndpointReadsTheContainerBudgetAndNotTheWholeMachine() throws {
+        // The node has 128 cores and 1 TB; this endpoint owns 60 cores and 480 GB
+        // of it, and only the broker-resolved capacity may reach the surface.
+        let container = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
             "monitor": ["status": "ONLINE"],
             "host_telemetry": [
+                "cpu_count": 128,
+                "load_1m": 48.41,
                 "memory_total_mib": 1_029_120,
                 "memory_available_mib": 921_600,
-                "memory_limit_mib": 249_856,
-                "memory_current_mib": 51_200
+                "capacity": [
+                    "cpu_scope": "container",
+                    "cpu_cores": 60.0,
+                    "cpu_available_cores": 12.36,
+                    "memory_scope": "container",
+                    "memory_total_mib": 491_520,
+                    "memory_used_mib": 132_337,
+                    "memory_available_mib": 359_183
+                ]
             ]
         ]))
-        #expect(abs((cgroup.memoryFraction!) - (51_200.0 / 249_856.0)) < 0.0001)
+        #expect(container.cpuCores == 60.0)
+        #expect(container.availableCPUCores == 12.36)
+        #expect(container.memoryTotalMiB == 491_520)
+        #expect(container.memoryAvailableMiB == 359_183)
+        #expect(container.cpuScopeNote == "容器配额")
+        #expect(container.memoryScopeNote == "容器配额")
+        #expect(abs((container.memoryFraction!) - (132_337.0 / 491_520.0)) < 0.0001)
 
-        let unlimited = try #require(EndpointRecord(raw: [
+        let wholeMachine = try #require(EndpointRecord(raw: [
             "id": "gpu-node-01",
             "host": "10.0.0.1",
             "ssh_user": "gpu",
             "monitor": ["status": "ONLINE"],
             "host_telemetry": [
+                "cpu_count": 64,
+                "load_1m": 4.0,
                 "memory_total_mib": 1_029_120,
                 "memory_available_mib": 921_600,
-                "memory_current_mib": 51_200
+                "capacity": [
+                    "cpu_scope": "host",
+                    "cpu_cores": 64.0,
+                    "cpu_available_cores": 60.0,
+                    "memory_scope": "host",
+                    "memory_total_mib": 1_029_120,
+                    "memory_used_mib": 107_520,
+                    "memory_available_mib": 921_600
+                ]
             ]
         ]))
-        #expect(abs((unlimited.memoryFraction!) - (1 - 921_600.0 / 1_029_120.0)) < 0.0001)
+        #expect(wholeMachine.availableCPUCores == 60.0)
+        #expect(wholeMachine.cpuScopeNote == nil)
+        #expect(abs((wholeMachine.memoryFraction!) - (1 - 921_600.0 / 1_029_120.0)) < 0.0001)
+
+        let noTelemetry = try #require(EndpointRecord(raw: [
+            "id": "gpu-node-01",
+            "host": "10.0.0.1",
+            "ssh_user": "gpu",
+            "monitor": ["status": "ONLINE"]
+        ]))
+        #expect(noTelemetry.cpuCores == nil)
+        #expect(noTelemetry.availableCPUCores == nil)
+        #expect(noTelemetry.memoryFraction == nil)
     }
 
     @Test func testEndpointTelemetryHistoryCapabilityGateDegradesWithoutChangingSnapshot() throws {

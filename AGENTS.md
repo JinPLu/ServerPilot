@@ -32,5 +32,5 @@
 
 - Project label: `ServerPilot`.
 - Teamwork adds no required project-local workflow or state. It creates no empty directory, schema, or mandatory stage chain. Native host modes stay in charge. Follow this project's normal instructions and invoke a named Skill only when its trigger matches.
-- User-accepted reusable results live under `docs/teamwork/<kind>/` as one of `discussions`, `research`, `debug`, `plans`, `reviews`, `reports`, or `experiments`. Chat, host plans, and todos are not cross-session memory.
+- This project's Teamwork context lives under `docs/teamwork/` at the repository root, with `docs/teamwork/README.md` as the reading-side entry point; the global policy's project-context contract owns it, and this block only adds project-specific detail.
 <!-- TEAMWORK_PROJECT_END -->
