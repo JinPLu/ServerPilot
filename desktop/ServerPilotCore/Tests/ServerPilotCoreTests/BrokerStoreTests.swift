@@ -1353,6 +1353,52 @@ import Testing
         ]))
         #expect(neverRan.lastProcessObservedAt == nil)
     }
+
+    @Test func testLeaseWithoutManualReleaseFieldIsNotReleasable() throws {
+        // Whether a lease may be cleared by hand is the broker's answer alone.
+        // A payload that does not carry it has not said yes, and there is no
+        // local second opinion: inferring releasability from GPU states is
+        // what invited a person to clear a claim that was still working.
+        let silent = try #require(LeaseRecord(raw: [
+            "id": "lease-silent",
+            "actor_id": "agent-a",
+            "project_id": "project-a",
+            "kind": "workload",
+            "state": "HELD",
+            "gpu_ids": ["fixture-1:GPU-a"],
+        ]))
+        #expect(silent.manualRelease.allowed == false)
+        #expect(silent.manualRelease.blockedReason == nil)
+
+        let allowed = try #require(LeaseRecord(raw: [
+            "id": "lease-allowed",
+            "actor_id": "agent-a",
+            "project_id": "project-a",
+            "kind": "workload",
+            "state": "HELD",
+            "gpu_ids": ["fixture-1:GPU-b"],
+            "manual_release": ["allowed": true],
+        ]))
+        #expect(allowed.manualRelease.allowed)
+        #expect(allowed.manualRelease.blockedReason == nil)
+
+        let refused = try #require(LeaseRecord(raw: [
+            "id": "lease-refused",
+            "actor_id": "agent-a",
+            "project_id": "project-a",
+            "kind": "workload",
+            "state": "ACTIVE",
+            "gpu_ids": ["fixture-1:GPU-c"],
+            "manual_release": [
+                "allowed": false,
+                "blocked_reason": "lease_holder_recently_alive",
+                "message": "这个租约的持有者刚刚还在。",
+            ],
+        ]))
+        #expect(refused.manualRelease.allowed == false)
+        #expect(refused.manualRelease.blockedReason == "lease_holder_recently_alive")
+        #expect(refused.manualRelease.message == "这个租约的持有者刚刚还在。")
+    }
 }
 
 @MainActor

@@ -72,7 +72,7 @@ Connection and working directory are projected once per server: ssh=how to conne
 cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
 gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.
 Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now. Load on a free card is ServerPilot's own hold, stopped before allocation, not evidence it is taken.
-no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. Idle reclaim is a backstop, not how a card comes back.
+no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. On any failure call gpu_release and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. gpu_status(lease_id=...) is also your heartbeat: keep calling it through a task's quiet phases and the claim you ask about is never reclaimed as abandoned, though while any of its cards is computing the idle ones still come back one by one. Idle reclaim is a backstop, not how a card comes back.
 busy_gpus[]: task=who holds the card, status=whether it is working — running (a compute process under that lease), busy_unmanaged (a process ServerPilot does not own), held_idle (held, nothing computing: ask the holder or pick elsewhere), ownership_conflict (holder unverifiable). Only running and busy_unmanaged mean work is on the card.
 ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
 
@@ -169,7 +169,6 @@ class _AsyncBroker:
         if state:
             params["state"] = state
         return await self.get("/api/v1/snapshot", params=params)
-
 
 
 def _broker(actor: str | None) -> BrokerClient | _AsyncBroker:
@@ -408,9 +407,7 @@ def _routine_telemetry_window(value: Any) -> dict[str, Any] | None:
         "window_seconds": window_seconds if window_seconds and window_seconds > 0 else None,
         "sample_count": sample_count if sample_count and sample_count > 0 else None,
         "first_observed_at": (
-            first_observed_at
-            if isinstance(first_observed_at, str) and first_observed_at
-            else None
+            first_observed_at if isinstance(first_observed_at, str) and first_observed_at else None
         ),
         "last_observed_at": (
             last_observed_at if isinstance(last_observed_at, str) and last_observed_at else None
@@ -594,7 +591,9 @@ def _routine_sku_capacity(gpus: list[dict[str, Any]]) -> list[dict[str, Any]]:
     return [buckets[key] for key in order]
 
 
-def _routine_status_server(endpoint: Any, server_id: Any, gpus: list[dict[str, Any]]) -> dict[str, Any]:
+def _routine_status_server(
+    endpoint: Any, server_id: Any, gpus: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Project one GPU server: connection once, capacity as SKU counts."""
 
     workspace_path = endpoint.get("workspace_path") if isinstance(endpoint, dict) else None
@@ -610,7 +609,9 @@ def _routine_status_server(endpoint: Any, server_id: Any, gpus: list[dict[str, A
     return server
 
 
-def _routine_group_projection(record: dict[str, Any], servers: list[dict[str, Any]]) -> dict[str, Any]:
+def _routine_group_projection(
+    record: dict[str, Any], servers: list[dict[str, Any]]
+) -> dict[str, Any]:
     """Project group metadata plus the nested per-server capacity summary."""
 
     payload = {
@@ -672,10 +673,7 @@ def _routine_has_gpu_servers(
 ) -> bool:
     if ungrouped_servers:
         return True
-    return any(
-        isinstance(group, dict) and group.get("servers")
-        for group in server_groups
-    )
+    return any(isinstance(group, dict) and group.get("servers") for group in server_groups)
 
 
 def _routine_has_available_capacity(
@@ -1011,7 +1009,19 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
     return result
 
 
-@mcp.tool(annotations=ToolAnnotations(readOnlyHint=True, openWorldHint=True))
+# `readOnlyHint` is a machine-readable claim third-party clients act on, some
+# by auto-approving the call.  Asking about one's own hold writes the holder's
+# heartbeat, so this tool is no longer read-only and may not say it is.  It
+# still changes nothing a caller could lose: `idempotentHint` says repeating it
+# is the intended use, and `destructiveHint` says it takes nothing away.
+@mcp.tool(
+    annotations=ToolAnnotations(
+        readOnlyHint=False,
+        destructiveHint=False,
+        idempotentHint=True,
+        openWorldHint=True,
+    )
+)
 async def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
     """List grouped allocatable GPU capacity, busy_gpus with who holds each card and whether it is computing (status), CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
 
@@ -1023,6 +1033,14 @@ async def gpu_status(server_id: str | None = None, lease_id: str | None = None) 
         lease_id = lease_id.strip()
         if not lease_id:
             raise ValueError("lease_id must not be empty when it is given")
+        # Asking about one's own hold is the heartbeat.  It is the call an
+        # agent already makes when it wants its own telemetry, so the control
+        # plane learns the holder is alive without the agent doing anything
+        # new.  A lease the broker will not heartbeat is answered rather than
+        # refused, which keeps this a status read.
+        await _client_call(
+            _routine_client(), "post", f"/api/v1/routine/leases/{lease_id}/heartbeat"
+        )
     # Busy cards are filtered in the projection, not by the broker, so one call
     # can name their tasks and still carry the caller's own lease telemetry.
     payload = await _client_call(

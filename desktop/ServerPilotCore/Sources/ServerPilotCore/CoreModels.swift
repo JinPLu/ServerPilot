@@ -1223,6 +1223,33 @@ public struct ReservationRecord: Identifiable, Equatable, Sendable {
 }
 
 public struct LeaseRecord: Identifiable, Equatable, Sendable {
+    /// Whether a person may clear this lease by hand, as the broker answers it,
+    /// and the reason when the answer is no. `blockedReason` is the error code
+    /// the release itself would raise.
+    ///
+    /// A payload without the field has not said yes, so `allowed` is false --
+    /// the same fail-closed reading as a capability the service does not
+    /// advertise. There is no local second opinion to fall back to: deriving
+    /// releasability from GPU states is exactly what invited a person to clear
+    /// a claim that was still working.
+    public struct ManualRelease: Equatable, Sendable {
+        public let allowed: Bool
+        public let blockedReason: String?
+        public let message: String?
+
+        public init(raw: Any?) {
+            guard let payload = raw as? [String: Any] else {
+                self.allowed = false
+                self.blockedReason = nil
+                self.message = nil
+                return
+            }
+            self.allowed = payload.bool("allowed", default: false)
+            self.blockedReason = payload.string("blocked_reason")
+            self.message = payload.string("message")
+        }
+    }
+
     public let id: String
     public let requestID: String?
     public let actorID: String
@@ -1237,6 +1264,7 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
     /// it never gates a release, it only lets a person tell a job between two
     /// batches from one that has ended.
     public let lastProcessObservedAt: String?
+    public let manualRelease: ManualRelease
     public let taskReference: String?
     public let purpose: String?
 
@@ -1262,6 +1290,7 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         self.issuedAt = raw.string("issued_at")
         self.expiresAt = raw.string("expires_at")
         self.lastProcessObservedAt = raw.string("last_process_observed_at")
+        self.manualRelease = ManualRelease(raw: raw["manual_release"])
         self.taskReference = raw.string("task_ref")
         self.purpose = raw.string("purpose")
     }

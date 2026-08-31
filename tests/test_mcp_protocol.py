@@ -157,7 +157,12 @@ def test_every_routine_tool_declares_its_effect(protocol_probe: ProtocolProbe) -
     # has to gate all three the same way.
     by_name = {tool.name: tool.annotations for tool in protocol_probe.tools.tools}
 
-    assert by_name["gpu_status"].readOnlyHint is True
+    # Naming your own lease writes the holder's heartbeat, so a status read is
+    # no longer read-only and may not claim to be: some clients auto-approve on
+    # that hint alone. It still takes nothing away and is meant to be repeated.
+    assert by_name["gpu_status"].readOnlyHint is False
+    assert by_name["gpu_status"].destructiveHint is False
+    assert by_name["gpu_status"].idempotentHint is True
     assert by_name["gpu_apply"].readOnlyHint is False
     assert by_name["gpu_apply"].idempotentHint is False
     assert by_name["gpu_release"].idempotentHint is True

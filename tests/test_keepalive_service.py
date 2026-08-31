@@ -16,7 +16,12 @@ from serverpilot.models import (
 from serverpilot.schemas import EndpointUpdate, LeaseObservedBind, RequestCreate
 from serverpilot.service import BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
-from tests.helpers import observation, process_for_gpu
+from tests.helpers import (
+    age_out_lease_holder,
+    age_out_processes,
+    observation,
+    process_for_gpu,
+)
 
 
 def _configure_idle_policy(service, admin, *, count: int = 2) -> None:  # noqa: ANN001
@@ -84,9 +89,12 @@ def test_policy_is_persisted_and_candidates_are_independent_per_gpu(service, adm
     with service.database.session() as session:
         lease = session.get(Lease, keepalive["lease_id"])
         assert lease is not None and lease.kind == "keepalive"
-        assert [resource.gpu_id for resource in session.scalars(
-            select(LeaseResource).where(LeaseResource.lease_id == lease.id)
-        )] == ["endpoint-a:GPU-endpoint-a-0"]
+        assert [
+            resource.gpu_id
+            for resource in session.scalars(
+                select(LeaseResource).where(LeaseResource.lease_id == lease.id)
+            )
+        ] == ["endpoint-a:GPU-endpoint-a-0"]
 
     after = service.desired_keepalive_candidates("endpoint-a")
     assert [item["gpu_id"] for item in after["candidates"]] == [
@@ -130,9 +138,9 @@ def test_one_gpu_keepalive_does_not_block_sibling_gpu_or_hide_public_state(servi
         "reasons": [],
     }
     assert all(item["kind"] != "keepalive" for item in snapshot["data"]["leases"])
-    assert [item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]] == [
-        "endpoint-a:GPU-endpoint-a-1"
-    ]
+    assert [
+        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
+    ] == ["endpoint-a:GPU-endpoint-a-1"]
 
 
 def test_public_gpu_status_reports_connection_failure_from_canonical_monitor_state() -> None:
@@ -182,16 +190,18 @@ def test_workload_turnover_on_one_gpu_does_not_block_sibling_keepalive_candidate
         LeaseObservedBind(run_id="conflict-on-one-gpu-run"),
         idempotency_key="conflict-on-one-gpu-bind",
     )
-    replacement = initial.model_copy(update={"process_started_at": started_at + timedelta(seconds=10)})
+    replacement = initial.model_copy(
+        update={"process_started_at": started_at + timedelta(seconds=10)}
+    )
     service.ingest_observation(observation(count=2, processes=[replacement]))
     service.ingest_observation(observation(count=2, processes=[replacement]))
 
     gpus = _gpus(service.snapshot(admin))
     assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "RUNNING_MANAGED"
     assert gpus["endpoint-a:GPU-endpoint-a-1"]["state"] == "AVAILABLE"
-    assert [item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]] == [
-        "endpoint-a:GPU-endpoint-a-1"
-    ]
+    assert [
+        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
+    ] == ["endpoint-a:GPU-endpoint-a-1"]
 
 
 def test_confirm_rejects_additional_process_on_keepalive_gpu(service, admin) -> None:
@@ -220,6 +230,10 @@ def test_confirm_rejects_additional_process_on_keepalive_gpu(service, admin) -> 
 def test_foreign_replacement_never_becomes_public_keepalive_capacity(service, admin) -> None:
     _configure_idle_policy(service, admin)
     _begin(service, admin, 0)
+    # The keeper this endpoint started is gone and a different process now
+    # holds the card. A process is retired by age, so "gone" is expressed by
+    # ageing its last sighting, not by one observation that omits it.
+    age_out_processes(service)
     service.ingest_observation(
         observation(
             count=2,
@@ -239,6 +253,10 @@ def test_foreign_replacement_never_becomes_public_keepalive_capacity(service, ad
 def test_live_identity_mismatch_plans_attested_recovery_without_admission(service, admin) -> None:
     _configure_idle_policy(service, admin)
     _begin(service, admin, 0)
+    # The keeper this endpoint started is gone and a different process now
+    # holds the card. A process is retired by age, so "gone" is expressed by
+    # ageing its last sighting, not by one observation that omits it.
+    age_out_processes(service)
     service.ingest_observation(
         observation(
             count=2,
@@ -272,6 +290,10 @@ def test_attested_confirmation_rebinds_replaced_keepalive_worker(service, admin)
     _configure_idle_policy(service, admin)
     _begin(service, admin, 0)
     barrier = utcnow()
+    # The keeper this endpoint started is gone and a different process now
+    # holds the card. A process is retired by age, so "gone" is expressed by
+    # ageing its last sighting, not by one observation that omits it.
+    age_out_processes(service)
     service.ingest_observation(
         observation(
             count=2,
@@ -337,10 +359,16 @@ def test_attested_confirmation_starts_and_binds_new_keepalive_worker(service, ad
     assert gpu["keepalive"]["actual"] == "ON"
 
 
-def test_attested_confirmation_rejects_unmatched_identity_and_keeps_conflict(service, admin) -> None:
+def test_attested_confirmation_rejects_unmatched_identity_and_keeps_conflict(
+    service, admin
+) -> None:
     _configure_idle_policy(service, admin)
     _begin(service, admin, 0)
     barrier = utcnow()
+    # The keeper this endpoint started is gone and a different process now
+    # holds the card. A process is retired by age, so "gone" is expressed by
+    # ageing its last sighting, not by one observation that omits it.
+    age_out_processes(service)
     service.ingest_observation(
         observation(
             count=2,
@@ -554,9 +582,7 @@ def test_complete_observation_releases_keepalive_lease_on_absent_gpu(service, ad
     assert claimed["lease"]["gpu_ids"] == ["endpoint-a:GPU-new-0"]
 
 
-def test_absent_workload_lease_is_not_auto_released_but_can_be_cleared(
-    service, admin
-) -> None:
+def test_absent_workload_lease_is_not_auto_released_but_can_be_cleared(service, admin) -> None:
     service.ingest_observation(observation(gpu_uuids=["GPU-old", "GPU-new"]))
     claimed = service.create_request(
         admin,
@@ -587,6 +613,7 @@ def test_absent_workload_lease_is_not_auto_released_but_can_be_cleared(
 
     barrier = utcnow()
     service.ingest_observation(observation(gpu_uuids=["GPU-new"]))
+    age_out_lease_holder(service, lease_id)
     released = service.release_empty_conflicted_lease(
         admin,
         "endpoint-a",
@@ -605,9 +632,7 @@ def test_incomplete_observation_does_not_release_absent_keepalive_lease(service,
     assert isinstance(keepalive, dict)
     lease_id = str(keepalive["lease_id"])
 
-    service.ingest_observation(
-        observation(gpu_uuids=["GPU-new-0"], observation_complete=False)
-    )
+    service.ingest_observation(observation(gpu_uuids=["GPU-new-0"], observation_complete=False))
 
     with service.database.session() as session:
         lease = session.get(Lease, lease_id)
@@ -637,6 +662,9 @@ def test_endpoint_operator_can_clear_stale_per_gpu_keepalive_lease(service, admi
         idempotency_key="stale-keepalive-policy-disabled",
     )
     barrier = utcnow()
+    # The stop failed, so nothing proved this worker ended; the card is only
+    # recoverable once its last sighting has aged out too.
+    age_out_processes(service)
     service.ingest_observation(observation(count=2, processes=[]))
 
     released = service.release_empty_conflicted_lease(
@@ -651,6 +679,41 @@ def test_endpoint_operator_can_clear_stale_per_gpu_keepalive_lease(service, admi
     assert released["lease"]["state"] == "RELEASED"
     gpus = _gpus(service.snapshot(admin))
     assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "AVAILABLE"
+
+
+def test_a_keepalive_lease_whose_worker_still_runs_is_not_clearable(service, admin) -> None:
+    """Skipping the liveness window never means skipping the emptiness proof.
+
+    A keepalive lease waives the "has the holder gone quiet" wait, because the
+    person clicking *is* the holder. It does not waive "this card shows no
+    process": clearing the lease that owns a running 80%-of-VRAM worker would
+    leave that worker on the card with nothing pointing at it, and the stop
+    plan cannot reach it any more either.
+    """
+
+    _configure_idle_policy(service, admin)
+    begun = _begin(service, admin)
+    keepalive = begun["keepalive"]
+    assert isinstance(keepalive, dict)
+    lease_id = str(keepalive["lease_id"])
+
+    barrier = utcnow()
+    # A fresh, complete observation that still lists the keepalive worker.
+    service.ingest_observation(
+        observation(count=2, processes=[process_for_gpu("GPU-endpoint-a-0", pid=4321)])
+    )
+
+    with pytest.raises(BrokerError) as error:
+        service.release_empty_conflicted_lease(
+            admin,
+            "endpoint-a",
+            lease_id,
+            observation_not_before=barrier,
+            idempotency_key="running-keepalive-release-empty",
+        )
+    assert error.value.code == "conflict_process_present"
+    gpus = _gpus(service.snapshot(admin))
+    assert gpus["endpoint-a:GPU-endpoint-a-0"]["keepalive"]["lease_id"] == lease_id
 
 
 def test_probe_failure_after_a_complete_observation_still_activates_keepalive(
@@ -696,6 +759,7 @@ def test_probe_failure_after_an_empty_observation_still_clears_the_lease(service
         idempotency_key="probe-failure-policy-disabled",
     )
     barrier = utcnow()
+    age_out_processes(service)
     service.ingest_observation(observation(count=2, processes=[]))
     service.record_provider_failure("endpoint-a", "TimeoutError: SSH observation timed out")
 
@@ -887,6 +951,7 @@ def test_a_new_lease_never_inherits_the_previous_holders_process_time(service, a
     assert last_process(first) is not None
 
     # The job stops and the lease is handed back.
+    age_out_processes(service)
     service.ingest_observation(observation(count=1))
     service.release_lease(admin, first, reason="done", idempotency_key="first-release")
 
@@ -898,3 +963,186 @@ def test_a_new_lease_never_inherits_the_previous_holders_process_time(service, a
         observation(count=1, processes=[process_for_gpu(gpu_uuid, pid=4002)])
     )
     assert last_process(second) is not None
+
+
+def _backdate_workload_release(service, lease_id: str, seconds: int) -> None:  # noqa: ANN001
+    """Age a released workload lease's resource rows, as real time would."""
+
+    def write(session):  # type: ignore[no-untyped-def]
+        stamp = utcnow() - timedelta(seconds=seconds)
+        for resource in session.scalars(
+            select(LeaseResource).where(LeaseResource.lease_id == lease_id)
+        ).all():
+            resource.released_at = stamp
+
+    service._write(write)
+
+
+def test_keepalive_start_is_blocked_during_workload_release_cooldown(service, admin) -> None:
+    """A shard-boundary gap must not look like the previous holder giving up.
+
+    p8908: a workload lease released at 17:19:52 had a keepalive worker
+    claiming 80% of its VRAM by 17:20:00 -- eight seconds later, well inside
+    that task's real gap between two batches of shards.
+    """
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": "shard-batch-one",
+                "purpose": "test keepalive start cooldown",
+                "constraints": {"gpu_count": 1},
+            }
+        ),
+        idempotency_key="cooldown-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+    service.release_lease(admin, lease_id, reason="done", idempotency_key="cooldown-release")
+
+    _configure_idle_policy(service, admin, count=1)
+
+    gpu_id = "endpoint-a:GPU-endpoint-a-0"
+    entry = next(
+        item
+        for item in service.list_keepalive_transitions("endpoint-a")["transitions"]
+        if item["gpu_id"] == gpu_id
+    )
+    assert entry["action"] == "ineligible"
+    assert "cooldown" in entry["reason"]
+
+    _backdate_workload_release(
+        service, lease_id, service.inventory.keepalive_start_cooldown_seconds + 1
+    )
+    settled = next(
+        item
+        for item in service.list_keepalive_transitions("endpoint-a")["transitions"]
+        if item["gpu_id"] == gpu_id
+    )
+    assert settled["action"] == "start"
+
+
+def test_keepalive_does_not_start_on_a_card_that_ran_a_process_within_the_grace(
+    service, admin
+) -> None:
+    """Start eligibility reads the same "is anything on this card" answer.
+
+    A card whose last compute process is still a current fact is not free
+    capacity, so occupancy does not plan a worker onto it.
+    """
+
+    _configure_idle_policy(service, admin, count=1)
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0", pid=9101)])
+    )
+    service.ingest_observation(observation(count=1, processes=[]))
+
+    gpu_id = "endpoint-a:GPU-endpoint-a-0"
+    assert gpu_id not in {
+        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
+    }
+
+    age_out_processes(service)
+    service.ingest_observation(observation(count=1, processes=[]))
+    assert gpu_id in {
+        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
+    }
+
+
+def test_stop_refuses_while_a_foreign_process_is_still_within_the_absence_grace(
+    service, admin
+) -> None:
+    """One empty listing is not proof that a foreign process ended.
+
+    Seven occupancy workers were reported stopped with "target GPU observed
+    empty" while the agent's own processes were still running on those cards.
+    """
+
+    _configure_idle_policy(service, admin)
+    begun = _begin(service, admin, 1)
+    keepalive = begun["keepalive"]
+    assert isinstance(keepalive, dict)
+    service.configure_keepalive_policy(
+        admin,
+        "endpoint-a",
+        "disabled",
+        idempotency_key="foreign-process-policy-disabled",
+    )
+
+    # Somebody else's process arrives on the occupancy card.
+    service.ingest_observation(
+        observation(
+            count=2,
+            processes=[
+                process_for_gpu("GPU-endpoint-a-1", pid=4322),
+                process_for_gpu("GPU-endpoint-a-1", pid=804753),
+            ],
+        )
+    )
+
+    barrier = utcnow()
+    service.ingest_observation(observation(count=2, processes=[]))
+    with pytest.raises(BrokerError) as blocked:
+        service.finalize_keepalive_stop(
+            admin,
+            "endpoint-a",
+            str(keepalive["lease_id"]),
+            observation_not_before=barrier,
+            idempotency_key="stop-with-foreign-process",
+        )
+    assert blocked.value.code == "keepalive_process_still_running"
+
+    age_out_processes(service)
+    barrier = utcnow()
+    service.ingest_observation(observation(count=2, processes=[]))
+    stopped = service.finalize_keepalive_stop(
+        admin,
+        "endpoint-a",
+        str(keepalive["lease_id"]),
+        observation_not_before=barrier,
+        idempotency_key="stop-once-foreign-process-is-gone",
+    )
+    assert stopped["keepalive"]["state"] == "RELEASED"
+
+
+def test_keepalive_lease_is_cleared_immediately_without_a_liveness_window(service, admin) -> None:
+    """ServerPilot's own hold is the operator's to take back at once.
+
+    The liveness window protects somebody else's claim from being cleared while
+    they are still working. A keepalive lease has no such holder -- the person
+    clicking is the instance that placed it -- and making them wait is what
+    wedges a card nobody else can free. A workload lease in exactly this shape
+    is refused with ``lease_holder_recently_alive`` (see
+    ``test_manual_release_refuses_a_workload_lease_whose_holder_was_just_alive``);
+    this lease is issued seconds ago and cleared anyway.
+
+    Only that window is waived. The card still has to show no process, which
+    here means the worker's last sighting has aged out as well.
+    """
+
+    _configure_idle_policy(service, admin)
+    begun = _begin(service, admin)
+    keepalive = begun["keepalive"]
+    assert isinstance(keepalive, dict)
+    service.configure_keepalive_policy(
+        admin,
+        "endpoint-a",
+        "disabled",
+        idempotency_key="immediate-clear-policy-disabled",
+    )
+
+    age_out_processes(service)
+    barrier = utcnow()
+    service.ingest_observation(observation(count=2, processes=[]))
+    released = service.release_empty_conflicted_lease(
+        admin,
+        "endpoint-a",
+        str(keepalive["lease_id"]),
+        observation_not_before=barrier,
+        idempotency_key="immediate-keepalive-clear",
+    )
+
+    assert released["released"] is True
+    assert released["lease"]["state"] == "RELEASED"

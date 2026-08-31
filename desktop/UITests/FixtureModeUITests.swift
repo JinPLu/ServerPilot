@@ -177,9 +177,9 @@ final class FixtureModeUITests: XCTestCase {
             NSPredicate(format: "label CONTAINS %@", "仍可申请")
         ).firstMatch
         XCTAssertTrue(recovery.waitForExistence(timeout: 2), "Server detail must explain that the review is per-GPU")
-        XCTAssertTrue(
+        XCTAssertFalse(
             app.buttons["任务结束后清理记录"].exists,
-            "Cleanup must be explicitly limited to tasks that have ended"
+            "While a process is still observed the broker refuses this cleanup, so the app must not offer it"
         )
 
         let gpuMemoryGrid = app.descendants(matching: .any).matching(

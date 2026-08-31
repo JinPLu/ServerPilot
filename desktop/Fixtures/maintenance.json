@@ -482,7 +482,12 @@
           ],
           "task_ref": "state-matrix",
           "purpose": "fixture",
-          "last_process_observed_at": "2026-07-31T23:59:52Z"
+          "last_process_observed_at": "2026-07-31T23:59:52Z",
+          "manual_release": {
+            "allowed": false,
+            "blocked_reason": "conflict_process_present",
+            "message": "仍观察到运行中的进程，不能释放这张 GPU 的占用。"
+          }
         }
       ],
       "requests": [],

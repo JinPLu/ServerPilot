@@ -460,12 +460,21 @@ func confirmLeaseRelease(_ lease: LeaseRecord) -> Bool {
     return alert.runModal() == .alertFirstButtonReturn
 }
 
+/// Confirm the endpoint-wide occupancy switch, and say that it is one.
+///
+/// Occupancy itself is per GPU, but this control is the server's policy, and
+/// the two were easy to confuse: to free one card for an agent, a person turned
+/// the whole server off, took every worker down with it, and turned it back on
+/// -- which reoccupied every idle card at once, on top of a job that was still
+/// running. Nothing had to be turned off at all: a claim reclaims the cards it
+/// needs on its own. So the count is named, and so is the fact that it all
+/// comes back together.
 @discardableResult
-private func confirmKeepaliveEnd() -> Bool {
+private func confirmKeepaliveEnd(activeGPUCount: Int) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "结束占卡？"
-    alert.informativeText = "将让出这台服务器上正在空闲占卡的 GPU；正在运行的任务不会被停止。"
+    alert.messageText = "结束这台服务器的占卡？"
+    alert.informativeText = "这是整台服务器的占卡开关，不是单张卡的操作：这台服务器上正在占卡的 \(activeGPUCount) 张 GPU 会一起停止，重新开启时也会一起重新占卡。正在运行的任务不会被停止。只是想腾出几张卡给 Agent 的话不用关——Agent 申请 GPU 时，ServerPilot 会自动让出它需要的那几张。"
     alert.addButton(withTitle: "结束占卡")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
@@ -3643,23 +3652,34 @@ private struct ServerDetailSheet: View {
         return gpus.filter(\.isPubliclyAvailable).count
     }
 
+    /// Leases holding at least one of this server's cards. Scope only: it says
+    /// nothing about whether any of them may be cleared.
+    private var endpointLeases: [LeaseRecord] {
+        store.snapshot.leases.filter { lease in
+            lease.gpuIDs.contains { gpuID in gpus.contains(where: { $0.id == gpuID }) }
+        }
+    }
+
     private var conflictedLeases: [LeaseRecord] {
-        reclaimableLeases.filter { lease in
+        endpointLeases.filter { lease in
             lease.gpuIDs.contains { gpuID in
                 gpus.first(where: { $0.id == gpuID })?.state == "CONFLICT"
             }
         }
     }
 
+    /// Leases on this server a person has to look at: either the broker says
+    /// the lease can be cleared here, or its cards are in an attribution
+    /// conflict somebody has to settle.
+    ///
+    /// Releasability is never inferred here. Reading it off GPU states is what
+    /// invited a person to clear a healthy eight-card claim that merely sat
+    /// between two batches of shards -- "no process is running" is not the
+    /// same fact as "the holder is finished", and only the broker holds the
+    /// second one.
     private var reclaimableLeases: [LeaseRecord] {
-        store.snapshot.leases.filter { lease in
-            guard lease.kind == "workload",
-                  ["HELD", "ACTIVE", "CONFLICT"].contains(lease.state),
-                  !lease.gpuIDs.isEmpty else { return false }
-            return lease.gpuIDs.allSatisfy { gpuID in
-                guard let gpu = gpus.first(where: { $0.id == gpuID }) else { return false }
-                return ["HELD", "LEASED_IDLE", "CONFLICT"].contains(gpu.state)
-            }
+        endpointLeases.filter { lease in
+            lease.manualRelease.allowed || conflictedLeases.contains(where: { $0.id == lease.id })
         }
     }
 
@@ -3770,11 +3790,30 @@ private struct ServerDetailSheet: View {
                                 let legacyWorkloadReview = lease.gpuIDs.contains { gpuID in
                                     gpus.first(where: { $0.id == gpuID }).map(gpuHasLegacyWorkloadProcessReview) ?? false
                                 }
-                                let gpuCount = lease.gpuIDs.filter { gpuID in
-                                    guard let state = gpus.first(where: { $0.id == gpuID })?.state else { return false }
-                                    return conflict ? state == "CONFLICT" : ["HELD", "LEASED_IDLE"].contains(state)
-                                }.count
+                                // Count the lease's own cards. Filtering by GPU
+                                // state made an unreachable server -- whose
+                                // cards all read UNKNOWN_STALE -- announce
+                                // "有 0 张 GPU", next to a live button.
+                                let gpuCount = lease.gpuIDs.count
+                                // The broker waives the emptiness proof only
+                                // when the machine has stopped answering, so
+                                // that case may not borrow wording that claims
+                                // a collection which did not happen.
+                                let unreachable = !["ONLINE", "DRAINING", "DISABLED"].contains(endpoint.monitorStatus)
                                 let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
+                                // The broker decides whether this may be
+                                // cleared. While it says no there is nothing to
+                                // press: the click would come back with the
+                                // same refusal, worded the same way.
+                                let clearAction: (() -> Void)? = lease.manualRelease.allowed
+                                    ? {
+                                        guard confirmEmptyLeaseCleanup(lease, conflict: conflict) else { return }
+                                        store.clearEmptyConflictedLease(
+                                            endpointID: endpoint.id,
+                                            leaseID: lease.id
+                                        ) { _, _ in }
+                                    }
+                                    : nil
                                 DetailCallout(
                                     icon: conflict
                                         ? (legacyWorkloadReview ? "exclamationmark.shield.fill" : "exclamationmark.triangle.fill")
@@ -3786,17 +3825,17 @@ private struct ServerDetailSheet: View {
                                         ? (legacyWorkloadReview
                                             ? "有 \(gpuCount) 张 GPU 仍指派给 \(lease.projectID) · \(task)。当前观测到计算进程变更；worker 重启或替换不会被当作硬件故障，也不会自动释放或停止任务。它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。如需更正实际任务-GPU 指派，请在“使用情况”中选择任务后调整 GPU 分配。"
                                             : "有 \(gpuCount) 张 GPU 的归属状态需要处理；它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。请在“使用情况”中核对任务-GPU 指派，并根据实际任务决定改派或在任务结束后释放。")
-                                        : "有 \(gpuCount) 张 GPU 仍被租约占用，但当前采集没有观察到进程；可确认后释放。",
-                                    actionTitle: isMutating
-                                        ? "处理中"
-                                        : (conflict ? "任务结束后清理记录" : "释放空闲占用"),
-                                    action: {
-                                        guard confirmEmptyLeaseCleanup(lease, conflict: conflict) else { return }
-                                        store.clearEmptyConflictedLease(
-                                            endpointID: endpoint.id,
-                                            leaseID: lease.id
-                                        ) { _, _ in }
-                                    }
+                                        : (unreachable
+                                            ? "这台服务器已停止应答，无法证明这 \(gpuCount) 张 GPU 上是否还有进程；确认任务确实结束后可结清这条记录。"
+                                            : "有 \(gpuCount) 张 GPU 仍被租约占用，但当前采集没有观察到进程；可确认后释放。"),
+                                    actionTitle: clearAction == nil
+                                        ? nil
+                                        : (isMutating
+                                            ? "处理中"
+                                            : (conflict
+                                                ? "任务结束后清理记录"
+                                                : (unreachable ? "结清失联服务器的记录" : "释放空闲占用"))),
+                                    action: clearAction
                                 )
                             }
                         } else if conflictedGPUCount > 0 {
@@ -4133,7 +4172,7 @@ private struct ServerDetailSheet: View {
 
             if store.supportsEndpointKeepalive {
                 Button {
-                    if occupancyActionStarts || confirmKeepaliveEnd() {
+                    if occupancyActionStarts || confirmKeepaliveEnd(activeGPUCount: endpoint.keepalive.activeGPUCount) {
                         store.setEndpointKeepalive(endpoint, enabled: occupancyActionStarts) { _, _ in }
                     }
                 } label: {
@@ -4188,7 +4227,7 @@ private struct ServerDetailSheet: View {
         guard store.allowsEndpointLifecycleMutations else { return store.endpointLifecycleMutationUnavailableReason }
         return occupancyActionStarts
             ? "开始这台服务器上空闲 GPU 的占卡"
-            : "结束这台服务器上空闲 GPU 的占卡；不会停止正在运行的任务"
+            : "结束整台服务器的占卡：正在占卡的 GPU 会一起停止，不会停止正在运行的任务。腾卡不必关它——Agent 申请时会自动让出所需的卡"
     }
 }
 

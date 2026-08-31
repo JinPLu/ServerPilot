@@ -26,6 +26,19 @@ class CollectorConfig(BaseModel):
     enabled: bool = False
     interval_seconds: int = Field(default=10, ge=1, le=3600)
     stale_after_seconds: int = Field(default=30, ge=2, le=86400)
+    # How long a compute process stays a current fact after its last sighting.
+    # The compute-app probe is separate from the GPU query and returns an empty
+    # list both for "nothing runs here" and for "this PID namespace cannot see
+    # the process", while observation completeness is decided by the GPU probe
+    # alone.  One absent listing is therefore never evidence that a process
+    # ended; only an unbroken run of them is.
+    #
+    # This window is measured on `ProcessObservation.absent_since`, which the
+    # endpoint's own complete observations advance and which a failed or
+    # incomplete collection clears.  An outage restarts the absence instead of
+    # counting toward it, so the window can be short enough that a card its
+    # owner has released comes back quickly.
+    process_absence_grace_seconds: int = Field(default=60, ge=30, le=3600)
     ssh_connect_timeout_seconds: int = Field(default=8, ge=1, le=120)
 
     @model_validator(mode="after")
@@ -154,6 +167,16 @@ class InventoryConfig(BaseModel):
     # mistaken for an idle workload.
     idle_lease_alert_seconds: int = Field(default=600, ge=60, le=86400)
     idle_lease_reclaim_seconds: int = Field(default=3600, ge=120, le=604800)
+    # How long a GPU stays off limits to a fresh keepalive worker after the
+    # workload lease that held it was released.  Releasing is the only "the
+    # owner is done" signal the control plane has, and a staged job's gap
+    # between two batches of shards can look exactly like it (p8908: occupancy
+    # took 80% of the VRAM eight seconds after a release, inside a gap of about
+    # 270s).  600s gives that gap room while reusing the order of magnitude
+    # already trusted just above to separate "mid-run gap" from "actually
+    # done".  This gates only a keepalive worker *starting*; handing an
+    # already-running one back for an agent's claim is a separate path.
+    keepalive_start_cooldown_seconds: int = Field(default=600, ge=0, le=86400)
     # Project policies are optional.  The broker creates a neutral record when
     # a claim first uses an otherwise unknown project_id.
     projects: list[ProjectConfig] = Field(default_factory=list)
@@ -163,9 +186,7 @@ class InventoryConfig(BaseModel):
     @model_validator(mode="after")
     def reclaim_follows_alert(self) -> InventoryConfig:
         if self.idle_lease_reclaim_seconds < self.idle_lease_alert_seconds:
-            raise ValueError(
-                "idle_lease_reclaim_seconds must be >= idle_lease_alert_seconds"
-            )
+            raise ValueError("idle_lease_reclaim_seconds must be >= idle_lease_alert_seconds")
         return self
 
     @model_validator(mode="after")
@@ -188,7 +209,10 @@ class InventoryConfig(BaseModel):
             raise ValueError("server_group ids must be unique")
         group_id_set = set(group_ids)
         for endpoint in self.endpoints:
-            if endpoint.server_group_id is not None and endpoint.server_group_id not in group_id_set:
+            if (
+                endpoint.server_group_id is not None
+                and endpoint.server_group_id not in group_id_set
+            ):
                 raise ValueError(
                     f"endpoint {endpoint.id} references unknown server_group_id "
                     f"{endpoint.server_group_id}"
@@ -239,7 +263,8 @@ class Settings:
     ) -> Settings:
         default_root = Path.cwd()
         raw_database = database_url or os.environ.get(
-            "SERVERPILOT_DATABASE_URL", f"sqlite:///{default_root / 'state' / 'serverpilot.sqlite3'}"
+            "SERVERPILOT_DATABASE_URL",
+            f"sqlite:///{default_root / 'state' / 'serverpilot.sqlite3'}",
         )
         raw_inventory = inventory_path or Path(
             os.environ.get("SERVERPILOT_INVENTORY", default_root / "configs" / "inventory.yaml")

@@ -1134,6 +1134,16 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
     monkeypatch,
 ) -> None:  # type: ignore[no-untyped-def]
     class FakeClient:
+        def __init__(self) -> None:
+            self.heartbeats: list[str] = []
+
+        def post(self, path, body=None, *, idempotency_key=None):  # type: ignore[no-untyped-def]
+            # Naming your own lease is the heartbeat.  The broker answers a
+            # lease it will not heartbeat instead of failing, so a status read
+            # of a lease that is already gone still answers.
+            self.heartbeats.append(path)
+            return {"lease_id": path.rsplit("/", 2)[1], "recorded": False}
+
         def snapshot(self, **kwargs):  # type: ignore[no-untyped-def]
             # Busy cards are filtered in the projection so the default response
             # can name their tasks; the broker is never asked to pre-filter.
@@ -1231,10 +1241,11 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
                 },
             }
 
+    client = FakeClient()
     monkeypatch.setattr(
         mcp_server,
         "_routine_client",
-        lambda: FakeClient(),
+        lambda: client,
     )
     server_projection = {
         "server_id": "server-a",
@@ -1331,6 +1342,13 @@ def test_mcp_status_separates_capacity_from_the_callers_own_telemetry(
     assert unknown["no_leased_gpus"]["reason"] == "lease_holds_no_visible_gpu"
     # Somebody else's lease is still only named, never measured.
     assert unknown["busy_gpus"] == status["busy_gpus"]
+
+    # Naming a lease is the heartbeat, and a lease that is gone still answers
+    # rather than turning a status read into a failure.
+    assert client.heartbeats == [
+        "/api/v1/routine/leases/lease-mine/heartbeat",
+        "/api/v1/routine/leases/lease-gone/heartbeat",
+    ]
 
 
 def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:

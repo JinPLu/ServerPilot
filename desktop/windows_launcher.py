@@ -37,6 +37,7 @@ collector:
   enabled: true
   interval_seconds: 10
   stale_after_seconds: 30
+  process_absence_grace_seconds: 60
   ssh_connect_timeout_seconds: 8
 projects:
   - id: default

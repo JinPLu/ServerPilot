@@ -15,7 +15,7 @@ Use the local `serverpilot` MCP.
 
 Connection and workspace live per server, not per GPU: `ssh` connects; `workspace.path` (`workspace_path`) is remote cwd, never a repository path. Allocation `gpus[]` keep CUDA rows. UUIDs identify, never select; `cd` to the workspace. Set `CUDA_DEVICE_ORDER=PCI_BUS_ID`; `cuda_visible_devices` is that server's ordinal set; each `gpus[]` row has its own `gpu_cuda_visible_devices`. CUDA failure requires release and avoiding that server.
 
-`no_capacity` and `group_selection_required` mean no allocation or queue; `busy_gpus` names holders. Refresh once, then wait. Retry `Transport closed` once. Leases persist until released, App correction, or idle reclaim; confirm each `released`, and claim only GPUs you will use because an idle one is returned on its own.
+`no_capacity` and `group_selection_required` mean no allocation or queue; `busy_gpus` names holders. Refresh once, then wait. Retry `Transport closed` once. Leases persist until released, App correction, or idle reclaim; a claim you keep asking about with `gpu_status(lease_id=…)` is not reclaimed as abandoned. Confirm each `released`, and claim only GPUs you will use because an idle one is returned on its own.
 
 ServerPilot provides GPU coordination only. Direct SSH is normal; never bypass discovery, selection, allocation, or release via SSH, SQLite, inventory, or `nvidia-smi`. Non-GPU remote work, including Git synchronization, does not require a ServerPilot lease. These five tools are the whole MCP surface; server deletion and other lifecycle work happen in the app or through REST.
 <!-- SERVERPILOT_GLOBAL_END -->

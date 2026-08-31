@@ -108,7 +108,12 @@
             "fixture-conflict-available:GPU-CONFLICT"
           ],
           "task_ref": "conflict",
-          "purpose": "fixture"
+          "purpose": "fixture",
+          "manual_release": {
+            "allowed": false,
+            "blocked_reason": "conflict_process_present",
+            "message": "仍观察到运行中的进程，不能释放这张 GPU 的占用。"
+          }
         }
       ],
       "requests": [],

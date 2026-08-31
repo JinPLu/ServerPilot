@@ -31,7 +31,7 @@ from serverpilot.mcp_server import mcp
 from serverpilot.models import Lease
 from serverpilot.schemas import LeaseObservedBind, RequestCreate
 from serverpilot.service import BrokerError
-from tests.helpers import observation, process_for_gpu, tools
+from tests.helpers import age_out_processes, observation, process_for_gpu, tools
 
 GPU_UUIDS = (
     "GPU-00000000-0000-0000-0000-000000000001",
@@ -416,6 +416,13 @@ def _keepalive_app(
     configured.collector.enabled = False
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].expected_gpu_count = len(collector.gpu_uuids)
+    # These tests are about the reclaim/restart mechanics themselves, and they
+    # run on the real clock with no way to travel forward. The start cooldown
+    # after a workload release would make several of them wait ten minutes for
+    # a keeper they are trying to observe, so it is turned off here; the
+    # cooldown's own behaviour is covered by
+    # test_keepalive_service.py::test_keepalive_start_is_blocked_during_workload_release_cooldown.
+    configured.keepalive_start_cooldown_seconds = 0
     resolved: list[str] = []
 
     def resolve(adapter_id: str):  # type: ignore[no-untyped-def]
@@ -987,6 +994,10 @@ def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
     )
     lease_id = str(begun["keepalive"]["lease_id"])
     adapter.active_pids.clear()
+    # The worker is gone, and this recovery path still wants the card to show
+    # no process: one listing without it is not that proof, its last sighting
+    # having aged out is.
+    age_out_processes(service)
     service.configure_keepalive_policy(
         actor, "endpoint-a", "disabled", idempotency_key="cleanup-policy-off"
     )
@@ -1789,6 +1800,9 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
     )
     assert enabled.status_code == 200, enabled.text
     adapter.active_pids.clear()
+    # The keeper is gone, not merely absent from one listing: a sighting is
+    # retired by age now, so the fixture has to age it.
+    age_out_processes(app.state.service)
     app.state.service.ingest_observation(
         observation(
             count=len(GPU_UUIDS),
@@ -1987,6 +2001,8 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     # with that collector observation.
     adapter.attested_pids = {gpu_uuid: pid + 20_000 for gpu_uuid, pid in adapter.active_pids.items()}
     adapter.driver_pids = dict(adapter.active_pids)
+    # The workers this endpoint used to run really did exit before the restart.
+    age_out_processes(app.state.service)
 
     async def collect_restarted_workers() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
@@ -2090,6 +2106,8 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
     calls_before_recovery = list(adapter.calls)
     adapter.active_pids = {gpu_uuid: pid + 10_000 for gpu_uuid, pid in adapter.active_pids.items()}
     adapter.driver_pids = {gpu_uuid: pid + 1 for gpu_uuid, pid in adapter.active_pids.items()}
+    # The workers this endpoint used to run really did exit before the restart.
+    age_out_processes(app.state.service)
 
     async def collect_then_recover() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")

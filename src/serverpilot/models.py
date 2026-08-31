@@ -312,6 +312,11 @@ class ProcessObservation(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     observations: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # When the endpoint's own complete observations started leaving this
+    # process out.  The clock runs only while the evidence chain is unbroken:
+    # a failed or incomplete collection clears it, so an outage restarts the
+    # absence rather than counting toward it.
+    absent_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
 
 

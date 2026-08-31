@@ -3,7 +3,7 @@
 # The remote collector and keepalive entrypoints import this package from a
 # plain source tree, where no distribution metadata exists. The literal is the
 # single source; pyproject.toml reads it back out at build time.
-__version__ = "2.3.0"
+__version__ = "2.4.0"
 SCHEMA_VERSION = "v1"
 
 # Lets an upgraded MCP fail clearly when the loopback service has not yet been

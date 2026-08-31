@@ -12,7 +12,9 @@ from serverpilot.service import BrokerService
 from tests.helpers import observation
 
 
-def test_collector_setting_is_persisted_and_restored(service, admin, inventory, tmp_path: Path) -> None:
+def test_collector_setting_is_persisted_and_restored(
+    service, admin, inventory, tmp_path: Path
+) -> None:
     initial = service.collector_settings(admin)["data"]
     assert initial == {
         "interval_seconds": 10,
@@ -107,9 +109,7 @@ def test_collector_settings_api_requires_supported_value_and_idempotency(build_a
         assert response.json()["settings"]["stale_after_seconds"] == 15
 
 
-def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(
-    service, admin
-) -> None:
+def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(service, admin) -> None:
     """A host that stopped answering must not cost a connect timeout per cycle.
 
     Backoff changes only the probe rhythm. Admission is already fail-closed
@@ -138,9 +138,7 @@ def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(
             select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
         )
         assert state is not None
-        stale = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 60
-        )
+        stale = utcnow() - timedelta(seconds=service.inventory.collector.stale_after_seconds + 60)
         state.last_success_at = stale
         state.last_attempt_at = utcnow()
         session.commit()
@@ -158,12 +156,41 @@ def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(
             select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
         )
         assert state is not None
-        state.last_attempt_at = utcnow() - timedelta(
-            seconds=DEGRADED_ENDPOINT_PROBE_SECONDS + 1
-        )
+        state.last_attempt_at = utcnow() - timedelta(seconds=DEGRADED_ENDPOINT_PROBE_SECONDS + 1)
         session.commit()
 
     assert [item.id for item in service.collector_endpoints_due()] == [
         "endpoint-a",
         "endpoint-b",
     ]
+
+
+def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: ANN001
+    """Telemetry freshness and process absence answer different questions.
+
+    Telemetry freshness says whether a machine's readings are current. The
+    absence window says how long the endpoint's own unbroken complete
+    observations must leave a process out before it stops being a fact. The
+    second is measured on ``absent_since``, which an outage clears, so it needs
+    no ordering against the first and an inventory that only ever widened
+    ``stale_after_seconds`` keeps loading unchanged.
+    """
+
+    from serverpilot.config import CollectorConfig
+
+    default = CollectorConfig()
+    assert default.process_absence_grace_seconds == 60
+
+    widened = CollectorConfig(interval_seconds=10, stale_after_seconds=600)
+    assert widened.stale_after_seconds == 600
+    assert widened.process_absence_grace_seconds == 60
+
+    service.update_collector_settings(
+        admin,
+        CollectorSettingsUpdate(interval_seconds=30),
+        idempotency_key="collector-interval-30-order",
+    )
+    assert service.inventory.collector.stale_after_seconds == 90
+    assert service.inventory.collector.process_absence_grace_seconds == 60
+
+

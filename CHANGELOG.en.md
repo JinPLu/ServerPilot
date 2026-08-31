@@ -4,6 +4,17 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## 2.4.0 - 2026-08-31
+
+- A card that is running a job is no longer read as empty because one collection failed to list its processes. On a containerized server nvidia-smi sometimes cannot see its own compute processes, and that single reading used to be enough.
+- A staged job's gap between two batches of work no longer costs it its cards. gpu_status(lease_id=…) now doubles as the holder's heartbeat, so agents need change nothing. While something in the claim is still running, cards it does not use are returned one by one as before; when nothing is running anywhere, its cards are returned only once the holder has also gone quiet.
+- A claim that declared a duration (the CLI and App paths) used to be exempt from observed-idle reclaim entirely. It is now treated like any other claim: cards that stay idle while the holder stays silent past the reclaim window are returned. The declared duration still decides when the lease expires.
+- A card does not become claimable the instant its process ends: it waits until a minute of unbroken, healthy collections have all left the process out. A server outage does not count toward that minute — it restarts it, rather than waiting the process out on its behalf.
+- Clearing an idle hold by hand no longer releases a lease whose holder was working moments ago: while a process or heartbeat has been seen recently the request is refused and says how long to wait, or to let the holder release it. ServerPilot's own occupancy holds, and leases on a server that stopped answering, are still reclaimable at once.
+- The macOS app now reads releasability from the control plane instead of inferring it from GPU states, and no longer offers a button that would be refused.
+- A card gets a ten-minute cooldown after its workload lease is released before occupancy can claim it again.
+- The occupancy stop confirmation now says it is a whole-server switch, how many cards it stops together, and that claiming GPUs already frees the cards an agent needs.
+
 ## 2.3.0 - 2026-08-31
 
 **The numbers you see are the numbers you can claim, and a card's state reads at a glance.**

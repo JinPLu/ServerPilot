@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import asyncio
 import inspect
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import select
+
 from serverpilot import mcp_server
+from serverpilot.models import Lease, LeaseResource, ProcessObservation
 from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
 
 
@@ -71,6 +74,73 @@ def process_for_gpu(uuid: str, *, pid: int = 1234) -> ProcessInput:
         username="tester",
         process_started_at=datetime.now(UTC),
     )
+
+
+def age_out_processes(service: Any) -> None:
+    """Put every stored process sighting one observation short of retirement.
+
+    A process stays a current fact until the endpoint's own unbroken complete
+    observations have left it out for ``process_absence_grace_seconds``, so
+    simply not reporting it once is, by design, not enough to retire it. A test
+    that means "this worker has gone" ages the absence clock and then reports
+    the complete observation that leaves it out, which is the reading that
+    retires it.
+    """
+
+    stale = datetime.now(UTC) - timedelta(
+        seconds=service.inventory.collector.process_absence_grace_seconds + 60
+    )
+
+    def write(session: Any) -> None:
+        for observed in session.scalars(select(ProcessObservation)).all():
+            observed.last_seen_at = stale
+            observed.absent_since = stale
+
+    service._write(write)
+
+
+def age_out_lease_holder(service: Any, lease_id: str) -> None:
+    """Push a lease's holder past the manual-release liveness window.
+
+    ``release_empty_conflicted_lease`` demands the same liveness age the
+    automatic idle reclaim uses, so a lease claimed a second ago is protected
+    on purpose -- that protection is the whole point. A test that means to
+    exercise the recovery path has to be given a lease whose holder really has
+    gone quiet.
+    """
+
+    stale = datetime.now(UTC) - timedelta(seconds=service.inventory.idle_lease_alert_seconds + 60)
+
+    def write(session: Any) -> None:
+        lease = session.get(Lease, lease_id)
+        assert lease is not None
+        lease.issued_at = stale
+        lease.last_heartbeat_at = stale
+        # A holder is heard from two ways -- its own check-in and a sighting of
+        # its work -- so going quiet means both go quiet. Whether the card is
+        # then free to hand out is a different question, answered by the
+        # absence window and its own helper.
+        for observed in session.scalars(select(ProcessObservation)).all():
+            observed.last_seen_at = stale
+            observed.process_started_at = stale
+
+    service._write(write)
+
+
+def age_out_workload_release(service: Any, lease_id: str) -> None:
+    """Age a released workload lease so keepalive may start on its GPUs again."""
+
+    stale = datetime.now(UTC) - timedelta(
+        seconds=service.inventory.keepalive_start_cooldown_seconds + 60
+    )
+
+    def write(session: Any) -> None:
+        for resource in session.scalars(
+            select(LeaseResource).where(LeaseResource.lease_id == lease_id)
+        ).all():
+            resource.released_at = stale
+
+    service._write(write)
 
 
 class _SyncTools:

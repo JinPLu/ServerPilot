@@ -185,7 +185,12 @@
           "issued_at": "2026-08-06T08:30:00Z",
           "expires_at": "2026-08-06T12:30:00Z",
           "task_ref": "train-resnet",
-          "purpose": "训练图像分类模型"
+          "purpose": "训练图像分类模型",
+          "manual_release": {
+            "allowed": false,
+            "blocked_reason": "lease_holder_recently_alive",
+            "message": "这个租约的持有者刚刚还在：0 分钟前仍能观察到它的进程或心跳。分阶段的任务在两批之间本来就没有进程，因此要连续 10 分钟既没有进程也没有心跳，才能在这里清理。请稍后再试，或让持有者自己释放。"
+          }
         }
       ],
       "requests": [

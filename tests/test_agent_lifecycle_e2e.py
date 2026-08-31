@@ -66,8 +66,18 @@ def _active_gpu_ids(service, lease_id: str) -> set[str]:  # type: ignore[no-unty
 
 
 def _age_idle(service, lease_id: str, seconds: int, *, gpu_ids=None) -> None:  # type: ignore[no-untyped-def]
+    """Age the per-GPU idle streak and the holder's last sign of life.
+
+    Settling a whole claim needs both: its cards ran nothing, and its holder
+    stopped asking about its own hold. Ageing only the streak would describe a
+    claim whose agent is still there.
+    """
+
     def write(session):  # type: ignore[no-untyped-def]
         stamp = utcnow() - timedelta(seconds=seconds)
+        lease = session.get(Lease, lease_id)
+        assert lease is not None
+        lease.last_heartbeat_at = stamp
         for resource in session.scalars(
             select(LeaseResource).where(
                 LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
@@ -244,3 +254,31 @@ def test_server_id_filter_narrows_status_to_one_server(routine) -> None:  # type
     assert "gpus" not in missing
     assert "servers" not in missing
     assert _capacity_servers(missing) == []
+
+
+def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> None:  # type: ignore[no-untyped-def]
+    """The heartbeat is a call the agent already makes, over the real routes.
+
+    A staged job's quiet phase looks exactly like an abandoned claim. What
+    separates them is that the holder is still asking about its own hold, and
+    this proves that answer travels the whole way: MCP tool, REST route,
+    domain service, reclaim.
+    """
+
+    routine.ingest_observation(observation(count=2))
+    claimed = tools.gpu_apply(gpu_count=1, task="分阶段的任务")
+    lease_id = claimed["lease_id"]
+
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds + 5)
+    tools.gpu_status(lease_id=lease_id)
+    routine.ingest_observation(observation(count=2))
+
+    assert len(_active_gpu_ids(routine, lease_id)) == 1
+    _assert_sku_capacity(tools.gpu_status(), available_count=1, total_count=2)
+
+    # The same sequence without asking settles the claim.
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds + 5)
+    routine.ingest_observation(observation(count=2))
+
+    assert _active_gpu_ids(routine, lease_id) == set()
+    _assert_sku_capacity(tools.gpu_status(), available_count=2, total_count=2)

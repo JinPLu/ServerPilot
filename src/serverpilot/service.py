@@ -446,7 +446,10 @@ class BrokerService:
             endpoint = session.get(Endpoint, configured_endpoint.id)
             if endpoint is None:
                 assigned_group_id = configured_endpoint.server_group_id
-                if assigned_group_id is not None and session.get(ServerGroup, assigned_group_id) is None:
+                if (
+                    assigned_group_id is not None
+                    and session.get(ServerGroup, assigned_group_id) is None
+                ):
                     raise BrokerError(
                         "server_group_not_found",
                         f"endpoint {configured_endpoint.id} references unknown server_group_id",
@@ -1132,9 +1135,7 @@ class BrokerService:
             .limit(1)
         )
 
-    def _endpoint_is_unreachable(
-        self, session: Session, endpoint_id: str, now: datetime
-    ) -> bool:
+    def _endpoint_is_unreachable(self, session: Session, endpoint_id: str, now: datetime) -> bool:
         """True when ServerPilot can no longer learn anything about this host.
 
         Every recovery path here asks the machine itself for proof, which is
@@ -1163,9 +1164,7 @@ class BrokerService:
         last_success = _as_utc(state.last_success_at)
         if last_success is None:
             return True
-        return now - last_success > timedelta(
-            seconds=self.inventory.collector.stale_after_seconds
-        )
+        return now - last_success > timedelta(seconds=self.inventory.collector.stale_after_seconds)
 
     @staticmethod
     def _endpoint_has_active_leases(session: Session, endpoint_id: str) -> bool:
@@ -1261,7 +1260,9 @@ class BrokerService:
             session.scalars(select(GPUDevice.id).where(GPUDevice.endpoint_id == endpoint_id))
         )
         session.execute(
-            delete(LeaseEndpointCommitment).where(LeaseEndpointCommitment.endpoint_id == endpoint_id)
+            delete(LeaseEndpointCommitment).where(
+                LeaseEndpointCommitment.endpoint_id == endpoint_id
+            )
         )
         if gpu_ids:
             session.execute(delete(LeaseResource).where(LeaseResource.gpu_id.in_(gpu_ids)))
@@ -1424,9 +1425,7 @@ class BrokerService:
             if not alerts:
                 continue
             resource_ids = {alert.resource_id for alert in alerts}
-            live = set(
-                session.scalars(select(model.id).where(model.id.in_(resource_ids))).all()
-            )
+            live = set(session.scalars(select(model.id).where(model.id.in_(resource_ids))).all())
             for alert in alerts:
                 if alert.resource_id in live:
                     continue
@@ -1583,7 +1582,12 @@ class BrokerService:
         result: dict[str, Any] = {"free_gpu_count": count, "gpu_name": name}
         if "largest_free_block" in payload:
             largest = payload["largest_free_block"]
-            if type(largest) is not int or isinstance(largest, bool) or largest < 0 or largest > count:
+            if (
+                type(largest) is not int
+                or isinstance(largest, bool)
+                or largest < 0
+                or largest > count
+            ):
                 return None
             result["largest_free_block"] = largest
         for key, minimum in (
@@ -1638,9 +1642,7 @@ class BrokerService:
     def _request_resource_constraints(request: AllocationRequest) -> ResourceConstraints:
         payload = json_load(request.constraints_json)
         if isinstance(payload, dict):
-            payload = {
-                key: value for key, value in payload.items() if key != "plugin_allocation"
-            }
+            payload = {key: value for key, value in payload.items() if key != "plugin_allocation"}
         return ResourceConstraints.model_validate(payload)
 
     @staticmethod
@@ -1909,9 +1911,7 @@ class BrokerService:
                             "host": endpoint.host,
                             "port": endpoint.port,
                             "ssh_user": endpoint.ssh_user,
-                            "workspace_path": self._endpoint_effective_workspace(
-                                session, endpoint
-                            ),
+                            "workspace_path": self._endpoint_effective_workspace(session, endpoint),
                         },
                         "gpus": [
                             {
@@ -1933,7 +1933,9 @@ class BrokerService:
         allocation = None
         if request is not None:
             constraints = json_load(request.constraints_json)
-            if isinstance(constraints, dict) and isinstance(constraints.get("plugin_allocation"), dict):
+            if isinstance(constraints, dict) and isinstance(
+                constraints.get("plugin_allocation"), dict
+            ):
                 allocation = constraints["plugin_allocation"]
         if allocation:
             ssh = allocation.get("ssh") if isinstance(allocation.get("ssh"), dict) else {}
@@ -2110,9 +2112,7 @@ class BrokerService:
             present = [value for value in values if value is not None]
             return round(sum(present) / len(present), 2) if present else None
 
-        cpu_utilization_pct = average(
-            [sample.cpu_utilization_pct for sample in samples]
-        )
+        cpu_utilization_pct = average([sample.cpu_utilization_pct for sample in samples])
         cpu_load_fraction = (
             round(cpu_utilization_pct / 100, 2) if cpu_utilization_pct is not None else None
         )
@@ -2248,16 +2248,68 @@ class BrokerService:
         used_cores = usage_delta / 1_000_000 / elapsed_seconds
         return round(used_cores / quota_cores * 100, 2)
 
+    def _advance_process_absence(
+        self, session: Session, *, endpoint_id: str, complete: bool, now: datetime
+    ) -> None:
+        """Move this endpoint's absence clock, and retire what has run it out.
+
+        A process is retired by an unbroken run of the endpoint's own complete
+        observations leaving it out, never by one listing: the GPU query and
+        the compute-app query are separate probes, so an endpoint whose
+        namespace cannot see its own compute processes reports a complete GPU
+        snapshot with an empty process list, which in that single reading is
+        indistinguishable from a genuinely idle card.
+
+        The clock is the evidence chain, not the wall.  An incomplete or failed
+        collection clears ``absent_since``, so an outage restarts the absence
+        rather than counting toward it -- which is what makes the window short
+        enough for a released card to come back quickly without a collector
+        hiccup ever retiring a running job.
+        """
+
+        active = session.scalars(
+            select(ProcessObservation).where(
+                ProcessObservation.endpoint_id == endpoint_id,
+                ProcessObservation.active.is_(True),
+            )
+        ).all()
+        if not complete:
+            for process in active:
+                process.absent_since = None
+            return
+        grace = timedelta(seconds=self.inventory.collector.process_absence_grace_seconds)
+        for process in active:
+            # Everything this cycle observed was just stamped with `now` and
+            # had its absence cleared, so a still-empty clock on an older
+            # sighting is exactly a row this observation left out.
+            if process.absent_since is None:
+                if (_as_utc(process.last_seen_at) or now) < now:
+                    process.absent_since = now
+                continue
+            if now - (_as_utc(process.absent_since) or now) >= grace:
+                process.active = False
+                process.absent_since = None
+
     def _current_processes(
         self, session: Session, gpu_id: str, now: datetime
     ) -> list[ProcessObservation]:
-        cutoff = now - timedelta(seconds=self.inventory.collector.stale_after_seconds)
+        """Return the compute processes this GPU is currently known to run.
+
+        One question, one owner.  Whether a sighting is still a fact is decided
+        where the evidence arrives -- ``ingest_observation`` retires a row once
+        the endpoint's own unbroken complete observations have left it out for
+        the whole absence grace -- so every reader here asks only ``active``.
+        A second, wall-clock filter on this side would answer the same question
+        with a different clock, and would silently retire the processes of an
+        endpoint that has merely stopped answering, which is the fail-open this
+        control plane must not have.
+        """
+
         return session.scalars(
             select(ProcessObservation)
             .where(
                 ProcessObservation.gpu_id == gpu_id,
                 ProcessObservation.active.is_(True),
-                ProcessObservation.last_seen_at >= cutoff,
             )
             .order_by(ProcessObservation.pid)
         ).all()
@@ -2510,17 +2562,21 @@ class BrokerService:
         if not observation_complete:
             return
         session.flush()
-        leases = session.scalars(
-            select(Lease)
-            .join(LeaseResource, LeaseResource.lease_id == Lease.id)
-            .join(GPUDevice, GPUDevice.id == LeaseResource.gpu_id)
-            .where(
-                Lease.kind == "workload",
-                Lease.state == "ACTIVE",
-                LeaseResource.active.is_(True),
-                GPUDevice.endpoint_id == endpoint_id,
+        leases = (
+            session.scalars(
+                select(Lease)
+                .join(LeaseResource, LeaseResource.lease_id == Lease.id)
+                .join(GPUDevice, GPUDevice.id == LeaseResource.gpu_id)
+                .where(
+                    Lease.kind == "workload",
+                    Lease.state == "ACTIVE",
+                    LeaseResource.active.is_(True),
+                    GPUDevice.endpoint_id == endpoint_id,
+                )
             )
-        ).unique().all()
+            .unique()
+            .all()
+        )
         for lease in leases:
             resources = session.scalars(
                 select(LeaseResource).where(
@@ -2546,15 +2602,12 @@ class BrokerService:
                 resource.gpu_id: self._active_lease_for_gpu(session, resource.gpu_id)
                 for resource in endpoint_resources
             }
-            if (
-                not endpoint_resources
-                or any(
-                    gpu_by_id.get(resource.gpu_id) is None
-                    or gpu_by_id[resource.gpu_id].endpoint_id != endpoint_id
-                    or active_leases_by_gpu[resource.gpu_id] is None
-                    or active_leases_by_gpu[resource.gpu_id].id != lease.id
-                    for resource in endpoint_resources
-                )
+            if not endpoint_resources or any(
+                gpu_by_id.get(resource.gpu_id) is None
+                or gpu_by_id[resource.gpu_id].endpoint_id != endpoint_id
+                or active_leases_by_gpu[resource.gpu_id] is None
+                or active_leases_by_gpu[resource.gpu_id].id != lease.id
+                for resource in endpoint_resources
             ):
                 continue
             if not self._resources_have_fresh_telemetry(session, endpoint_resources, now):
@@ -2805,6 +2858,10 @@ class BrokerService:
                 endpoint.keepalive_policy == "idle_keepalive"
                 and endpoint.keepalive_adapter_id is not None
                 and gpu_state == "AVAILABLE"
+                # Same question as the transition planner's, so the same
+                # answer: a card still inside its post-release cooldown is not
+                # somewhere occupancy is about to start.
+                and self._workload_release_cooldown_remaining_seconds(session, gpu.id, now) <= 0
             ):
                 eligible_idle_gpu_count += 1
         return self._keepalive_aggregate(
@@ -2905,6 +2962,42 @@ class BrokerService:
             return result
 
         return self._write(operation)
+
+    def _workload_release_cooldown_remaining_seconds(
+        self,
+        session: Session,
+        gpu_id: str,
+        now: datetime,
+    ) -> float:
+        """Seconds left before this GPU may start a fresh keepalive worker.
+
+        A workload lease's own release is the only "the owner is done" signal
+        the control plane has, and a staged job's gap between two batches of
+        shards can look exactly like it.  This reads the cooldown straight off
+        ``lease_resources.released_at`` instead of tracking a separate timer,
+        so it can only ever fire after a real, already-recorded release and
+        never drifts from the ledger.  A GPU that has never held a released
+        workload lease has nothing to wait for.
+        """
+
+        cooldown = self.inventory.keepalive_start_cooldown_seconds
+        if cooldown <= 0:
+            return 0.0
+        released_at = session.scalar(
+            select(LeaseResource.released_at)
+            .join(Lease, Lease.id == LeaseResource.lease_id)
+            .where(
+                LeaseResource.gpu_id == gpu_id,
+                LeaseResource.released_at.isnot(None),
+                Lease.kind == "workload",
+            )
+            .order_by(LeaseResource.released_at.desc())
+            .limit(1)
+        )
+        if released_at is None:
+            return 0.0
+        elapsed = (now - (_as_utc(released_at) or now)).total_seconds()
+        return max(0.0, cooldown - elapsed)
 
     def list_keepalive_transitions(self, endpoint_id: str | None = None) -> dict[str, Any]:
         """Return policy-driven start/stop work without starting remote processes.
@@ -3028,7 +3121,31 @@ class BrokerService:
                             )
                         continue
                     state, reason = self._gpu_state(session, gpu, now)
-                    if state == "AVAILABLE":
+                    cooldown_remaining = (
+                        self._workload_release_cooldown_remaining_seconds(session, gpu.id, now)
+                        if state == "AVAILABLE"
+                        else 0.0
+                    )
+                    if state == "AVAILABLE" and cooldown_remaining > 0:
+                        # The previous holder let this card go moments ago, and
+                        # a gap between two batches of its work looks the same
+                        # as the end of it.  Occupancy waits the cooldown out
+                        # rather than taking 80% of the VRAM on top of a job
+                        # that is about to continue.
+                        transitions.append(
+                            {
+                                "action": "ineligible",
+                                "endpoint_id": endpoint.id,
+                                "gpu_id": gpu.id,
+                                "gpu_uuid": gpu.gpu_uuid,
+                                "state": state,
+                                "reason": (
+                                    "workload lease released recently; keepalive start "
+                                    f"cooldown has {int(cooldown_remaining)}s remaining"
+                                ),
+                            }
+                        )
+                    elif state == "AVAILABLE":
                         transitions.append(
                             {
                                 "action": "start",
@@ -3622,7 +3739,21 @@ class BrokerService:
                 gpu_ids=gpu_ids,
                 observation_not_before=observation_not_before,
             )
-            if processes:
+            # A sighting stays a current fact for the whole absence grace, so
+            # the worker this call just stopped is still on the target's list.
+            # Only that worker's own row is settled by the barrier: seen in the
+            # post-stop observation means the stop did not take.  Every other
+            # process still blocks the release, including one that this single
+            # snapshot happened not to list.
+            barrier = ensure_utc(observation_not_before)
+            expected_key = self._keepalive_expected_process_key(
+                session.get(KeepaliveCurrent, gpu_ids[0])
+            )
+            if any(
+                self._process_key(process) != expected_key
+                or (_as_utc(process.last_seen_at) or barrier) >= barrier
+                for process in processes
+            ):
                 raise BrokerError(
                     "keepalive_process_still_running",
                     "keepalive ownership remains held while target processes are observed",
@@ -3644,6 +3775,17 @@ class BrokerService:
             # This is the one validated stop boundary: fresh collection proved
             # the target empty, so retaining the old PID/start identity would
             # make a later keeper restart look foreign.
+            #
+            # The same proof retires the worker's own sighting. A sighting
+            # normally ages out because one listing that leaves a process out
+            # is ambiguous -- the probe cannot always see its own namespace.
+            # Here it is not ambiguous: ServerPilot asked this exact worker to
+            # stop and then watched a complete observation that no longer
+            # carries it. Leaving the row to expire on the clock would hold the
+            # card out of the pool for minutes after the stop that frees it,
+            # which is the whole point of the stop.
+            for process in processes:
+                process.active = False
             self._set_keepalive_current(
                 session,
                 gpu_ids[0],
@@ -3981,7 +4123,6 @@ class BrokerService:
                     ):
                         samples.append(current)
 
-            process_cutoff = now - timedelta(seconds=self.inventory.collector.stale_after_seconds)
             processes_by_gpu: dict[str, list[ProcessObservation]] = defaultdict(list)
             if gpu_ids:
                 for process in session.scalars(
@@ -3989,7 +4130,6 @@ class BrokerService:
                     .where(
                         ProcessObservation.gpu_id.in_(gpu_ids),
                         ProcessObservation.active.is_(True),
-                        ProcessObservation.last_seen_at >= process_cutoff,
                     )
                     .order_by(ProcessObservation.gpu_id, ProcessObservation.pid)
                 ).all():
@@ -4160,7 +4300,9 @@ class BrokerService:
                 if lease is not None and lease.state == "ORPHANED_BUSY":
                     return "ORPHANED_BUSY", "lease expired while a compute process remains"
                 if lease is not None and lease.kind == "keepalive":
-                    keepalive_state, keepalive_reason = self._keepalive_gpu_status(session, gpu, lease, now)
+                    keepalive_state, keepalive_reason = self._keepalive_gpu_status(
+                        session, gpu, lease, now
+                    )
                     if keepalive_state == "ON":
                         return "KEEPALIVE", "occupancy is active"
                     if keepalive_state == "OFF" and not processes_by_gpu[gpu.id]:
@@ -4207,7 +4349,9 @@ class BrokerService:
                         ],
                     )
                 gpu_state, reason = derive_state(gpu)
-                keepalive_state, keepalive_reason = self._keepalive_gpu_status(session, gpu, lease, now)
+                keepalive_state, keepalive_reason = self._keepalive_gpu_status(
+                    session, gpu, lease, now
+                )
                 endpoint = next(item for item in visible_endpoints if item.id == gpu.endpoint_id)
                 keepalive_state, keepalive_reason = self._policy_keepalive_status(
                     endpoint,
@@ -4338,11 +4482,45 @@ class BrokerService:
                     known = last_process_by_lease[lease.id]
                     if known is None or seen > known:
                         last_process_by_lease[lease.id] = seen
+            # Whether a person may clear a lease by hand is the broker's answer,
+            # published next to the facts it is drawn from. The App used to
+            # derive it from GPU states, which reads a claim between two batches
+            # of shards as finished; `manual_release.blocked_reason` is the very
+            # error code the release would raise, so the button and the 409
+            # cannot drift apart.
+            gpu_endpoint_by_id = {gpu.id: gpu.endpoint_id for gpu in endpoint_gpus}
+            unreachable_by_endpoint: dict[str, bool] = {}
+
+            def lease_endpoints_unreachable(lease_resources: list[LeaseResource]) -> bool:
+                owning_endpoints = {
+                    owner
+                    for resource in lease_resources
+                    if resource.active
+                    and (owner := gpu_endpoint_by_id.get(resource.gpu_id)) is not None
+                }
+                if not owning_endpoints:
+                    return False
+                for owner in owning_endpoints:
+                    if owner not in unreachable_by_endpoint:
+                        unreachable_by_endpoint[owner] = self._endpoint_is_unreachable(
+                            session, owner, now
+                        )
+                return all(unreachable_by_endpoint[owner] for owner in owning_endpoints)
+
             for lease_id, payload in lease_payloads.items():
+                lease_resources = resources_by_lease[lease_id]
                 payload["runtime_state"] = (
                     "RUNNING" if lease_id in running_lease_ids else "ASSIGNED"
                 )
                 payload["last_process_observed_at"] = _iso(last_process_by_lease[lease_id])
+                payload["manual_release"] = self._manual_release_verdict(
+                    session,
+                    lease_by_id[lease_id],
+                    lease_resources,
+                    processes_by_gpu,
+                    now,
+                    endpoint_unreachable=lease_endpoints_unreachable(lease_resources),
+                )
 
             all_gpu_payloads = gpu_payloads
             counts = defaultdict(int)
@@ -4674,9 +4852,7 @@ class BrokerService:
                     )
                     for group in groups.values()
                     if endpoint_id is None
-                    or any(
-                        endpoint.server_group_id == group.id for endpoint in visible_endpoints
-                    )
+                    or any(endpoint.server_group_id == group.id for endpoint in visible_endpoints)
                 ],
                 "gpus": gpu_payloads,
                 "absent_gpu_ids": absent_gpu_ids,
@@ -5031,9 +5207,7 @@ class BrokerService:
 
         if not observed_uuids:
             return set()
-        stale_before = observed_at - timedelta(
-            seconds=self.inventory.collector.stale_after_seconds
-        )
+        stale_before = observed_at - timedelta(seconds=self.inventory.collector.stale_after_seconds)
         affected: set[str] = set()
         for sibling in session.scalars(
             select(GPUDevice).where(
@@ -5115,11 +5289,7 @@ class BrokerService:
         released_any = False
         for lease_id in resources_by_lease:
             lease = session.get(Lease, lease_id)
-            if (
-                lease is None
-                or lease.kind != "keepalive"
-                or lease.state in TERMINAL_LEASE_STATES
-            ):
+            if lease is None or lease.kind != "keepalive" or lease.state in TERMINAL_LEASE_STATES:
                 continue
             all_active = session.scalars(
                 select(LeaseResource).where(
@@ -5215,9 +5385,7 @@ class BrokerService:
             elif observation.gpus:
                 endpoint.resource_kind = "gpu"
                 endpoint.updated_at = now
-            self._persist_plugin_capacity(
-                session, endpoint, observation.scheduler, now=now
-            )
+            self._persist_plugin_capacity(session, endpoint, observation.scheduler, now=now)
             self._persist_collector_implementation_version(
                 session, endpoint.id, resolved_version, now=now
             )
@@ -5441,7 +5609,6 @@ class BrokerService:
                 if purged:
                     session.flush()
             session.flush()
-            observed_process_keys: set[tuple[str, int, str, datetime]] = set()
             for process in observation.processes:
                 gpu = by_uuid.get(process.gpu_uuid)
                 if gpu is None:
@@ -5506,8 +5673,6 @@ class BrokerService:
                     ):
                         current = candidate
                         started_at = candidate_started_at
-                key = (gpu.id, process.pid, observation.boot_id, started_at)
-                observed_process_keys.add(key)
                 if current is None:
                     session.add(
                         ProcessObservation(
@@ -5522,6 +5687,7 @@ class BrokerService:
                             first_seen_at=now,
                             last_seen_at=now,
                             observations=1,
+                            absent_since=None,
                             active=True,
                         )
                     )
@@ -5531,24 +5697,15 @@ class BrokerService:
                     current.used_memory_mib = process.used_memory_mib
                     current.last_seen_at = now
                     current.observations += 1
+                    current.absent_since = None
                     current.active = True
             session.flush()
-            if observation.observation_complete:
-                current_processes = session.scalars(
-                    select(ProcessObservation).where(
-                        ProcessObservation.endpoint_id == endpoint.id,
-                        ProcessObservation.active.is_(True),
-                    )
-                ).all()
-                for prior in current_processes:
-                    key = (
-                        prior.gpu_id,
-                        prior.pid,
-                        prior.boot_id,
-                        _as_utc(prior.process_started_at),
-                    )
-                    if key not in observed_process_keys:
-                        prior.active = False
+            self._advance_process_absence(
+                session,
+                endpoint_id=endpoint.id,
+                complete=observation.observation_complete,
+                now=now,
+            )
             provider_state = session.scalar(
                 select(ProviderState).where(
                     ProviderState.provider == provider, ProviderState.endpoint_id == endpoint.id
@@ -5780,6 +5937,12 @@ class BrokerService:
             )
             first_failure = state is None or state.last_error is None
             last_success = _as_utc(state.last_success_at) if state is not None else None
+            # A failed attempt breaks the evidence chain the absence clock is
+            # made of, so every process this endpoint still owns starts its
+            # absence over rather than aging through the outage.
+            self._advance_process_absence(
+                session, endpoint_id=endpoint_id, complete=False, now=now
+            )
             if state is None:
                 session.add(
                     ProviderState(
@@ -6271,9 +6434,7 @@ class BrokerService:
 
         per_node = constraints.gpus_per_node
         if per_node is not None:
-            hosts = best_fit(
-                [item for item in by_endpoint.items() if len(item[1]) >= per_node]
-            )
+            hosts = best_fit([item for item in by_endpoint.items() if len(item[1]) >= per_node])
             if len(hosts) < constraints.nodes:
                 return None
             selected: list[GPUDevice] = []
@@ -6460,9 +6621,7 @@ class BrokerService:
                 request.updated_at = now
                 continue
             candidates, excluded = self._eligible_gpus(session, request=request, now=now)
-            resources = self._select_resources_in_group_partitions(
-                session, candidates, constraints
-            )
+            resources = self._select_resources_in_group_partitions(session, candidates, constraints)
             if resources is None:
                 top_exclusions = ", ".join(
                     f"{reason}={count}"
@@ -6612,9 +6771,9 @@ class BrokerService:
     ) -> dict[str, Any]:
         endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
         gpus = session.scalars(
-            select(GPUDevice).where(GPUDevice.present.is_(True)).order_by(
-                GPUDevice.endpoint_id, GPUDevice.gpu_index
-            )
+            select(GPUDevice)
+            .where(GPUDevice.present.is_(True))
+            .order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
         ).all()
         gpus_by_endpoint: dict[str, list[GPUDevice]] = defaultdict(list)
         for gpu in gpus:
@@ -6639,18 +6798,13 @@ class BrokerService:
                     bucket["available_count"] += 1
             return {
                 "server_id": endpoint.id,
-                "gpus": [
-                    skus[key]
-                    for key in sorted(skus, key=lambda item: (item[0], item[1]))
-                ],
+                "gpus": [skus[key] for key in sorted(skus, key=lambda item: (item[0], item[1]))],
             }
 
         group_payloads = []
         for group_id in sorted(groups):
             group = groups[group_id]
-            members = [
-                endpoint for endpoint in endpoints if endpoint.server_group_id == group.id
-            ]
+            members = [endpoint for endpoint in endpoints if endpoint.server_group_id == group.id]
             group_payloads.append(
                 {
                     **self._server_group_dict(group),
@@ -7033,6 +7187,40 @@ class BrokerService:
 
         return self._write(operation)
 
+    def record_lease_heartbeat(self, actor: ActorContext, lease_id: str) -> dict[str, Any]:
+        """Record that the holder of this lease is still there.
+
+        A holder asking the control plane about its own hold is the only
+        first-hand evidence that it still exists, and it is a call an agent
+        already makes, so nothing has to be added to an agent's routine for the
+        control plane to learn it.  ``_lease_liveness_age_seconds`` reads what
+        this writes.
+
+        A lease that is gone, settled, or somebody else's is answered rather
+        than refused: this rides on a status read, and a status read of an
+        already-released lease has to keep answering ``no_leased_gpus``.  It
+        deliberately writes no audit event and bumps no revision -- it changes
+        nothing another consumer reconciles against, and it arrives once per
+        status call.
+        """
+
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            lease = session.get(Lease, lease_id)
+            if lease is None or not self._can_manage_lease(actor, lease):
+                return {"lease_id": lease_id, "recorded": False}
+            if lease.state not in ACTIVE_LEASE_STATES:
+                return {"lease_id": lease_id, "recorded": False}
+            lease.last_heartbeat_at = utcnow()
+            return {
+                "lease_id": lease_id,
+                "recorded": True,
+                "last_heartbeat_at": _iso(lease.last_heartbeat_at),
+            }
+
+        return self._write(operation)
+
     def release_lease(
         self,
         actor: ActorContext,
@@ -7363,6 +7551,103 @@ class BrokerService:
 
         return self._write(operation)
 
+    def _manual_release_verdict(
+        self,
+        session: Session,
+        lease: Lease,
+        resources: Iterable[LeaseResource],
+        processes_by_gpu: Mapping[str, list[ProcessObservation]],
+        now: datetime,
+        *,
+        endpoint_unreachable: bool,
+    ) -> dict[str, Any]:
+        """Answer, in one place, whether a person may clear this lease by hand.
+
+        Three paths return a card: the owner's own ``release_lease``, the
+        two-phase idle reclaim, and this one -- and this one used to be the
+        loosest of the three while being the only one a human could fire. It
+        asked for a single fresh, complete, process-free observation, and a
+        staged job between two batches of shards runs no CUDA process for
+        minutes at a time. That is how an eight-card claim that was still
+        working got cleared, and ServerPilot's own keepalive took the cards
+        eight seconds later.
+
+        So the criterion is now the one the idle reclaim already uses: the
+        holder's liveness age -- how long since a process was last observed on
+        this lease's own cards or its holder was last heard from -- must have
+        reached ``idle_lease_alert_seconds``. "No process right now" stays a
+        necessary condition, never a sufficient one.
+
+        Two exemptions, both of them the same kind of statement rather than a
+        second policy, and neither of them touches the "no process on this
+        card" proof:
+
+        * A keepalive lease is ServerPilot's own placeholder on an idle card.
+          The person clicking is this instance's operator, which is to say the
+          holder itself, so waiting for that holder to go quiet is waiting for
+          nobody. It skips the liveness window and nothing else: a keepalive
+          worker that is still observed running is still a running process,
+          and clearing the lease that owns it would leave 80% of the card's
+          VRAM held by a worker no lease points at any more.
+        * An endpoint that has stopped answering carries the waiver this path
+          already documents for the observation proof. A machine that is gone
+          can neither show its cards empty nor let its holder say it is still
+          there, and the row keeps nobody off a card ServerPilot cannot reach.
+
+        Collection freshness is deliberately not part of this answer: the REST
+        layer collects the endpoint at click time, so it is proved by the
+        release itself and reported through that call's own errors. A
+        projection cannot forecast a collection that has not happened yet.
+
+        ``blocked_reason`` is the error code the release would raise, so a
+        greyed out button and a 409 say the same word.
+        """
+
+        active = [resource for resource in resources if resource.active]
+        if lease.kind not in {"workload", "keepalive"} or lease.state not in ACTIVE_LEASE_STATES:
+            return {
+                "allowed": False,
+                "blocked_reason": "empty_workload_lease_required",
+                "message": "只有仍持有 GPU 的工作租约或占卡租约可以在这里清理。",
+                "details": {"lease_kind": lease.kind, "lease_state": lease.state},
+            }
+        if not active:
+            return {
+                "allowed": False,
+                "blocked_reason": "lease_has_no_resources",
+                "message": "这个租约已经没有持有中的 GPU。",
+                "details": {},
+            }
+        for resource in [] if endpoint_unreachable else active:
+            processes = processes_by_gpu.get(resource.gpu_id) or []
+            if processes:
+                return {
+                    "allowed": False,
+                    "blocked_reason": "conflict_process_present",
+                    "message": "仍观察到运行中的进程，不能释放这张 GPU 的占用。",
+                    "details": {"gpu_id": resource.gpu_id, "process_count": len(processes)},
+                }
+        if lease.kind == "keepalive" or endpoint_unreachable:
+            return {"allowed": True, "blocked_reason": None, "message": None, "details": {}}
+        alert_after = self.inventory.idle_lease_alert_seconds
+        age = self._lease_liveness_age_seconds(session, lease, active, now)
+        if age < alert_after:
+            return {
+                "allowed": False,
+                "blocked_reason": "lease_holder_recently_alive",
+                "message": (
+                    f"这个租约的持有者刚刚还在：{int(age // 60)} 分钟前仍能观察到它的进程或心跳。"
+                    "分阶段的任务在两批之间本来就没有进程，因此要连续 "
+                    f"{alert_after // 60} 分钟既没有进程也没有心跳，才能在这里清理。"
+                    "请稍后再试，或让持有者自己释放。"
+                ),
+                "details": {
+                    "liveness_age_seconds": round(age, 1),
+                    "required_seconds": alert_after,
+                },
+            }
+        return {"allowed": True, "blocked_reason": None, "message": None, "details": {}}
+
     def release_empty_conflicted_lease(
         self,
         actor: ActorContext,
@@ -7372,23 +7657,30 @@ class BrokerService:
         observation_not_before: datetime,
         idempotency_key: str,
     ) -> dict[str, Any]:
-        """Release one empty workload or keepalive lease after fresh evidence.
+        """Let an operator clear a lease whose holder is provably finished.
 
-        A conflict is deliberately not auto-cleared by collection: it means a
-        prior lease/process binding diverged, and the original actor may have
-        left a real workload behind.  Endpoint operators get this narrow
-        recovery path only after the REST layer has collected the endpoint and
-        this method verifies a complete, fresh, process-free observation for
-        every GPU still owned by the lease. GPU utilization alone is never
-        treated as proof of emptiness. The same proof applies to internal
-        per-GPU keepalive leases so a failed stop cannot permanently wedge a
-        GPU that a human needs to recover.
+        Two things have to hold, and this method owns only the first of them.
 
-        The proof is waived in exactly one case: the endpoint has stopped
-        answering altogether. Demanding evidence from a machine that is gone is
-        what wedges the cards, and the ledger it protects has stopped
-        protecting anything. The release then records that the server was
-        unreachable rather than claiming its GPUs were observed empty.
+        It proves the *machine's* side: the REST layer has just collected the
+        endpoint, and every GPU the lease still owns appears in that one
+        complete, fresh observation. GPU utilization is never proof of
+        emptiness, and a later probe that refreshed the host but not a card is
+        not an observation of that card. This proof is waived when the endpoint
+        has stopped answering altogether -- demanding evidence from a machine
+        that is gone is what wedges the cards, and the release then records
+        that the server was unreachable rather than claiming its GPUs were seen
+        empty.
+
+        The *holder's* side is not this method's to decide, and it never was
+        the endpoint's observation to give: ``_manual_release_verdict`` answers
+        it, the same answer the snapshot publishes as ``manual_release`` so the
+        App offers this action exactly when it would be accepted. This method
+        raises whatever that verdict refuses.
+
+        What is left is genuinely a recovery path -- a lease whose holder has
+        gone quiet for the alert window, ServerPilot's own keepalive hold, or a
+        server that no longer answers -- which is what this docstring used to
+        claim while the code would also clear a claim that was still working.
         """
 
         self._require_role(actor, MUTATING_ROLES)
@@ -7410,29 +7702,16 @@ class BrokerService:
             lease = session.get(Lease, lease_id)
             if lease is None:
                 raise BrokerError("lease_not_found", "找不到这个 GPU 租约", status_code=404)
-            if lease.kind not in {"workload", "keepalive"} or lease.state not in {
-                "HELD",
-                "ACTIVE",
-                "ORPHANED_BUSY",
-                "CONFLICT",
-            }:
-                raise BrokerError(
-                    "empty_workload_lease_required",
-                    "only a held, active, orphaned, or conflicted workload/keepalive lease can be cleared here",
-                    status_code=409,
-                )
+            # Which leases may be cleared here is `_manual_release_verdict`'s
+            # single answer, applied below once the machine's own proof is in.
+            # Repeating the state and resource tests here is how this path came
+            # to disagree with the one the App was reading.
             resources = session.scalars(
                 select(LeaseResource).where(
                     LeaseResource.lease_id == lease.id,
                     LeaseResource.active.is_(True),
                 )
             ).all()
-            if not resources:
-                raise BrokerError(
-                    "lease_has_no_resources",
-                    "the lease has no active GPU resources",
-                    status_code=409,
-                )
             gpu_ids = {resource.gpu_id for resource in resources}
             gpus = [session.get(GPUDevice, gpu_id) for gpu_id in gpu_ids]
             if any(gpu is None or gpu.endpoint_id != endpoint_id for gpu in gpus):
@@ -7500,14 +7779,24 @@ class BrokerService:
                         status_code=409,
                         details={"gpu_id": gpu.id},
                     )
-                processes = self._current_processes(session, gpu.id, now)
-                if processes:
-                    raise BrokerError(
-                        "conflict_process_present",
-                        "仍观察到运行中的进程，不能释放这张 GPU 的占用",
-                        status_code=409,
-                        details={"gpu_id": gpu.id, "process_count": len(processes)},
-                    )
+
+            # The machine's proof is in; the holder's side is one answer, and
+            # the same one the snapshot published as `manual_release`.
+            verdict = self._manual_release_verdict(
+                session,
+                lease,
+                resources,
+                {gpu_id: self._current_processes(session, gpu_id, now) for gpu_id in gpu_ids},
+                now,
+                endpoint_unreachable=unreachable,
+            )
+            if not verdict["allowed"]:
+                raise BrokerError(
+                    verdict["blocked_reason"],
+                    verdict["message"],
+                    status_code=409,
+                    details=verdict["details"],
+                )
 
             revision = self._bump_revision(session, now)
             before = self._lease_dict(session, lease)
@@ -7682,13 +7971,11 @@ class BrokerService:
             if not gpu_ids:
                 raise BrokerError("lease_has_no_resources", "这个租约没有活动 GPU", status_code=409)
             now = utcnow()
-            cutoff = now - timedelta(seconds=self.inventory.collector.stale_after_seconds)
             processes = session.scalars(
                 select(ProcessObservation)
                 .where(
                     ProcessObservation.gpu_id.in_(gpu_ids),
                     ProcessObservation.active.is_(True),
-                    ProcessObservation.last_seen_at >= cutoff,
                 )
                 .order_by(ProcessObservation.gpu_id, ProcessObservation.pid)
             ).all()
@@ -7844,7 +8131,10 @@ class BrokerService:
         for lease in leases:
             before = self._lease_dict(session, lease)
             lease.state = "ACTIVE"
-            lease.last_heartbeat_at = now
+            # Normalising a legacy state observed nothing about the holder.
+            # `_lease_liveness_age_seconds` reads `last_heartbeat_at` as
+            # first-hand evidence that somebody is still there, and the control
+            # plane must never write that on its own behalf.
             request = session.get(AllocationRequest, lease.request_id)
             if request is not None:
                 request.state = "ACTIVE"
@@ -7863,6 +8153,46 @@ class BrokerService:
                 now=now,
             )
         return len(leases)
+
+    def _lease_liveness_age_seconds(
+        self,
+        session: Session,
+        lease: Lease,
+        resources: Iterable[LeaseResource],
+        now: datetime,
+    ) -> float:
+        """Return how long ago this lease's holder was last evidenced to be alive.
+
+        Two facts count as that evidence and nothing else does:
+
+        * the newest process sighting on a GPU the lease still holds, read
+          whatever that row's ``active`` flag now says.  A row goes inactive
+          once the endpoint has stopped showing it, which is an absence of
+          samples, not the moment the work ended.
+        * ``lease.last_heartbeat_at``, which the holder itself moved by asking
+          the control plane about its own hold.
+
+        This is the only definition of holder liveness in the control plane.
+        Every question of the form "is whoever took these GPUs still there" is
+        answered from here, so that the manual return path, the automatic one
+        and what a person is shown cannot drift apart.  It is total: a lease
+        always carries a heartbeat stamp from the moment it was issued, so a
+        claim nothing has been observed on reads as its own age.
+        """
+
+        last_seen = _as_utc(lease.last_heartbeat_at) or now
+        gpu_ids = [resource.gpu_id for resource in resources]
+        if gpu_ids:
+            observed = _as_utc(
+                session.scalar(
+                    select(func.max(ProcessObservation.last_seen_at)).where(
+                        ProcessObservation.gpu_id.in_(gpu_ids)
+                    )
+                )
+            )
+            if observed is not None and observed > last_seen:
+                last_seen = observed
+        return (now - last_seen).total_seconds()
 
     def _gpu_is_observably_idle(
         self,
@@ -7898,19 +8228,49 @@ class BrokerService:
         clock of a GPU is reset whenever a process appears on it or its
         telemetry goes stale, so each streak is a continuously observed window
         and a collector outage can never accumulate into a reclaim.
+
+        A claim running nothing *anywhere* is a different case from a claim
+        running something on one card and nothing on another.  The second is a
+        card this claim is not using, and returning it is the point of the
+        per-GPU streaks: one running process cannot hold seven idle cards.
+        The first is what a staged job looks like between two batches of
+        shards, and there the only evidence left is
+        ``_lease_liveness_age_seconds`` -- whether the holder was heard from,
+        by a sighting on its own cards or by asking about its own hold.  While
+        it was, none of its cards are taken, because taking them walks back
+        into p8908: the cards leave the claim, the cooldown lapses, and
+        keepalive puts 80% of their VRAM under a job that is about to use them
+        again.  The gate covers every card, not just the last one -- streaks
+        desynchronise whenever a card's telemetry blips or a phase used a
+        subset of the claim, and a gate that only fires when *all* cards happen
+        to mature together would miss exactly those.  Idle cards are still
+        alerted on while the holder is alive, so a person can see a claim
+        sitting on cards it does not use and end it deliberately.
+
+        This gate replaces the declared-duration exemption, which a routine
+        claim could never reach: that path clears ``expires_at`` by
+        construction, so the exemption covered every lease except the ones
+        that needed it.  A lease that did declare a duration is now reclaimed
+        on the same terms as any other, which is a real change for the CLI and
+        App paths that used to be exempt outright.
         """
 
         if not resources:
             return False
-        if lease.expires_at is not None:
-            # A lease that declared a duration already has a bound, and that
-            # window is the user's stated intent: a job may legitimately sit at
-            # zero GPU processes during a long CPU phase.  Only claims with no
-            # other safety net are reclaimed on observed idleness.
-            return False
 
         alert_after = self.inventory.idle_lease_alert_seconds
         reclaim_after = self.inventory.idle_lease_reclaim_seconds
+        # Asked once, for the claim as a whole, and applied to every card
+        # alike.  A card lying idle next to a card that is working is a card
+        # this claim is not using; a claim with nothing running anywhere is
+        # the shape of a staged job between two batches, and then the only
+        # evidence left is whether the holder itself was heard from.
+        working = any(
+            self._current_processes(session, resource.gpu_id, now) for resource in resources
+        )
+        protected = not working and (
+            self._lease_liveness_age_seconds(session, lease, resources, now) < reclaim_after
+        )
         reclaimed: list[LeaseResource] = []
         alerting = 0
         for resource in resources:
@@ -7921,9 +8281,11 @@ class BrokerService:
                 resource.idle_since = now
                 continue
             idle_seconds = (now - (_as_utc(resource.idle_since) or now)).total_seconds()
-            if idle_seconds >= reclaim_after:
+            if idle_seconds < alert_after:
+                continue
+            if idle_seconds >= reclaim_after and not protected:
                 reclaimed.append(resource)
-            elif idle_seconds >= alert_after:
+            else:
                 alerting += 1
 
         remaining = [resource for resource in resources if resource not in reclaimed]
@@ -7943,7 +8305,8 @@ class BrokerService:
                     message=(
                         f"{alerting} of {len(resources)} leased GPU(s) have run no compute "
                         f"process for over {alert_after // 60} minutes; each is reclaimed "
-                        f"automatically after {reclaim_after // 60} minutes"
+                        f"automatically after {reclaim_after // 60} minutes, once its "
+                        f"holder has also stopped checking in for that long"
                     ),
                     now=now,
                 )
@@ -7995,13 +8358,13 @@ class BrokerService:
         lease: Lease,
         releases: list[dict[str, str]],
     ) -> None:
-        payload = self._plugin_allocation_payload(
-            session.get(AllocationRequest, lease.request_id)
-        )
+        payload = self._plugin_allocation_payload(session.get(AllocationRequest, lease.request_id))
         if payload is not None:
             releases.append(payload)
 
-    def _reconcile_leases(self, session: Session, now: datetime, *, actor_id: str) -> list[dict[str, str]]:
+    def _reconcile_leases(
+        self, session: Session, now: datetime, *, actor_id: str
+    ) -> list[dict[str, str]]:
         """Reconcile expiry and legacy attribution state; never kill/restart anything."""
 
         self._normalize_legacy_workload_conflicts(session, now, actor_id=actor_id)
@@ -8168,9 +8531,7 @@ class BrokerService:
             if self._reservation_blocks_gpu(session, gpu.id, start=start_at, end=end_at):
                 continue
             candidates.append(gpu)
-        selected = self._select_resources_in_group_partitions(
-            session, candidates, constraints
-        )
+        selected = self._select_resources_in_group_partitions(session, candidates, constraints)
         return [gpu.id for gpu in selected] if selected else None
 
     def create_reservation(
@@ -8647,7 +9008,9 @@ class BrokerService:
                     status_code=422,
                 )
             next_group_id = (
-                values["server_group_id"] if "server_group_id" in fields else endpoint.server_group_id
+                values["server_group_id"]
+                if "server_group_id" in fields
+                else endpoint.server_group_id
             )
             next_group = (
                 session.get(ServerGroup, next_group_id) if next_group_id is not None else None

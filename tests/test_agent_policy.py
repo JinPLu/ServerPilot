@@ -257,7 +257,14 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # bound. Two duplications paid part of the increase: the observation_profile
     # list, which the gpu_add_server parameter description already spells out in
     # full, and "with no telemetry", which the next line already says.
-    assert len(mcp.instructions) < 2800
+    # It moved from 2800 to 2900 when gpu_status(lease_id=...) became the
+    # holder's heartbeat. A caller that does not know this reads its own quiet
+    # phase between two batches of work as nothing to report, stops asking, and
+    # its claim is settled as abandoned while the work is still going -- which
+    # is what happened. The sentence has to say both halves: asking keeps the
+    # claim, and the cards it is not using still come back on their own, or the
+    # caller learns to poll instead of to release.
+    assert len(mcp.instructions) < 2900
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",

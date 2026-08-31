@@ -308,9 +308,7 @@ def claim_candidate_endpoint_ids(
         return {endpoint.id for endpoint in candidates if endpoint.id in pinned}
     group_ids = set(request_data.constraints.server_group_ids)
     if group_ids:
-        return {
-            endpoint.id for endpoint in candidates if endpoint.server_group_id in group_ids
-        }
+        return {endpoint.id for endpoint in candidates if endpoint.server_group_id in group_ids}
     return {endpoint.id for endpoint in candidates}
 
 
@@ -1419,6 +1417,15 @@ def create_app(
             idempotency_key=None,
         )
 
+    @app.post("/api/v1/routine/leases/{lease_id}/heartbeat")
+    def routine_lease_heartbeat(
+        lease_id: str,
+        actor: ApiActor,
+    ) -> dict[str, Any]:
+        """Record that this lease's holder is still asking about its own hold."""
+
+        return service.record_lease_heartbeat(actor, lease_id)
+
     @app.post("/api/v1/operator/leases/{lease_id}/release")
     def operator_release_lease(
         request: Request,
@@ -1453,7 +1460,9 @@ def create_app(
         mutation_key: str,
         operator_override: bool,
     ) -> dict[str, Any]:
-        endpoint_ids = {endpoint.id for endpoint in await service.in_domain(service.collector_endpoints)}
+        endpoint_ids = {
+            endpoint.id for endpoint in await service.in_domain(service.collector_endpoints)
+        }
         async with keepalive_endpoint_locks(endpoint_ids):
             try:
                 return await service.in_domain(

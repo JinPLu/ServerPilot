@@ -21,6 +21,7 @@ from serverpilot.models import (
     GPUDevice,
     Lease,
     LeaseResource,
+    ProcessObservation,
     ProviderState,
     TelemetryCurrent,
     TelemetrySnapshot,
@@ -30,13 +31,19 @@ from serverpilot.schemas import (
     EndpointObservation,
     EndpointUpdate,
     LeaseObservedBind,
+    ProcessInput,
     RequestCreate,
     ReservationCreate,
     RetentionPrune,
 )
 from serverpilot.service import ACTIVE_LEASE_STATES, ActorContext, BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
-from tests.helpers import observation, process_for_gpu
+from tests.helpers import (
+    age_out_lease_holder,
+    age_out_processes,
+    observation,
+    process_for_gpu,
+)
 
 
 def request_data(task_ref: str, *, count: int = 1, project_id: str = "project-a") -> RequestCreate:
@@ -664,8 +671,7 @@ def test_claim_auto_creates_project_without_extra_endpoint_scope(service, admin)
     assert claimed["lease"]["state"] == "HELD"
     assert claimed["lease"]["project_id"] == "storyboard"
     assert any(
-        lease["project_id"] == "storyboard"
-        for lease in service.snapshot(admin)["data"]["leases"]
+        lease["project_id"] == "storyboard" for lease in service.snapshot(admin)["data"]["leases"]
     )
 
 
@@ -894,9 +900,7 @@ def test_observed_workload_binding_survives_continuous_invisible_pid_metadata(
     assert gpu["lease"]["workloads"][0]["process_keys"] == [original_key]
 
 
-def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(
-    service, admin
-) -> None:
+def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(service, admin) -> None:
     service.ingest_observation(observation(count=4))
     claimed = service.create_request(
         admin,
@@ -928,20 +932,21 @@ def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(
         first_cohort[3],
         replacement_cohort[3],
     ]
+    # One lane has already finished with its bridge worker. A process is
+    # retired by age now, so "gone" has to be expressed by ageing its last
+    # sighting -- one observation that leaves it out is a single absent sample.
+    age_out_processes(service)
     service.ingest_observation(observation(count=4, processes=mixed_cohort))
     service.ingest_observation(observation(count=4, processes=mixed_cohort))
 
     lease = next(lease for lease in service.list_leases(admin)["data"] if lease["id"] == lease_id)
     assert lease["state"] == "ACTIVE"
     lease_gpus = [
-        gpu
-        for gpu in service.list_gpus(admin)["data"]
-        if gpu["id"] in claimed["lease"]["gpu_ids"]
+        gpu for gpu in service.list_gpus(admin)["data"] if gpu["id"] in claimed["lease"]["gpu_ids"]
     ]
     assert {gpu["state"] for gpu in lease_gpus} == {"RUNNING_MANAGED"}
     assert {
-        gpu["gpu_uuid"]: {process["pid"] for process in gpu["processes"]}
-        for gpu in lease_gpus
+        gpu["gpu_uuid"]: {process["pid"] for process in gpu["processes"]} for gpu in lease_gpus
     } == {
         gpu_uuids[0]: {4_100, 5_100},
         gpu_uuids[1]: {5_101},
@@ -954,9 +959,7 @@ def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(
     )
 
 
-def test_task_stays_running_during_overlapping_worker_turnover(
-    service, admin
-) -> None:
+def test_task_stays_running_during_overlapping_worker_turnover(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
         admin,
@@ -986,9 +989,7 @@ def test_task_stays_running_during_overlapping_worker_turnover(
     )
 
 
-def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(
-    service, admin
-) -> None:
+def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
         admin,
@@ -1005,6 +1006,7 @@ def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(
     service.ingest_observation(observation(count=1, processes=[initial, replacement]))
     assert service.list_gpus(admin)["data"][0]["state"] == "RUNNING_MANAGED"
 
+    age_out_processes(service)
     service.ingest_observation(observation(count=1, processes=[]))
 
     gpu = service.list_gpus(admin)["data"][0]
@@ -1044,7 +1046,9 @@ def test_workload_lease_process_restart_preserves_task_assignment(service, admin
     )
 
 
-def test_explicit_workload_binding_process_restart_preserves_task_assignment(service, admin) -> None:
+def test_explicit_workload_binding_process_restart_preserves_task_assignment(
+    service, admin
+) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
         admin,
@@ -1179,9 +1183,7 @@ def test_namespace_hidden_pid_reuse_remains_an_observed_task_process(service, ad
     assert service.list_gpus(admin)["data"][0]["state"] == "RUNNING_MANAGED"
 
 
-def test_initialize_normalizes_legacy_process_attribution_conflict(
-    service, admin
-) -> None:
+def test_initialize_normalizes_legacy_process_attribution_conflict(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
         admin,
@@ -1282,7 +1284,14 @@ def test_endpoint_operator_can_release_empty_conflicted_lease_after_fresh_observ
     service._write(seed_legacy_conflict)
 
     barrier = utcnow()
+    # The card really is empty: the sighting has run out its absence window,
+    # and this complete observation is the reading that retires it.
+    age_out_processes(service)
     service.ingest_observation(observation(count=1, processes=[]))
+    # This path is for a lease whose holder is gone. It now says so: a claim
+    # heard from moments ago is protected, so the wedged lease this test is
+    # about has to have actually gone quiet.
+    age_out_lease_holder(service, lease_id)
     released = service.release_empty_conflicted_lease(
         admin,
         "endpoint-a",
@@ -1343,7 +1352,7 @@ def test_owner_can_release_legacy_conflict_while_process_is_observed(service, ad
             lease_id,
             observation_not_before=barrier,
             idempotency_key="keep-conflict-release",
-    )
+        )
 
     assert error.value.code == "conflict_process_present"
     gpu = service.list_gpus(admin)["data"][0]
@@ -1472,6 +1481,7 @@ def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin)
 
     barrier = utcnow()
     service.ingest_observation(observation(count=1, processes=[]))
+    age_out_lease_holder(service, lease_id)
     released = service.release_empty_conflicted_lease(
         admin,
         "endpoint-a",
@@ -1624,7 +1634,9 @@ def test_snapshot_includes_per_gpu_recent_telemetry_average(service, admin) -> N
         "memory_utilization_pct": 53.33,
         "temperature_c": 50.0,
     }
-    recent_host_average = service.snapshot(admin)["data"]["endpoints"][0]["host_telemetry"]["recent_average"]
+    recent_host_average = service.snapshot(admin)["data"]["endpoints"][0]["host_telemetry"][
+        "recent_average"
+    ]
     assert recent_host_average == {
         "window_seconds": 600,
         "sample_count": 3,
@@ -2037,9 +2049,7 @@ def test_endpoint_history_is_downsampled_to_requested_cap(service, admin) -> Non
             )
 
     service._write(seed_history)
-    history = service.endpoint_history(
-        admin, "endpoint-a", window_seconds=21_600, max_points=120
-    )
+    history = service.endpoint_history(admin, "endpoint-a", window_seconds=21_600, max_points=120)
     assert history["data"]["point_count"] == 120
 
 
@@ -2434,6 +2444,7 @@ def test_reassigned_active_task_auto_binds_process_on_its_new_gpu(service, admin
     assert moved["lease"]["state"] == "ACTIVE"
     assert moved["lease"]["workloads"] == []
 
+    age_out_processes(service)
     service.ingest_observation(
         observation(count=2, processes=[process_for_gpu("GPU-endpoint-a-1", pid=4202)])
     )
@@ -2457,6 +2468,15 @@ def _lease_idle_since(service, lease_id: str):  # type: ignore[no-untyped-def]
     return service._read(read)
 
 
+def _lease_heartbeat_at(service, lease_id: str):  # type: ignore[no-untyped-def]
+    def read(session):  # type: ignore[no-untyped-def]
+        lease = session.get(Lease, lease_id)
+        assert lease is not None
+        return lease.last_heartbeat_at
+
+    return service._read(read)
+
+
 def _make_persistent(service, lease_id: str) -> None:  # type: ignore[no-untyped-def]
     """Match a routine claim, which is created with no expiry at all."""
 
@@ -2469,13 +2489,19 @@ def _make_persistent(service, lease_id: str) -> None:  # type: ignore[no-untyped
 
 
 def _backdate_idle_since(service, lease_id: str, seconds: int, *, gpu_ids=None) -> None:  # type: ignore[no-untyped-def]
-    """Age the observed idle streak, which lives per leased GPU."""
+    """Age the observed idle streak, which lives per leased GPU.
+
+    Settling a whole claim now needs both facts: its cards ran nothing, and its
+    holder stopped asking about its own hold. A helper that aged only the
+    streak would be describing a claim whose agent is still there.
+    """
 
     def write(session):  # type: ignore[no-untyped-def]
         stamp = utcnow() - timedelta(seconds=seconds)
         lease = session.get(Lease, lease_id)
         assert lease is not None
         lease.idle_since = stamp
+        lease.last_heartbeat_at = stamp
         for resource in session.scalars(
             select(LeaseResource).where(
                 LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
@@ -2527,7 +2553,9 @@ def test_idle_workload_lease_is_warned_then_reclaimed_without_a_process(service,
         for item in service.snapshot(admin)["data"]["alerts"]
         if item["type"] == "idle_lease" and item["active"]
     ]
-    reclaimed = service.create_request(admin, request_data("after-reclaim"), idempotency_key="after")
+    reclaimed = service.create_request(
+        admin, request_data("after-reclaim"), idempotency_key="after"
+    )
     assert reclaimed["lease"] is not None
 
 
@@ -2605,11 +2633,13 @@ def test_stale_telemetry_resets_the_idle_clock_instead_of_reclaiming(service, ad
     assert _lease_idle_since(service, lease_id) is None
 
 
-def test_idle_reclaim_leaves_a_lease_that_declared_its_own_duration(service, admin) -> None:
-    """A declared duration is the user's stated intent and stays authoritative.
+def test_a_declared_duration_no_longer_exempts_a_silent_claim(service, admin) -> None:
+    """Being evidenced alive replaced the declared-duration exemption.
 
-    A job may legitimately hold GPUs at zero utilisation through a long CPU
-    phase; only claims with no expiry at all are reclaimed on observed idleness.
+    The exemption was meant to protect a job sitting at zero GPU processes
+    through a long CPU phase, but a routine claim clears ``expires_at`` by
+    construction and so could never reach it: it covered every lease except the
+    ones that needed it. One criterion now covers both.
     """
 
     service.ingest_observation(observation(count=1))
@@ -2622,7 +2652,158 @@ def test_idle_reclaim_leaves_a_lease_that_declared_its_own_duration(service, adm
     service.ingest_observation(observation(count=1))
 
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] == "EXPIRED_EMPTY"
+
+
+def test_idle_reclaim_keeps_a_claim_whose_holder_still_checks_in(service, admin) -> None:
+    """A staged job between two batches must not be settled as abandoned.
+
+    Every card of a claim runs nothing for the minutes between two shards. The
+    holder asking about its own hold is what separates that from a claim nobody
+    is coming back to.
+    """
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("staged"), idempotency_key="staged")
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    service.ingest_observation(observation(count=1))
+    _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
+
+    # This is all the heartbeat is: the holder asking about its own hold.
+    assert service.record_lease_heartbeat(admin, lease_id)["recorded"] is True
+    service.ingest_observation(observation(count=1))
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] != "EXPIRED_EMPTY"
+    idle_alerts = [
+        item
+        for item in service.snapshot(admin)["data"]["alerts"]
+        if item["type"] == "idle_lease" and item["active"]
+    ]
+    assert len(idle_alerts) == 1, "a human still has to be able to see the idle claim"
+
+
+def test_a_live_holder_keeps_its_spare_cards_when_the_streaks_disagree(service, admin) -> None:
+    """The gate is the holder, not "every card matured in the same pass".
+
+    A staged job that used four of its eight cards in phase one, or a claim one
+    of whose cards blipped out of a collection, reaches the reclaim window on
+    some cards and not others. Nothing is running anywhere -- that is the shape
+    the whole liveness primitive exists for -- so a gate that only fired when
+    all cards matured together would hand this claim's cards to keepalive while
+    it is still checking in.
+    """
+
+    service.ingest_observation(observation(count=2))
+    allocated = service.create_request(
+        admin, request_data("desynced", count=2), idempotency_key="desynced"
+    )
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    service.ingest_observation(observation(count=2))
+    # Only the first card's streak is old enough to be reclaimed; no card runs
+    # anything, and the holder is asking about its own hold right now.
+    _backdate_idle_since(
+        service,
+        lease_id,
+        service.inventory.idle_lease_reclaim_seconds + 5,
+        gpu_ids={"endpoint-a:GPU-endpoint-a-0"},
+    )
+    assert service.record_lease_heartbeat(admin, lease_id)["recorded"] is True
+    service.ingest_observation(observation(count=2))
+
+    def active_gpu_ids(session):  # type: ignore[no-untyped-def]
+        return {
+            resource.gpu_id
+            for resource in session.scalars(
+                select(LeaseResource).where(
+                    LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+                )
+            ).all()
+        }
+
+    assert service._read(active_gpu_ids) == {
+        "endpoint-a:GPU-endpoint-a-0",
+        "endpoint-a:GPU-endpoint-a-1",
+    }
+
+
+def test_one_absent_sample_does_not_make_a_running_claim_reclaimable(service, admin) -> None:
+    """The p8908 shape: a blip used to mark the process row inactive at once.
+
+    A complete observation that did not contain a process flipped its row to
+    inactive with no repeat requirement, so the card read empty from that
+    instant. The row's last sighting is still moments old, and that is what
+    says the holder is there.
+    """
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("blip"), idempotency_key="blip")
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0")])
+    )
+    # The holder has not called in for longer than the reclaim window, and the
+    # streak is aged past it too; only the process sighting is fresh.
+    _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
+    service.ingest_observation(observation(count=1))
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] != "EXPIRED_EMPTY"
+
+
+def test_a_status_read_of_a_lease_that_is_gone_answers_without_recording(service, admin) -> None:
+    """A heartbeat rides on a status read, so it answers instead of failing."""
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("beat"), idempotency_key="beat")
+    lease_id = allocated["lease"]["id"]
+
+    before = _lease_heartbeat_at(service, lease_id)
+    recorded = service.record_lease_heartbeat(admin, lease_id)
+    assert recorded["recorded"] is True
+    assert _lease_heartbeat_at(service, lease_id) >= before
+
+    assert service.record_lease_heartbeat(admin, "lease-that-never-existed") == {
+        "lease_id": "lease-that-never-existed",
+        "recorded": False,
+    }
+
+    service.release_lease(admin, lease_id, reason="done", idempotency_key="beat-release")
+    assert service.record_lease_heartbeat(admin, lease_id) == {
+        "lease_id": lease_id,
+        "recorded": False,
+    }
+
+
+def test_legacy_conflict_repair_does_not_forge_a_holder_heartbeat(service, admin) -> None:
+    """Normalising a stored state observed nothing about who holds the cards.
+
+    The repair runs on every reconcile, so writing a heartbeat there would have
+    kept a lease looking alive forever without anybody being there.
+    """
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("legacy"), idempotency_key="legacy")
+    lease_id = allocated["lease"]["id"]
+
+    def seed_conflict(session) -> None:  # type: ignore[no-untyped-def]
+        lease = session.get(Lease, lease_id)
+        assert lease is not None
+        lease.state = "CONFLICT"
+        lease.last_heartbeat_at = utcnow() - timedelta(hours=6)
+
+    service._write(seed_conflict)
+    stored = _lease_heartbeat_at(service, lease_id)
+
+    service.reconcile(admin)
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] == "ACTIVE"
+    assert _lease_heartbeat_at(service, lease_id) == stored
 
 
 def test_idle_reclaim_returns_only_the_unused_gpus_of_a_working_claim(service, admin) -> None:
@@ -2873,9 +3054,7 @@ def _present_uuid_owners(service, gpu_uuid: str) -> set[str]:  # noqa: ANN001
         return {
             gpu.endpoint_id
             for gpu in session.scalars(
-                select(GPUDevice).where(
-                    GPUDevice.gpu_uuid == gpu_uuid, GPUDevice.present.is_(True)
-                )
+                select(GPUDevice).where(GPUDevice.gpu_uuid == gpu_uuid, GPUDevice.present.is_(True))
             ).all()
         }
 
@@ -3125,3 +3304,295 @@ def test_deleting_an_unreachable_server_settles_the_leases_it_still_holds(servic
         assert settled is not None
         assert settled.state == "RELEASED"
         assert settled.release_reason == "server deleted while unreachable"
+
+
+def test_one_absent_complete_observation_does_not_retire_a_process(service, admin) -> None:
+    """A single listing without a process is one absent sample, not an ending.
+
+    The compute-app probe is separate from the GPU query and reports an empty
+    list both when nothing runs and when it cannot see its own PID namespace,
+    which is what a containerised host does. Retiring on that one reading is
+    how a card running an eight-card job read as empty.
+    """
+
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0", pid=4321)])
+    )
+    service.ingest_observation(observation(count=1, processes=[]))
+
+    gpu = service.list_gpus(admin)["data"][0]
+    assert gpu["state"] == "BUSY_UNMANAGED"
+    assert [item["pid"] for item in gpu["processes"]] == [4321]
+
+    def read(session):  # type: ignore[no-untyped-def]
+        return session.scalars(select(ProcessObservation)).all()[0].active
+
+    assert service._read(read) is True
+
+
+def test_process_is_retired_once_the_absence_grace_elapses(service, admin) -> None:
+    """The criterion is age, so a process that really ended does go away."""
+
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0", pid=4321)])
+    )
+    age_out_processes(service)
+    service.ingest_observation(observation(count=1, processes=[]))
+
+    gpu = service.list_gpus(admin)["data"][0]
+    assert gpu["state"] == "AVAILABLE"
+    assert gpu["processes"] == []
+
+    assert service._read(lambda s: s.scalars(select(ProcessObservation)).all()[0].active) is False
+
+
+def test_a_collection_outage_restarts_the_absence_instead_of_counting_toward_it(
+    service, admin
+) -> None:
+    """The absence window is an evidence chain, not a wall clock.
+
+    p8908 flapped three times in 45 minutes while a real job ran on its cards.
+    A window measured on wall time would have run out during an outage and
+    retired a running process; the clock has to be cleared by the very failure
+    that stopped producing evidence.
+    """
+
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0", pid=4321)])
+    )
+    # One complete observation leaves it out, so the absence starts.
+    service.ingest_observation(observation(count=1, processes=[]))
+    absence = service._read(lambda s: s.scalars(select(ProcessObservation)).all()[0].absent_since)
+    assert absence is not None
+
+    service.record_provider_failure("endpoint-a", "ssh: connect: connection refused")
+    assert (
+        service._read(lambda s: s.scalars(select(ProcessObservation)).all()[0].absent_since) is None
+    )
+
+    # Even after the window's worth of wall time, the chain restarted: the
+    # first complete observation after the outage only begins the absence.
+    age_out_processes(service)
+    service.record_provider_failure("endpoint-a", "ssh: connect: connection refused")
+    service.ingest_observation(observation(count=1, processes=[]))
+    process = service._read(lambda s: s.scalars(select(ProcessObservation)).all()[0])
+    assert process.active is True
+    assert service.list_gpus(admin)["data"][0]["state"] == "BUSY_UNMANAGED"
+
+
+def test_a_card_its_owner_released_comes_back_once_the_absence_closes(service, admin) -> None:
+    """Release then re-apply is the primary agent path, so it must converge.
+
+    The card is not free the instant the lease ends -- a retained process still
+    blocks it, on purpose -- but once the endpoint's own observations have left
+    the work out for the window, the same cards are claimable again.
+    """
+
+    service.ingest_observation(observation(count=2))
+    claimed = service.create_request(
+        admin,
+        request_data("release-then-reapply", count=2),
+        idempotency_key="release-then-reapply-claim",
+        activate_if_allocated=True,
+    )
+    lease_id = claimed["lease"]["id"]
+    service.ingest_observation(
+        observation(
+            count=2,
+            processes=[
+                process_for_gpu("GPU-endpoint-a-0", pid=4321),
+                process_for_gpu("GPU-endpoint-a-1", pid=4322),
+            ],
+        )
+    )
+    service.release_lease(
+        admin, lease_id, reason="stage finished", idempotency_key="release-then-reapply-release"
+    )
+
+    # The job really ended; the endpoint keeps saying so for the whole window.
+    age_out_processes(service)
+    service.ingest_observation(observation(count=2, processes=[]))
+
+    assert [gpu["state"] for gpu in service.list_gpus(admin)["data"]] == [
+        "AVAILABLE",
+        "AVAILABLE",
+    ]
+    again = service.create_request(
+        admin,
+        request_data("release-then-reapply-2", count=2),
+        idempotency_key="release-then-reapply-claim-2",
+        activate_if_allocated=True,
+    )
+    assert again["lease"] is not None
+    assert len(again["lease"]["gpu_ids"]) == 2
+
+
+def test_host_pid_identity_survives_a_collection_gap(service, admin) -> None:
+    """A host PID's identity is only reusable while its row is still active.
+
+    On a containerised host the collector cannot read a username or a start
+    time, so the row itself is the identity. Losing it across one gap made the
+    same running process come back as a new, unattributable one.
+    """
+
+    host_pid = ProcessInput(
+        gpu_uuid="GPU-endpoint-a-0",
+        pid=804753,
+        used_memory_mib=8192,
+        executable="[Not Found]",
+        username=None,
+        process_started_at=utcnow(),
+    )
+    service.ingest_observation(observation(count=1, processes=[host_pid]))
+    service.ingest_observation(observation(count=1, observation_complete=False))
+    later = host_pid.model_copy(update={"process_started_at": utcnow() + timedelta(seconds=20)})
+    service.ingest_observation(observation(count=1, processes=[later]))
+
+    def read(session):  # type: ignore[no-untyped-def]
+        return session.scalars(select(ProcessObservation)).all()
+
+    rows = service._read(read)
+    assert len(rows) == 1, "the same running process must not come back as a second identity"
+    # Two sightings, not three: the incomplete collection in the middle
+    # observed nothing at all, and it did not cost the row its identity either.
+    assert rows[0].observations == 2
+    assert rows[0].pid == 804753
+
+
+def test_idle_since_is_not_stamped_across_a_collection_flap(service, admin) -> None:
+    """A telemetry failure and recovery is not an observation of idleness."""
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("flap"), idempotency_key="flap")
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0")])
+    )
+
+    service.ingest_observation(observation(count=1, observation_complete=False))
+    service.ingest_observation(observation(count=1, processes=[]))
+
+    def read(session):  # type: ignore[no-untyped-def]
+        return [
+            resource.idle_since
+            for resource in session.scalars(
+                select(LeaseResource).where(LeaseResource.lease_id == lease_id)
+            ).all()
+        ]
+
+    assert service._read(read) == [None]
+
+
+def test_manual_release_refuses_a_workload_lease_whose_holder_was_just_alive(
+    service, admin
+) -> None:
+    """This is the click that cleared a working eight-card claim.
+
+    Every card of a staged job runs nothing between two batches of shards, and
+    that gap satisfied the old criterion on its own.
+    """
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin, request_data("staged-manual"), idempotency_key="staged-manual-claim"
+    )
+    lease_id = claimed["lease"]["id"]
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0")])
+    )
+
+    age_out_processes(service)
+    barrier = utcnow()
+    service.ingest_observation(observation(count=1, processes=[]))
+    with pytest.raises(BrokerError) as refused:
+        service.release_empty_conflicted_lease(
+            admin,
+            "endpoint-a",
+            lease_id,
+            observation_not_before=barrier,
+            idempotency_key="staged-manual-release",
+        )
+
+    assert refused.value.code == "lease_holder_recently_alive"
+    assert refused.value.status_code == 409
+    assert refused.value.details["required_seconds"] == service.inventory.idle_lease_alert_seconds
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] in {"HELD", "ACTIVE"}
+    assert lease["gpu_ids"] == claimed["lease"]["gpu_ids"]
+
+
+def test_manual_release_accepts_the_same_lease_once_the_holder_has_gone_quiet(
+    service, admin
+) -> None:
+    """The refusal is a window, not a permanent block on the recovery path."""
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin, request_data("quiet-manual"), idempotency_key="quiet-manual-claim"
+    )
+    lease_id = claimed["lease"]["id"]
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0")])
+    )
+
+    age_out_processes(service)
+    barrier = utcnow()
+    service.ingest_observation(observation(count=1, processes=[]))
+    age_out_lease_holder(service, lease_id)
+    released = service.release_empty_conflicted_lease(
+        admin,
+        "endpoint-a",
+        lease_id,
+        observation_not_before=barrier,
+        idempotency_key="quiet-manual-release",
+    )
+
+    assert released["released"] is True
+    assert released["lease"]["state"] == "RELEASED"
+
+
+def test_snapshot_publishes_the_same_manual_release_answer_the_release_would_give(
+    service, admin
+) -> None:
+    """A greyed out button and a 409 have to say the same word."""
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin, request_data("published"), idempotency_key="published-claim"
+    )
+    lease_id = claimed["lease"]["id"]
+    service.ingest_observation(
+        observation(count=1, processes=[process_for_gpu("GPU-endpoint-a-0")])
+    )
+
+    def verdict() -> dict:  # type: ignore[type-arg]
+        payload = next(
+            item for item in service.snapshot(admin)["data"]["leases"] if item["id"] == lease_id
+        )
+        return payload["manual_release"]
+
+    assert verdict()["blocked_reason"] == "conflict_process_present"
+
+    age_out_processes(service)
+    barrier = utcnow()
+    service.ingest_observation(observation(count=1, processes=[]))
+    assert verdict()["allowed"] is False
+    assert verdict()["blocked_reason"] == "lease_holder_recently_alive"
+    with pytest.raises(BrokerError) as refused:
+        service.release_empty_conflicted_lease(
+            admin,
+            "endpoint-a",
+            lease_id,
+            observation_not_before=barrier,
+            idempotency_key="published-refused",
+        )
+    assert refused.value.code == verdict()["blocked_reason"]
+
+    age_out_lease_holder(service, lease_id)
+    assert verdict() == {
+        "allowed": True,
+        "blocked_reason": None,
+        "message": None,
+        "details": {},
+    }

@@ -120,5 +120,13 @@ legacy_dist_entries=("${project_root}/dist"/ServerPilot*.app(N))
 for legacy_entry in "${legacy_dist_entries[@]}"; do
   remove_legacy_app "${legacy_entry}"
 done
+# A numbered copy beside the canonical bundle is the one duplicate the rule
+# names and the one .gitignore hides, so `git status` never shows it. Sweep it
+# here, where the rule is enforced rather than remembered.
+numbered_root_entries=("${project_root}"/ServerPilot*.app(N))
+for legacy_entry in "${numbered_root_entries[@]}"; do
+  [[ "${legacy_entry}" == "${final_app_bundle}" ]] && continue
+  remove_legacy_app "${legacy_entry}"
+done
 
 echo "Built ${final_app_bundle}"
