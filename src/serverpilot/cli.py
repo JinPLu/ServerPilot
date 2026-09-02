@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import difflib
 import json
 import os
 import secrets
@@ -17,6 +18,13 @@ import uvicorn
 import yaml
 
 from serverpilot import __version__
+from serverpilot.agent_contract import (
+    generated_agent_files,
+    install_policy,
+    policy_destination,
+    render_agent_policy,
+    render_policy_block,
+)
 from serverpilot.api import create_app
 from serverpilot.client import BrokerClient, BrokerClientError
 from serverpilot.collector import SSHCollector
@@ -793,6 +801,76 @@ def mcp_install(
         typer.echo((result.stderr or result.stdout).strip(), err=True)
         raise typer.Exit(code=1)
     typer.echo(f"registered {MCP_SERVER_NAME} with {client}")
+
+
+@mcp_app.command("policy")
+def mcp_policy(
+    print_only: Annotated[
+        bool, typer.Option("--print", help="Print the rules block for each selected client.")
+    ] = False,
+    install: Annotated[
+        bool, typer.Option("--install", help="Write the block into a client's global rule file.")
+    ] = False,
+    check: Annotated[
+        bool,
+        typer.Option("--check", help="Diff this checkout's generated rule files against the contract."),
+    ] = False,
+    client: Annotated[
+        str, typer.Option("--client", help=f"One of {', '.join(MCP_CLIENTS)}, or all.")
+    ] = "all",
+) -> None:
+    """Render, install or verify the agent rules that src/serverpilot/agent_contract.py owns."""
+
+    if sum((print_only, install, check)) != 1:
+        typer.echo("give exactly one of --print, --install, --check", err=True)
+        raise typer.Exit(code=2)
+    if check:
+        stale = 0
+        for path, expected in generated_agent_files().items():
+            if not path.is_file():
+                typer.echo(f"missing: {path}", err=True)
+                stale += 1
+                continue
+            found = path.read_text(encoding="utf-8")
+            if found == expected:
+                continue
+            stale += 1
+            typer.echo(
+                "".join(
+                    difflib.unified_diff(
+                        found.splitlines(keepends=True),
+                        expected.splitlines(keepends=True),
+                        fromfile=f"{path} (on disk)",
+                        tofile=f"{path} (contract)",
+                    )
+                ),
+                err=True,
+            )
+        if stale:
+            raise typer.Exit(code=1)
+        typer.echo("generated agent rules match the contract")
+        return
+
+    clients = MCP_CLIENTS if client == "all" else (client,)
+    if any(item not in MCP_CLIENTS for item in clients):
+        typer.echo(f"--client must be one of {', '.join(MCP_CLIENTS)}, or all", err=True)
+        raise typer.Exit(code=1)
+    policy = render_agent_policy()
+    for item in clients:
+        if print_only:
+            if client == "all":
+                typer.echo(f"[{item}] rules block")
+            typer.echo(render_policy_block(policy), nl=False)
+            continue
+        if policy_destination(item) is None:
+            typer.echo(f"[{item}] keeps its rules in its own settings UI; paste --print output there")
+            continue
+        try:
+            written = install_policy(item, policy)
+        except ValueError as error:
+            typer.echo(f"[{item}] {error}", err=True)
+            raise typer.Exit(code=1) from error
+        typer.echo(f"[{item}] installed: {written}")
 
 
 @plugin_app.command("list")

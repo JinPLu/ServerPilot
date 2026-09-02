@@ -33,7 +33,7 @@ Cursor：对该 server Disable → Enable，或重载窗口。其它客户端同
 ## 3. 重装 Agent 全局规则
 
 ```bash
-python3 scripts/install_agent_policy.py all --install
+serverpilot mcp policy --install
 ```
 
 Cursor 不能写盘：只能 `--print`，再手工粘贴到 User Rules。Codex / Claude Code 的 `--install` 会更新它们的全局 Markdown。
@@ -72,7 +72,7 @@ ssh user@host 'cd -- <workspace_path> && ./serverpilot-keepalive --protocol-info
 
 ## 6. 本机插件升到 v3
 
-当前发现契约是 `schema_version: 3`，且 `info` 必须声明合法 `limits`。详见 [PLUGINS_zh.md](PLUGINS_zh.md)。
+当前发现契约是 `schema_version: 3`，且 `info` 必须声明合法 `limits`。详见 [OBSERVATION_zh.md](OBSERVATION_zh.md)。
 
 ```bash
 serverpilot plugin list

@@ -15,6 +15,8 @@ from sqlalchemy import Engine, create_engine, event, text
 from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
+from serverpilot import retention
+
 
 class Database:
     def __init__(self, url: str, project_root: Path) -> None:
@@ -24,8 +26,10 @@ class Database:
         if parsed.get_backend_name() != "sqlite":
             raise ValueError("pilot only supports SQLite; migrate to PostgreSQL before multi-writer deployment")
         database = parsed.database
+        self.path: Path | None = None
         if database and database != ":memory:":
-            Path(database).expanduser().resolve().parent.mkdir(parents=True, exist_ok=True)
+            self.path = Path(database).expanduser().resolve()
+            self.path.parent.mkdir(parents=True, exist_ok=True)
         self.engine: Engine = create_engine(
             url,
             connect_args={"check_same_thread": False, "timeout": 30},
@@ -60,6 +64,33 @@ class Database:
         )
         config.set_main_option("sqlalchemy.url", self.url)
         command.upgrade(config, "head")
+
+    def reclaim_space(self) -> None:
+        """Return freed pages and the write-ahead log to the filesystem.
+
+        Deleting rows only marks their pages free, and in WAL mode the log keeps
+        growing until something checkpoints it, so a database that prunes every
+        hour can still take more disk every day. The checkpoint is cheap and
+        runs every time; the rewrite is expensive and runs only when enough of
+        the file is actually free to be worth it, which in a steady state is
+        never.
+        """
+
+        # Both statements have to run outside a transaction, so the connection
+        # is put in autocommit for the duration rather than wrapped in one.
+        with self.engine.connect().execution_options(
+            isolation_level="AUTOCOMMIT"
+        ) as connection:
+            connection.exec_driver_sql("PRAGMA wal_checkpoint(TRUNCATE)")
+            page_size = connection.exec_driver_sql("PRAGMA page_size").scalar() or 0
+            page_count = connection.exec_driver_sql("PRAGMA page_count").scalar() or 0
+            free_pages = connection.exec_driver_sql("PRAGMA freelist_count").scalar() or 0
+            free_bytes = free_pages * page_size
+            worth_rewriting = free_bytes >= retention.VACUUM_FREE_BYTES or (
+                page_count > 0 and free_pages / page_count >= retention.VACUUM_FREE_FRACTION
+            )
+            if worth_rewriting:
+                connection.exec_driver_sql("VACUUM")
 
     def session(self) -> Session:
         return self.Session()

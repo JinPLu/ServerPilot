@@ -7,6 +7,7 @@ app_bundle="${1:-${project_root}/ServerPilot.app}"
 frontend="${app_bundle}/Contents/MacOS/ServerPilot"
 inventory="${app_bundle}/Contents/Resources/configs/inventory.yaml"
 runtime_root="${app_bundle}/Contents/Resources/ServerPilotRuntime"
+info_plist="${app_bundle}/Contents/Info.plist"
 
 if [[ ! -e "${frontend}" ]]; then
   print -u2 "Missing standalone app resource: ${frontend}"
@@ -22,6 +23,12 @@ if [[ ! -x "${frontend}" ]]; then
 fi
 if [[ -e "${runtime_root}" ]]; then
   print -u2 "App must not bundle ServerPilotRuntime; the installed CLI is the only backend"
+  exit 1
+fi
+
+bundle_version="$(plutil -extract CFBundleShortVersionString raw "${info_plist}")"
+if ! python3 "${project_root}/scripts/release_metadata.py" check-tag "v${bundle_version}"; then
+  print -u2 "Bundled CFBundleShortVersionString ${bundle_version} does not match __version__"
   exit 1
 fi
 

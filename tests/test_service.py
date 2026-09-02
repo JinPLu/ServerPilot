@@ -1327,6 +1327,65 @@ def test_initialize_resolves_stale_alerts_for_terminal_lease(service, admin) -> 
     )
 
 
+def test_a_collector_round_resolves_alerts_for_a_lease_without_active_resources(
+    service, admin
+) -> None:
+    """An alert about a claim that no longer holds anything is noise.
+
+    The claim is still live, so nothing terminal closes its alerts; only the
+    repair that runs on every collector round can, and it is reached through
+    ingestion rather than any operator verb.
+    """
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(
+        admin,
+        request_data("resource-alert-repair"),
+        idempotency_key="resource-alert-repair-claim",
+        activate_if_allocated=True,
+    )
+    lease_id = claimed["lease"]["id"]
+
+    def orphan_alerts_from_resources(session) -> None:  # type: ignore[no-untyped-def]
+        now = utcnow()
+        resources = session.scalars(
+            select(LeaseResource).where(LeaseResource.lease_id == lease_id)
+        ).all()
+        assert resources
+        for resource in resources:
+            resource.active = False
+            resource.released_at = now
+        for alert_type in ("lease_process_conflict", "orphaned_busy"):
+            session.add(
+                Alert(
+                    id=f"reconcile-{alert_type}",
+                    alert_type=alert_type,
+                    severity="critical",
+                    resource_type="lease",
+                    resource_id=lease_id,
+                    message="stale test alert",
+                    active=True,
+                    first_seen_at=now,
+                    last_seen_at=now,
+                    acknowledged_at=None,
+                    acknowledged_by=None,
+                )
+            )
+
+    service._write(orphan_alerts_from_resources)
+    assert {
+        alert["type"]
+        for alert in service.snapshot(admin)["data"]["alerts"]
+        if alert["resource_id"] == lease_id
+    } == {"lease_process_conflict", "orphaned_busy"}
+
+    service.ingest_observation(observation(count=1))
+
+    assert not any(
+        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
+    )
+
+
 def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
@@ -2402,6 +2461,41 @@ def test_gpu_public_status_separates_an_idle_claim_from_a_running_task() -> None
     assert project("CONFLICT", lease={"id": "lease-a"}) == "归属冲突"
 
 
+def test_stale_telemetry_resets_the_idle_clock_instead_of_reclaiming(service, admin) -> None:
+    """A collector outage is not evidence of an idle workload.
+
+    Without this reset a long outage would accumulate into a reclaim and take
+    GPUs away from a job the broker simply could not see. The outage is one
+    endpoint going quiet while collection elsewhere keeps running, which is
+    what makes the reconciliation on another endpoint's round the live path.
+    """
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("unseen"), idempotency_key="unseen")
+    lease_id = allocated["lease"]["id"]
+    _make_persistent(service, lease_id)
+    service.ingest_observation(observation(count=1))
+    assert _lease_idle_since(service, lease_id) is not None
+    _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
+
+    stale_cutoff = utcnow() - timedelta(
+        seconds=service.inventory.collector.stale_after_seconds * 10
+    )
+
+    def age_telemetry(session):  # type: ignore[no-untyped-def]
+        for row in session.scalars(select(TelemetryCurrent)).all():
+            row.observed_at = stale_cutoff
+
+    service._write(age_telemetry)
+    # endpoint-a has gone quiet; the round that still reports is endpoint-b's,
+    # and it reconciles every lease including this one.
+    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] != "EXPIRED_EMPTY"
+    assert _lease_idle_since(service, lease_id) is None
+
+
 def test_a_declared_duration_no_longer_exempts_a_silent_claim(service, admin) -> None:
     """Being evidenced alive replaced the declared-duration exemption.
 
@@ -2546,6 +2640,33 @@ def test_a_status_read_of_a_lease_that_is_gone_answers_without_recording(service
         "lease_id": lease_id,
         "recorded": False,
     }
+
+
+def test_legacy_conflict_repair_does_not_forge_a_holder_heartbeat(service, admin) -> None:
+    """Normalising a stored state observed nothing about who holds the cards.
+
+    The repair runs on every collector round, so writing a heartbeat there
+    would have kept a lease looking alive forever without anybody being there.
+    """
+
+    service.ingest_observation(observation(count=1))
+    allocated = service.create_request(admin, request_data("legacy"), idempotency_key="legacy")
+    lease_id = allocated["lease"]["id"]
+
+    def seed_conflict(session) -> None:  # type: ignore[no-untyped-def]
+        lease = session.get(Lease, lease_id)
+        assert lease is not None
+        lease.state = "CONFLICT"
+        lease.last_heartbeat_at = utcnow() - timedelta(hours=6)
+
+    service._write(seed_conflict)
+    stored = _lease_heartbeat_at(service, lease_id)
+
+    service.ingest_observation(observation(count=1))
+
+    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
+    assert lease["state"] == "ACTIVE"
+    assert _lease_heartbeat_at(service, lease_id) == stored
 
 
 def test_idle_reclaim_returns_only_the_unused_gpus_of_a_working_claim(service, admin) -> None:

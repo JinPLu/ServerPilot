@@ -168,23 +168,24 @@ A `PATH` set up only for login shells is the usual reason this step looks fine
 when you SSH in by hand and then fails from the control plane.
 
 Then add the SSH connection and an absolute remote working directory in the app.
-A GPU becomes allocatable only after a fresh collection succeeds. The full
-protocol, including what the output must contain, is in the
-[collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md) (Chinese).
+A GPU becomes allocatable only after a fresh collection succeeds. Bare metal
+uses the built-in `linux` observation profile, a fixed read-only SSH probe;
+nothing needs to be installed on the remote host. The full contract is in
+[observation and keepalive](https://github.com/JinPLu/ServerPilot/blob/master/docs/OBSERVATION_zh.md) (Chinese).
 
 Do not register a shared cluster (Slurm, LSF, PBS) as bare metal. A local
 plugin takes over observation so only your own jobs are registered, and
 requests go through that plugin's `apply` / `release`. The bundled
 `slurm-immediate` plugin is the reference; there is no separate scheduler
 submission surface. See
-[server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md)
+[observation and keepalive](https://github.com/JinPLu/ServerPilot/blob/master/docs/OBSERVATION_zh.md)
 for the contract.
 
 ### 3. 🤖 Connect an agent
 
 ```bash
 serverpilot mcp install --client codex     # or claude, cursor
-python3 scripts/install_agent_policy.py codex --install
+serverpilot mcp policy --install --client codex
 ```
 
 `serverpilot mcp install` only writes the launch command: Codex and Claude
@@ -279,15 +280,16 @@ new selector.
   host holding about 80% of that card's VRAM, and `gpu_apply` stops it before
   handing the card over. A plugin that declares `apply` / `release` performs the
   matching cluster allocation on request and release.
-- Server state comes from fixed collection: a built-in SSH probe, or a local
-  plugin's `observe`. The plugin calling contract is four fixed verbs — `info`,
+- Server state comes from fixed collection: the built-in `linux` SSH probe (a
+  fixed read-only query, nothing installed on the remote), or a local plugin's
+  `observe`. The plugin calling contract is four fixed verbs — `info`,
   `observe`, `apply`, `release`. No arbitrary remote command is accepted, and no
-  password or private key is provided. See [PLUGINS_zh.md](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md).
+  password or private key is provided. See [OBSERVATION_zh.md](https://github.com/JinPLu/ServerPilot/blob/master/docs/OBSERVATION_zh.md).
 - Stale collection, connection errors, unknown processes, and resource conflicts
-  all refuse allocation locally. That holds for what collection **reports**: the
-  SSH user and the remote `serverpilot-collect` entry point are trusted. A
-  replaced or malicious collector that omits compute processes will make a card
-  look allocatable.
+  all refuse allocation locally. That holds for what collection **reports**:
+  the SSH user is trusted, and for a delegated cluster the plugin executable is
+  trusted. A replaced or malicious plugin that omits compute processes will
+  make a card look allocatable.
 - The control plane listens on loopback by default. **There is no
   authentication.** `X-ServerPilot-Actor` is an audit label; any local process
   can send it, take the `allocator` role, create endpoints, change keepalive
@@ -306,9 +308,7 @@ In English:
 In Chinese:
 
 - [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md)
-- [Collector protocol](https://github.com/JinPLu/ServerPilot/blob/master/docs/COLLECTOR_SCRIPT_zh.md)
-- [Server plugins](https://github.com/JinPLu/ServerPilot/blob/master/docs/PLUGINS_zh.md)
-- [Keepalive and adapters](https://github.com/JinPLu/ServerPilot/blob/master/docs/ADAPTERS_zh.md)
+- [Observation and keepalive](https://github.com/JinPLu/ServerPilot/blob/master/docs/OBSERVATION_zh.md)
 - [Upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
 - [Implementation and verification status](https://github.com/JinPLu/ServerPilot/blob/master/docs/IMPLEMENTATION_STATUS_zh.md)
 

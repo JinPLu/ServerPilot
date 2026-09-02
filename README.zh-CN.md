@@ -110,21 +110,15 @@ serverpilot daemon status
 
 ### 2. 🖥️ 登记你的 GPU 服务器
 
-在有管理权限的服务器上部署同版本采集入口，并确保非交互 SSH 能执行它：
+普通服务器 / 自建节点用内置的 `linux` 观测 profile：远端不需要安装任何东西，直接在 App 里登记 SSH 连接和一个绝对远端工作目录即可。最新一次采集成功后，GPU 才进入可申请状态。详细契约见[观测与占卡](docs/OBSERVATION_zh.md)。
 
-```text
-serverpilot-collect --schema-version 2
-```
-
-在 App 里登记 SSH 连接和一个绝对远端工作目录。最新一次采集成功后，GPU 才进入可申请状态。详细要求见[服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)。
-
-共享集群（Slurm / LSF / PBS）不要按裸机接入：用本机插件接管观测，只登记当前用户自己的作业，申请走该插件的 `apply` / `release`。随包参考插件是 `slurm-immediate`，没有另一套调度器提交面。接入方式见[服务器插件](docs/PLUGINS_zh.md)。
+共享集群（Slurm / LSF / PBS）不要按裸机接入：用本机插件接管观测，只登记当前用户自己的作业，申请走该插件的 `apply` / `release`。随包参考插件是 `slurm-immediate`，没有另一套调度器提交面。接入方式见[观测与占卡](docs/OBSERVATION_zh.md)。
 
 ### 3. 🤖 接入 Agent
 
 ```bash
 serverpilot mcp install --client codex     # 或 claude、cursor
-python3 scripts/install_agent_policy.py codex --install
+serverpilot mcp policy --install --client codex
 ```
 
 `serverpilot mcp install` 只写启动命令：Codex 与 Claude Code 调用它们的 `mcp add`，Cursor 合并进 `~/.cursor/mcp.json`，不会覆盖你已有的其他 server。它不刷新客户端已经缓存的工具列表；要重连该 server（Cursor：Disable → Enable，或重载窗口）才会重新 `tools/list`。
@@ -176,16 +170,14 @@ open "./ServerPilot.app"
 ## 🛡️ 边界与安全
 
 - ServerPilot 管理自己的占卡进程和插件侧分配，不启动、停止、迁移或抢占你的工作负载。占卡功能会在远端启停每卡一个 CUDA 占卡进程（约占该卡 80% 显存）；`gpu_apply` 交出该卡前会先停掉它。声明了 `apply` / `release` 的插件会在申请、归还时执行对应的分配操作。
-- 服务器状态来自固定采集：内置 SSH 探针，或本机插件的 `observe`。插件调用契约是四个固定动词 `info`、`observe`、`apply`、`release`。不接收任意远端命令，也不提供密码或私钥。插件契约见 [PLUGINS_zh.md](docs/PLUGINS_zh.md)。
-- 采集过期、连接异常、未知进程或资源冲突时，本机校验一律拒绝分配（fail closed）。这只对采集**报告的事实**成立：SSH 用户和远端 `serverpilot-collect` 入口属于受信前提。采集脚本若被替换或本身恶意，漏报了计算进程，该卡就会被判为可申请。
+- 服务器状态来自固定采集：内置 `linux` 探针（固定只读查询，远端不需要安装任何东西），或本机插件的 `observe`。插件调用契约是四个固定动词 `info`、`observe`、`apply`、`release`。不接收任意远端命令，也不提供密码或私钥。契约见 [观测与占卡](docs/OBSERVATION_zh.md)。
+- 采集过期、连接异常、未知进程或资源冲突时，本机校验一律拒绝分配（fail closed）。这只对采集**报告的事实**成立：SSH 用户属于受信前提，委托型集群还额外信任插件可执行文件。插件若被替换或本身恶意，漏报了计算进程，该卡就会被判为可申请。
 - 控制面默认只监听本机 loopback。没有认证：`X-ServerPilot-Actor` 只是审计标签，任意本机进程都可以带上这个头，以 `allocator` 角色创建 endpoint、改占卡策略、申请 GPU，甚至冒充其他 actor 释放其租约。同一用户账户下的本机进程互不隔离，都相当于操作者本人。GPU UUID 与 endpoint 是资源身份边界。
 
 ## 📚 文档
 
 - [Agent / MCP 指南](docs/AGENT_MCP_zh.md)
-- [服务器采集协议](docs/COLLECTOR_SCRIPT_zh.md)
-- [服务器插件](docs/PLUGINS_zh.md)
-- [keepalive 与 Adapter](docs/ADAPTERS_zh.md)
+- [观测与占卡](docs/OBSERVATION_zh.md)
 - [升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)
 - [当前实现与验证状态](docs/IMPLEMENTATION_STATUS_zh.md)
 - [安全说明](SECURITY.md) · [贡献指南](CONTRIBUTING.md)

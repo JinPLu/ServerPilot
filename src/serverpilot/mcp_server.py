@@ -19,6 +19,7 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from serverpilot import __version__
+from serverpilot.agent_contract import render_mcp_instructions
 from serverpilot.client import (
     CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     BrokerClient,
@@ -35,12 +36,11 @@ from serverpilot.daemon import ensure_broker_ready_for_mcp
 # A caller decides on "can I claim this" and, when it cannot, on two things at
 # once: who is holding the card (the lease task) and whether a compute process
 # is actually on it -- running and busy_unmanaged say there is, held_idle says
-# the card is only held. Both axes have to stay spelled out in
-# MCP_INSTRUCTIONS, or a caller reads a stalled hold as a running job and waits
-# for a card nobody is using. HELD and LEASED_IDLE collapse into held_idle, and
-# BUSY_UNMANAGED and ORPHANED_BUSY into busy_unmanaged, because each pair
-# leaves the caller the same move; splitting them back apart adds vocabulary,
-# not choices.
+# the card is only held. The contract names both axes; agent_contract's
+# BUSY_GPU_STATUSES is the list it has to keep spelling out. HELD and
+# LEASED_IDLE collapse into held_idle, and BUSY_UNMANAGED and ORPHANED_BUSY
+# into busy_unmanaged, because each pair leaves the caller the same move;
+# splitting them back apart adds vocabulary, not choices.
 ROUTINE_GPU_STATUS = {
     "CONFLICT": "ownership_conflict",
     "BUSY_UNMANAGED": "busy_unmanaged",
@@ -66,15 +66,7 @@ ROUTINE_GPU_COUNT_DESCRIPTION = (
     "`--nproc_per_node`, `num_processes`, `--gres`), never server/free capacity"
 )
 
-MCP_INSTRUCTIONS = """Five tools cover GPU work: gpu_status; gpu_apply picks the cards itself and keeps one lease on one server (task=what this lease is for, never the client UI title); gpu_release; gpu_add_server registers a host; gpu_update_server updates safe host metadata.
-Call gpu_status before allocating; capacity and busy_gpus change between calls. Assess group workspace/environment/data-weight notes, capacity and limits first; choose server_group_id for grouped hosts; the broker best-fits within that group. server_id is for ungrouped compatibility and must not pin a grouped host.
-Connection and working directory are projected once per server: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.
-cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.
-gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.
-Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now. Load on a free card is ServerPilot's own hold, stopped before allocation, not evidence it is taken.
-no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. Call gpu_release the moment a task ends or fails, and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. gpu_status(lease_id=...) is also your heartbeat: keep calling it through a task's quiet phases and the claim you ask about is never reclaimed as abandoned, though while any of its cards is computing the idle ones still come back one by one. Idle reclaim is a backstop, not how a card comes back.
-busy_gpus[]: task=who holds the card, status=whether it is working — running (a compute process under that lease), busy_unmanaged (a process ServerPilot does not own), held_idle (held, nothing computing: ask the holder or pick elsewhere), ownership_conflict (holder unverifiable). Only running and busy_unmanaged mean work is on the card.
-ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease."""
+MCP_INSTRUCTIONS = render_mcp_instructions()
 
 
 _http_client: httpx.AsyncClient | None = None

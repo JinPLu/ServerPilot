@@ -21,7 +21,7 @@ from pydantic import ValidationError
 from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
-from serverpilot import SCHEMA_VERSION, __version__
+from serverpilot import SCHEMA_VERSION, __version__, retention
 from serverpilot.config import (
     RESERVED_SYSTEM_ID,
     EndpointConfig,
@@ -79,7 +79,6 @@ TERMINAL_LEASE_STATES = {"RELEASED", "EXPIRED_EMPTY"}
 # it is gone, and nothing else was closing its warning.
 LEASE_SCOPED_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy", "idle_lease"}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
-TELEMETRY_HISTORY_RETENTION_SECONDS = 24 * 60 * 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
 # The collector derives a process start time from `ps etimes`, which has
 # one-second precision and is sampled after the endpoint observation begins.
@@ -4632,7 +4631,7 @@ class BrokerService:
     ) -> dict[str, Any]:
         """Return bounded host CPU/load/memory history for one endpoint detail view."""
 
-        if window_seconds not in {3600, 21_600, TELEMETRY_HISTORY_RETENTION_SECONDS}:
+        if window_seconds not in {3600, 21_600, retention.TELEMETRY_SECONDS}:
             raise BrokerError(
                 "invalid_history_window",
                 "endpoint history window must be one of 1h, 6h or 24h",
@@ -4819,25 +4818,68 @@ class BrokerService:
 
         return self._read(operation)
 
-    def prune_telemetry_history(
-        self, older_than_seconds: int = TELEMETRY_HISTORY_RETENTION_SECONDS
-    ) -> int:
-        """Internal hourly retention pass; current telemetry, leases and audit are untouched."""
+    def prune_expired(self) -> dict[str, int]:
+        """The hourly retention pass, over every table that accumulates.
 
-        cutoff = utcnow() - timedelta(seconds=older_than_seconds)
+        It used to cover the two telemetry histories and nothing else, so audit
+        events, replay keys, resolved alerts and process sightings grew for the
+        life of the installation. Current telemetry, live leases and anything a
+        live lease points at are never touched here.
+        """
 
-        def operation(session: Session) -> int:
-            gpu_result = session.execute(
-                delete(TelemetrySnapshot).where(TelemetrySnapshot.observed_at < cutoff)
+        now = utcnow()
+
+        def cutoff(seconds: int) -> datetime:
+            return now - timedelta(seconds=seconds)
+
+        def operation(session: Session) -> dict[str, int]:
+            deleted: dict[str, int] = {}
+
+            def run(name: str, statement: Any) -> None:
+                deleted[name] = max(0, session.execute(statement).rowcount or 0)
+
+            telemetry_cutoff = cutoff(retention.TELEMETRY_SECONDS)
+            run(
+                "telemetry_snapshots",
+                delete(TelemetrySnapshot).where(TelemetrySnapshot.observed_at < telemetry_cutoff),
             )
-            endpoint_result = session.execute(
+            run(
+                "endpoint_telemetry_snapshots",
                 delete(EndpointTelemetrySnapshot).where(
-                    EndpointTelemetrySnapshot.observed_at < cutoff
-                )
+                    EndpointTelemetrySnapshot.observed_at < telemetry_cutoff
+                ),
             )
-            return max(0, gpu_result.rowcount or 0) + max(0, endpoint_result.rowcount or 0)
+            run(
+                "idempotency_records",
+                delete(IdempotencyRecord).where(
+                    IdempotencyRecord.created_at < cutoff(retention.IDEMPOTENCY_SECONDS)
+                ),
+            )
+            run(
+                "audit_events",
+                delete(AuditEvent).where(AuditEvent.created_at < cutoff(retention.AUDIT_SECONDS)),
+            )
+            # Only alerts that have already been resolved. An active one
+            # describes a condition that has not ended, however old it is.
+            run(
+                "alerts",
+                delete(Alert).where(
+                    Alert.active.is_(False),
+                    Alert.last_seen_at < cutoff(retention.RESOLVED_ALERT_SECONDS),
+                ),
+            )
+            run(
+                "process_observations",
+                delete(ProcessObservation).where(
+                    ProcessObservation.last_seen_at
+                    < cutoff(retention.PROCESS_OBSERVATION_SECONDS)
+                ),
+            )
+            return deleted
 
-        return self._write(operation)
+        deleted = self._write(operation)
+        self.database.reclaim_space()
+        return deleted
 
     # ---- collector input and telemetry / process reconciliation ----------------
 

@@ -1150,7 +1150,7 @@ def create_app(
                     tasks.pop(endpoint_id).cancel()
                 if time.monotonic() >= collector_state["next_prune_at"]:
                     with contextlib.suppress(Exception):
-                        await service.in_domain(service.prune_telemetry_history)
+                        await service.in_domain(service.prune_expired)
                     collector_state["next_prune_at"] = time.monotonic() + 3600
                 await asyncio.sleep(COLLECTOR_SUPERVISOR_INTERVAL_SECONDS)
         finally:

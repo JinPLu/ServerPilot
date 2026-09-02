@@ -29,6 +29,19 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+def desktop_swift_source(project_root: Path) -> str:
+    """Every Swift file the app is built from, concatenated.
+
+    These checks are about what the app's code does, not about which file it
+    lives in. Naming one file made them break the moment the largest one was
+    split by screen, which is a refactor they have no stake in.
+    """
+
+    sources = sorted((project_root / "desktop").glob("*.swift"))
+    assert sources, "no desktop Swift sources found"
+    return "\n".join(path.read_text(encoding="utf-8") for path in sources)
+
+
 def _config(tmp_path: Path) -> DaemonConfig:
     executable = tmp_path / "bin" / "serverpilot"
     executable.parent.mkdir()
@@ -754,9 +767,7 @@ def test_mcp_ensures_daemon_before_constructing_rest_client(
 
 
 def test_macos_gui_no_longer_owns_or_terminates_server_process() -> None:
-    source = (
-        Path(__file__).resolve().parents[1] / "desktop" / "ServerPilot.swift"
-    ).read_text(encoding="utf-8")
+    source = desktop_swift_source(Path(__file__).resolve().parents[1])
 
     assert '"daemon", "ensure", "--source-root"' in source
     health_check = source.split("private func healthCheck", maxsplit=1)[1].split(
@@ -781,9 +792,7 @@ def test_macos_gui_no_longer_owns_or_terminates_server_process() -> None:
 
 
 def test_macos_gui_uses_installed_cli_not_bundled_runtime() -> None:
-    source = (
-        Path(__file__).resolve().parents[1] / "desktop" / "ServerPilot.swift"
-    ).read_text(encoding="utf-8")
+    source = desktop_swift_source(Path(__file__).resolve().parents[1])
     build_script = (
         Path(__file__).resolve().parents[1] / "desktop" / "build-macos-app.sh"
     ).read_text(encoding="utf-8")
@@ -808,9 +817,7 @@ def test_macos_gui_uses_installed_cli_not_bundled_runtime() -> None:
 
 def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    window_source = (project_root / "desktop" / "ServerPilot.swift").read_text(
-        encoding="utf-8"
-    )
+    window_source = desktop_swift_source(project_root)
     support_source = (project_root / "desktop" / "AppSupport.swift").read_text(
         encoding="utf-8"
     )
@@ -829,12 +836,12 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
         assert forbidden not in ambient_body
     assert "DesignTokens.ambientSmoke" in ambient_body
 
-    sidebar_body = window_source.split("private struct AppSidebar", maxsplit=1)[
+    sidebar_body = window_source.split("struct AppSidebar", maxsplit=1)[
         1
-    ].split("private struct SidebarSelection", maxsplit=1)[0]
-    toolbar_body = window_source.split("private struct AppToolbar", maxsplit=1)[
+    ].split("struct SidebarSelection", maxsplit=1)[0]
+    toolbar_body = window_source.split("struct AppToolbar", maxsplit=1)[
         1
-    ].split("private struct FreshnessBadge", maxsplit=1)[0]
+    ].split("struct FreshnessBadge", maxsplit=1)[0]
     assert ".regularMaterial" not in sidebar_body
     assert ".regularMaterial" not in toolbar_body
     assert ".background(DesignTokens.surface)" in sidebar_body
@@ -852,8 +859,8 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
         assert forbidden_accent not in support_source
 
     resources_body = window_source.split(
-        "private struct ResourcesDashboard", maxsplit=1
-    )[1].split("private struct ResourceInlineStat", maxsplit=1)[0]
+        "struct ResourcesDashboard", maxsplit=1
+    )[1].split("struct ResourceInlineStat", maxsplit=1)[0]
     assert ".regularMaterial" not in resources_body
     assert "background(DesignTokens.surface)" in resources_body
 
@@ -863,9 +870,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     split_source = (project_root / "desktop" / "ResizableSplitPane.swift").read_text(
         encoding="utf-8"
     )
-    dashboard_source = (project_root / "desktop" / "ServerPilot.swift").read_text(
-        encoding="utf-8"
-    )
+    dashboard_source = desktop_swift_source(project_root)
 
     assert "minimumMasterWidth: 400" in split_source
     assert "minimumDetailWidth: 560" in split_source
@@ -879,7 +884,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # variant, and the SSH lane keeps a floor no tier may cross.
     table_layout = dashboard_source.split(
         "private enum EndpointTableLayout", maxsplit=1
-    )[1].split("private struct EndpointTableDivider", maxsplit=1)[0]
+    )[1].split("struct EndpointTableDivider", maxsplit=1)[0]
     assert "static let sshLane: CGFloat = 304" in table_layout
     assert "static func tier(width: CGFloat) -> Tier" in table_layout
     for tier in ("case wide", "case medium", "case compact"):
@@ -898,8 +903,8 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # percentage and a bar.  A number without a bar cannot be compared down a
     # column, and four metrics drawn two ways read as two classes of fact.
     header_body = dashboard_source.split(
-        "private struct EndpointTableHeader", maxsplit=1
-    )[1].split("private struct TablePressureCell", maxsplit=1)[0]
+        "struct EndpointTableHeader", maxsplit=1
+    )[1].split("struct TablePressureCell", maxsplit=1)[0]
     for key in (
         ".id",
         ".assignment",
@@ -915,8 +920,8 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     assert 'accessibilityLabel("按\\(key.label)排序")' in header_body
 
     row_body = dashboard_source.split(
-        "private struct EndpointTableRow", maxsplit=1
-    )[1].split("private struct PressureMeter", maxsplit=1)[0]
+        "struct EndpointTableRow", maxsplit=1
+    )[1].split("struct PressureMeter", maxsplit=1)[0]
     for label in (
         'label: "GPU 利用率"',
         'label: "显存占用率"',
@@ -932,8 +937,8 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # are detail-sheet facts, not row facts.  They are asserted absent from the
     # row and present in the sheet so the split cannot drift back by accident.
     detail_body = dashboard_source.split(
-        "private struct ServerDetailSheet", maxsplit=1
-    )[1].split("private struct ServerGPUMemoryStatusGrid", maxsplit=1)[0]
+        "struct ServerDetailSheet", maxsplit=1
+    )[1].split("struct ServerGPUMemoryStatusGrid", maxsplit=1)[0]
     for fact in ("CPU 核数", "内存总量", "最高温度", "远端工作区"):
         assert fact in detail_body, fact
         assert fact not in row_body, fact
@@ -945,8 +950,8 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # Absolute VRAM is not lost by leaving the host card; it belongs to the card
     # of the GPU it describes, next to that GPU's ring and percentage.
     gpu_grid_body = dashboard_source.split(
-        "private struct ServerGPUMemoryStatusGrid", maxsplit=1
-    )[1].split("private struct GPUDetailSheet", maxsplit=1)[0]
+        "struct ServerGPUMemoryStatusGrid", maxsplit=1
+    )[1].split("struct GPUDetailSheet", maxsplit=1)[0]
     assert "memoryLabel" in gpu_grid_body
     assert "显存合计" not in dashboard_source
     # A 44 pt row prints no second line, so everything it drops stays reachable
@@ -960,9 +965,7 @@ def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry
     usage_source = (
         project_root / "desktop" / "ResourceUsageDashboard.swift"
     ).read_text(encoding="utf-8")
-    window_source = (project_root / "desktop" / "ServerPilot.swift").read_text(
-        encoding="utf-8"
-    )
+    window_source = desktop_swift_source(project_root)
 
     assert "ResourceUsageDashboard(store: store, claimGPU: claimGPU)" in window_source
     assert 'case "resource-usage", "leases": .leases' in window_source
@@ -998,9 +1001,7 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
     # The Chinese README carries the copy the Chinese UI is written against;
     # README.md is the English entry point for the repository.
     readme = (project_root / "README.zh-CN.md").read_text(encoding="utf-8")
-    window_source = (project_root / "desktop" / "ServerPilot.swift").read_text(
-        encoding="utf-8"
-    )
+    window_source = desktop_swift_source(project_root)
     usage_source = (
         project_root / "desktop" / "ResourceUsageDashboard.swift"
     ).read_text(encoding="utf-8")

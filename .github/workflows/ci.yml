@@ -45,6 +45,20 @@ jobs:
         working-directory: desktop/ServerPilotCore
         run: swift test
 
+  macos-app:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.12"
+      - name: Install the ServerPilot CLI the app bundle shells out to
+        run: uv tool install --force .
+      - name: Build the standalone app bundle
+        run: zsh desktop/build-macos-app.sh
+      - name: Verify the standalone app bundle
+        run: zsh desktop/verify-macos-app.sh
+
   package:
     runs-on: ubuntu-latest
     steps:

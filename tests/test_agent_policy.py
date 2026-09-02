@@ -1,57 +1,189 @@
 from __future__ import annotations
 
+import asyncio
 import os
 import stat
 from pathlib import Path
 
 import pytest
+from typer.testing import CliRunner
 
-from scripts.install_agent_policy import MARKERS, POLICY, install, main, merge, render
-from serverpilot.mcp_server import mcp
+from serverpilot.agent_contract import (
+    AGENT_TOOLS,
+    BUSY_GPU_STATUSES,
+    MCP_INSTRUCTION_BUDGET_CHARS,
+    POLICY_BLOCK_MARKERS,
+    generated_agent_files,
+    install_policy,
+    merge_policy_block,
+    render_agent_policy,
+    render_mcp_instructions,
+    render_policy_block,
+)
+from serverpilot.cli import app
+from serverpilot.mcp_entry import MCP_CLIENTS
+from serverpilot.mcp_server import MCP_INSTRUCTIONS, ROUTINE_GPU_STATUS, mcp
 
 ROOT = Path(__file__).resolve().parents[1]
-CLIENT_RULES = (
-    POLICY,
-    ROOT / "AGENTS.md",
-    ROOT / ".cursor" / "rules" / "serverpilot.mdc",
-)
 CLAUDE_RULE = ROOT / "CLAUDE.md"
+runner = CliRunner()
+
+# Vocabulary the agent surface used to carry and no longer does.  A retired
+# name in the contract sends a caller looking for a tool or a field that is
+# not there, which is worse than saying nothing.
+RETIRED_VOCABULARY = (
+    "gpu_claim",
+    "gpu_bind_observed_workload",
+    "gpu_renew_lease",
+    "gpu_set_keepalive",
+    "gpu_scheduler",
+    "gpu_coordination",
+    "coordination_uri",
+    "agent_url",
+    "codex_thread_id",
+    "idempotency_key",
+    "advanced",
+)
+# The rules an agent must not talk itself out of.  Everything else in the
+# contract tells a caller how to get work done; these four say which paths
+# around ServerPilot are closed, so they are checked by name.
+PROHIBITION_TOKENS = ("ssh", "sqlite", "inventory", "nvidia-smi")
 
 
-def _plain_policy_text(text: str) -> str:
-    return " ".join(text.replace("`", "").split())
+def _rendered_contract() -> tuple[str, str]:
+    return render_mcp_instructions(), render_agent_policy()
 
 
-def test_policy_render_is_marked_for_each_platform() -> None:
-    for platform in ("codex", "claude", "cursor"):
-        start, end = MARKERS[platform]
-        output = render(platform, "# shared policy")
-        assert output.startswith(start)
-        assert output.endswith(f"{end}\n")
-        assert "# shared policy" in output
+def _tool_schemas() -> dict[str, dict]:
+    return {tool.name: tool.inputSchema for tool in asyncio.run(mcp.list_tools())}
 
 
-def test_policy_merge_replaces_only_its_owned_block() -> None:
+def test_generated_files_are_exactly_what_the_contract_renders() -> None:
+    for path, expected in generated_agent_files(ROOT).items():
+        assert path.read_text(encoding="utf-8") == expected, path
+
+
+def test_the_mcp_server_serves_the_rendered_contract() -> None:
+    assert render_mcp_instructions() == MCP_INSTRUCTIONS
+    assert mcp.instructions == MCP_INSTRUCTIONS
+
+
+def test_the_contract_covers_the_tool_surface_and_nothing_retired() -> None:
+    served = {tool.name for tool in asyncio.run(mcp.list_tools())}
+    assert served == {tool.name for tool in AGENT_TOOLS}
+
+    for instructions in _rendered_contract():
+        lowered = instructions.lower()
+        for name in served:
+            assert name in lowered
+        for retired in RETIRED_VOCABULARY:
+            assert retired not in lowered
+
+
+def test_the_contract_names_only_parameters_the_tools_have() -> None:
+    schemas = _tool_schemas()
+    policy = render_agent_policy()
+    for tool in AGENT_TOOLS:
+        schema = schemas[tool.name]
+        properties = set(schema.get("properties", {}))
+        for parameter in tool.parameter_names:
+            assert parameter in properties, (tool.name, parameter)
+        # A signature that spells its parameters out spells out every required
+        # one, so a new mandatory argument cannot land without the caller
+        # being told to pass it.
+        if "..." not in tool.parameters:
+            assert set(schema.get("required", ())) <= set(tool.parameter_names), tool.name
+        assert f"`{tool.signature}`" in policy
+
+
+def test_the_busy_card_vocabulary_is_spelled_out_and_real() -> None:
+    projected = set(ROUTINE_GPU_STATUS.values())
+    for status in BUSY_GPU_STATUSES:
+        assert status in projected, status
+        for instructions in _rendered_contract():
+            assert status in instructions, status
+
+
+def test_the_prohibitions_survive_every_rendering() -> None:
+    for instructions in _rendered_contract():
+        lowered = instructions.lower()
+        for token in PROHIBITION_TOKENS:
+            assert token in lowered, token
+
+
+def test_the_contract_names_no_client_product() -> None:
+    # One contract is served to whoever connects. A client's name in it turns
+    # a shared rule into that client's rule and invites a second copy for the
+    # next one.
+    for instructions in _rendered_contract():
+        lowered = instructions.lower()
+        for client in MCP_CLIENTS:
+            assert client not in lowered, client
+
+
+def test_the_contract_stays_within_its_budget() -> None:
+    assert len(render_mcp_instructions()) <= MCP_INSTRUCTION_BUDGET_CHARS
+
+
+def test_the_repository_rule_stays_a_pointer_rather_than_a_second_contract() -> None:
+    # Claude inherits the repository rule instead of maintaining a second,
+    # drift-prone ServerPilot contract. A Teamwork bridge block is allowed
+    # alongside it, but only as a pointer: everything outside the bridge
+    # markers must be exactly "@AGENTS.md", and everything inside them must
+    # be either a comment or an "@" reference -- never rule prose.
+    claude_text = CLAUDE_RULE.read_text(encoding="utf-8")
+    bridge_start, bridge_end = (
+        "<!-- TEAMWORK_CLAUDE_BRIDGE_START -->",
+        "<!-- TEAMWORK_CLAUDE_BRIDGE_END -->",
+    )
+    if bridge_start not in claude_text:
+        assert claude_text.strip() == "@AGENTS.md"
+        return
+    before, remainder = claude_text.split(bridge_start, 1)
+    bridge_body, after = remainder.split(bridge_end, 1)
+    assert before.strip() == "@AGENTS.md"
+    assert after.strip() == ""
+    lines = [line.strip() for line in bridge_body.strip().splitlines() if line.strip()]
+    assert [line for line in lines if line.startswith("@")] == ["@docs/teamwork/README.md"]
+    for line in lines:
+        if line.startswith("@"):
+            continue
+        # Prose smuggled into a single HTML comment would reach the model
+        # exactly like rules do, so the comment is length-bounded rather than
+        # merely comment-shaped.
+        assert line.startswith("<!--") and line.endswith("-->"), line
+        assert len(line) <= 120, line
+
+
+def test_policy_block_is_marked_and_carries_the_policy() -> None:
+    start, end = POLICY_BLOCK_MARKERS
+    block = render_policy_block("# shared policy")
+    assert block.startswith(start)
+    assert block.endswith(f"{end}\n")
+    assert "# shared policy" in block
+
+
+def test_merge_replaces_only_its_owned_block() -> None:
     old = "before\n\n<!-- SERVERPILOT_GLOBAL_START -->\nold\n<!-- SERVERPILOT_GLOBAL_END -->\n\nafter\n"
-    merged = merge(old, render("codex", "new"))
+    merged = merge_policy_block(old, render_policy_block("new"))
     assert merged == "before\n\n<!-- SERVERPILOT_GLOBAL_START -->\nnew\n<!-- SERVERPILOT_GLOBAL_END -->\nafter\n"
 
 
-def test_policy_merge_migrates_legacy_gpu_broker_block_in_place() -> None:
+def test_merge_migrates_a_legacy_gpu_broker_block_in_place() -> None:
     old = "before\n\n<!-- GPU_BROKER_GLOBAL_START -->\nlegacy\n<!-- GPU_BROKER_GLOBAL_END -->\n\nafter\n"
-    merged = merge(old, render("codex", "new"))
+    merged = merge_policy_block(old, render_policy_block("new"))
     assert merged == "before\n\n<!-- SERVERPILOT_GLOBAL_START -->\nnew\n<!-- SERVERPILOT_GLOBAL_END -->\nafter\n"
 
 
-def test_policy_merge_is_idempotent() -> None:
-    block = render("codex", "new")
-    once = merge("before\nafter\n", block)
-    assert merge(once, block) == once
+def test_merge_is_idempotent() -> None:
+    block = render_policy_block("new")
+    once = merge_policy_block("before\nafter\n", block)
+    assert merge_policy_block(once, block) == once
 
 
-def test_policy_merge_into_empty_file_is_just_the_owned_block() -> None:
-    block = render("codex", "new")
-    assert merge("", block) == block
+def test_merge_into_an_empty_file_is_just_the_owned_block() -> None:
+    block = render_policy_block("new")
+    assert merge_policy_block("", block) == block
 
 
 @pytest.mark.parametrize(
@@ -59,326 +191,25 @@ def test_policy_merge_into_empty_file_is_just_the_owned_block() -> None:
     [
         ("<!-- SERVERPILOT_GLOBAL_START -->\nmissing end", "incomplete"),
         ("<!-- SERVERPILOT_GLOBAL_END -->\nmissing start", "incomplete"),
-        (
-            "<!-- SERVERPILOT_GLOBAL_END -->\n<!-- SERVERPILOT_GLOBAL_START -->",
-            "malformed",
-        ),
+        ("<!-- SERVERPILOT_GLOBAL_END -->\n<!-- SERVERPILOT_GLOBAL_START -->", "malformed"),
         (
             "<!-- SERVERPILOT_GLOBAL_START -->\none\n<!-- SERVERPILOT_GLOBAL_END -->\n"
             "<!-- SERVERPILOT_GLOBAL_START -->\ntwo\n<!-- SERVERPILOT_GLOBAL_END -->",
             "duplicated",
         ),
+        (
+            "<!-- GPU_BROKER_GLOBAL_START -->\nlegacy\n<!-- GPU_BROKER_GLOBAL_END -->\n"
+            "<!-- SERVERPILOT_GLOBAL_START -->\ncurrent\n<!-- SERVERPILOT_GLOBAL_END -->\n",
+            "duplicated",
+        ),
     ],
 )
-def test_policy_merge_rejects_invalid_markers(existing: str, message: str) -> None:
+def test_merge_rejects_invalid_markers(existing: str, message: str) -> None:
     with pytest.raises(ValueError, match=message):
-        merge(existing, render("codex", "new"))
+        merge_policy_block(existing, render_policy_block("new"))
 
 
-def test_policy_merge_rejects_mixed_legacy_and_current_blocks() -> None:
-    existing = (
-        "<!-- GPU_BROKER_GLOBAL_START -->\nlegacy\n<!-- GPU_BROKER_GLOBAL_END -->\n"
-        "<!-- SERVERPILOT_GLOBAL_START -->\ncurrent\n<!-- SERVERPILOT_GLOBAL_END -->\n"
-    )
-    with pytest.raises(ValueError, match="duplicated"):
-        merge(existing, render("codex", "new"))
-
-
-def test_cli_requires_exactly_one_action() -> None:
-    with pytest.raises(SystemExit) as missing:
-        main(["codex"])
-    assert missing.value.code == 2
-
-    with pytest.raises(SystemExit) as conflicting:
-        main(["codex", "--print", "--install"])
-    assert conflicting.value.code == 2
-
-
-def test_print_is_labeled_and_never_writes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
-
-    assert main(["all", "--print"]) == 0
-
-    output = capsys.readouterr().out
-    assert "[codex] rendered policy" in output
-    assert "[claude] rendered policy" in output
-    assert "[cursor] rendered policy" in output
-    assert not (tmp_path / "codex-home" / "AGENTS.md").exists()
-    assert not (tmp_path / ".claude" / "CLAUDE.md").exists()
-
-
-def test_cursor_print_is_paste_ready(
-    capsys: pytest.CaptureFixture[str],
-) -> None:
-    assert main(["cursor", "--print"]) == 0
-    output = capsys.readouterr().out
-    assert output.startswith(MARKERS["cursor"][0])
-
-
-def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
-    adapter = _plain_policy_text(POLICY.read_text(encoding="utf-8")).lower()
-    for boundary in (
-        "use the local serverpilot mcp",
-        "gpu_status",
-        "lease_id",
-        "leased_gpus",
-        "gpu_apply",
-        "gpu_count",
-        "server_group_id",
-        "group_selection_required",
-        "no_capacity",
-        "gpus[]",
-        "cuda_visible_devices",
-        "gpu_cuda_visible_devices",
-        "cuda_device_order=pci_bus_id",
-        "ordinal",
-        "workspace_path",
-        "gpu_release",
-        "gpu_add_server",
-        "gpu_update_server",
-        "linux",
-        "human-readable",
-        "ui title",
-        "ssh",
-        "sqlite",
-        "inventory",
-        "nvidia-smi",
-        "gpu coordination only",
-        "non-gpu remote work",
-        "git synchronization",
-        "does not require a serverpilot lease",
-    ):
-        assert boundary in adapter
-
-    # The global rule loads in every project, so it stays bounded.  The
-    # ceiling moved from 180 to 200 words when per-GPU idle reclaim became
-    # part of the claim contract: an agent that does not know an unused card
-    # is returned will keep over-claiming.  It moved from 200 to 250 when
-    # telemetry moved onto the lease: an agent that is not told a free card
-    # carries no telemetry, and that the load it can observe there is
-    # ServerPilot's own hold, re-derives availability from that observation
-    # and reads free cards as taken.  It moved from 250 to 340 when routine
-    # status became grouped capacity: the caller has to be told to assess
-    # group notes first, pass server_group_id for direct grouped hosts, and
-    # not pin those hosts with server_id, or it treats two 4-GPU servers as
-    # one 8-GPU menu.  It moved from 340 to 380 when the five-tool surface
-    # became the whole MCP contract: the caller has to be told server
-    # deletion and other lifecycle work happen in the app or REST, or it
-    # looks for a second MCP profile that no longer exists.  It moved from
-    # 380 to 420 when a plugin-adapted cluster became an ordinary group: the
-    # caller has to be told that largest_allocatable_block is one apply's
-    # ceiling rather than the pool's remainder, or it asks for eight cards
-    # from a partition advertising twenty-seven free and never gets them,
-    # and that a grouped delegated cluster is claimed by server_group_id,
-    # or it pins that host with server_id and the claim never reaches the
-    # plugin.  It moved from 420 to 430 when the observation-layer redesign
-    # collapsed three observation profiles into one and added a standing
-    # reminder to call gpu_status before allocating rather than trust a stale
-    # read from earlier in the conversation.
-    # Contract sentences are never cut to fit this bound.
-    assert len(adapter.split()) < 430
-    for removed_routine_step in (
-        "gpu_bind_observed_workload",
-        "gpu_renew_lease",
-        "gpu_coordination",
-        "agent_url",
-        "coordination_uri",
-        "codex_thread_id",
-        "idempotency_key",
-        "heartbeat",
-    ):
-        assert removed_routine_step not in adapter
-    assert "one-uuid" not in adapter
-
-    mcp_instructions = _plain_policy_text(mcp.instructions).lower()
-    for runtime_contract in (
-        "five tools",
-        "gpu_status",
-        "gpu_apply",
-        "gpu_add_server",
-        "gpu_update_server",
-        "cuda_visible_devices",
-        "gpu_cuda_visible_devices",
-        "workspace_path",
-        "gpu_release",
-        "lease_id=",
-        "recent_average per card plus a lease summary",
-        "task",
-        "leased_gpus",
-        "code_location=not_provided",
-        "never the client ui title",
-        "no_capacity is an answer, not a failure",
-        "group_selection_required is the same kind of answer",
-        "nothing is queued",
-        "held_idle",
-        "busy_unmanaged",
-        "ownership_conflict",
-        "only running and busy_unmanaged mean work is on the card",
-        "serverpilot only coordinates gpus",
-        "needs no lease",
-        "server_group_id",
-    ):
-        assert runtime_contract in mcp_instructions
-    # The routine instructions load once per session, so they stay bounded.  The
-    # ceiling moved from 512 to 560 when connection and workspace became a
-    # per-server projection, and from 560 to 730 when telemetry moved onto the
-    # lease: the caller has to be told both that a free card carries no
-    # telemetry and how to read its own, or it re-derives the answer from an
-    # observation that is ServerPilot's own hold.  Every gpu_status response
-    # gets smaller in exchange.  Prohibition wording is never shortened to fit
-    # this bound.  It moved from 730 to 830 when a scheduler cluster became
-    # reachable through a plugin: the caller has to be told that an unclaimed
-    # cluster reports headroom inside its server_group rather than a parallel
-    # scheduler_servers bucket, or it reads the group as "no capacity".
-    # It moved from 830 to 1600 when the instructions became English. The bound
-    # stands in for what the text costs an agent every turn, and a character is
-    # not the same size in the two languages: a Chinese character is close to
-    # one token, an English one closer to a quarter. The English text is longer
-    # and cheaper.  It moved from 1600 to 2200 when grouped capacity replaced
-    # the per-card free menu: the caller has to be told to choose
-    # server_group_id, not to pin a grouped direct host with server_id, and
-    # that gpu_count comes from the launch script.
-    # It moved from 2200 to 2400 when open_leases made releasing possible at
-    # all.  gpu_apply returns a lease id once, so a caller in a later turn
-    # could see cards were held but not name the lease holding them, and
-    # gpu_release takes nothing else.  The text used to say an idle card is
-    # reclaimed on its own -- which is all you can tell a caller that cannot
-    # release -- and that made the backstop read as the mechanism.  Deleting
-    # the duplicated gpu_count definition paid most of the increase: the
-    # gpu_apply parameter already carries it.
-    # It moved from 2400 to 2800 when busy_gpus[].status got a vocabulary. The
-    # response already separated a card that is computing from a card that is
-    # only held -- running versus held_idle -- but no sentence here named the
-    # key or any of its values, so a caller read "somebody holds it" as
-    # "somebody is running on it" and waited on a card nobody was using. The
-    # values are the words the caller acts on and are not shortened to fit this
-    # bound. Two duplications paid part of the increase: the observation_profile
-    # list, which the gpu_add_server parameter description already spells out in
-    # full, and "with no telemetry", which the next line already says.
-    # It moved from 2800 to 2900 when gpu_status(lease_id=...) became the
-    # holder's heartbeat. A caller that does not know this reads its own quiet
-    # phase between two batches of work as nothing to report, stops asking, and
-    # its claim is settled as abandoned while the work is still going -- which
-    # is what happened. The sentence has to say both halves: asking keeps the
-    # claim, and the cards it is not using still come back on their own, or the
-    # caller learns to poll instead of to release.
-    # It moved from 2900 to 3000 when release and task stopped being
-    # under-specified. The text named gpu_release only for the failure case, so
-    # a caller finishing normally read release as optional and left the lease
-    # held; it named task only as "the task name", so a caller wrote a short
-    # label instead of what the lease is actually for. It also gained a
-    # standing reminder to call gpu_status before allocating rather than trust
-    # a stale read from earlier in the conversation.
-    assert len(mcp.instructions) < 3000
-    for removed_routine_step in (
-        "gpu_bind_observed_workload",
-        "gpu_renew_lease",
-        "gpu_coordination",
-        "agent_url",
-        "coordination_uri",
-        "codex_thread_id",
-        "idempotency_key",
-        "approval_ref",
-    ):
-        assert removed_routine_step not in mcp_instructions
-
-
-def test_tracked_client_rules_use_only_the_exact_harness_neutral_routine_contract() -> None:
-    required = (
-        "gpu_status(server_id?, lease_id?)",
-        "gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)",
-        "gpu_release(lease_id)",
-        "gpu_add_server(",
-        "gpu_update_server(",
-    )
-    forbidden = (
-        "gpu_claim(",
-        "gpu_claim_profile",
-        "agent_url",
-        "coordination_uri",
-        "codex://",
-        "codex_thread_id",
-        "codex",
-        "claude",
-        "cursor",
-    )
-    for path in CLIENT_RULES:
-        text = _plain_policy_text(path.read_text(encoding="utf-8")).lower()
-        for contract in required:
-            assert contract in text, path
-        for retired in forbidden:
-            assert retired not in text, path
-
-    cursor_text = (ROOT / ".cursor" / "rules" / "serverpilot.mdc").read_text(
-        encoding="utf-8"
-    )
-    cursor_start, cursor_end = MARKERS["cursor"]
-    cursor_body = cursor_text.split(cursor_start, 1)[1].split(cursor_end, 1)[0]
-    assert _plain_policy_text(cursor_body) == _plain_policy_text(
-        POLICY.read_text(encoding="utf-8")
-    )
-
-    # Claude inherits the repository rule instead of maintaining a second,
-    # drift-prone ServerPilot contract. A Teamwork bridge block is allowed
-    # alongside it, but only as a pointer: everything outside the bridge
-    # markers must be exactly "@AGENTS.md", and everything inside them must
-    # be either a comment or an "@" reference -- never rule prose that could
-    # itself drift out of sync with AGENTS.md.
-    claude_text = CLAUDE_RULE.read_text(encoding="utf-8")
-    bridge_start, bridge_end = (
-        "<!-- TEAMWORK_CLAUDE_BRIDGE_START -->",
-        "<!-- TEAMWORK_CLAUDE_BRIDGE_END -->",
-    )
-    if bridge_start in claude_text:
-        before, remainder = claude_text.split(bridge_start, 1)
-        bridge_body, after = remainder.split(bridge_end, 1)
-        assert before.strip() == "@AGENTS.md"
-        assert after.strip() == ""
-        lines = [line.strip() for line in bridge_body.strip().splitlines() if line.strip()]
-        # A pointer, not a second contract: one "@" reference at the Teamwork
-        # entry point, and any remaining line is a short comment.  Prose smuggled
-        # into a single HTML comment would reach the model exactly like rules do,
-        # so the comment is length-bounded rather than merely comment-shaped.
-        assert [line for line in lines if line.startswith("@")] == [
-            "@docs/teamwork/README.md"
-        ]
-        for line in lines:
-            if line.startswith("@"):
-                continue
-            assert line.startswith("<!--") and line.endswith("-->"), line
-            assert len(line) <= 120, line
-    else:
-        assert claude_text.strip() == "@AGENTS.md"
-
-
-def test_global_policy_keeps_scheduler_detail_out_of_routine_mcp_help() -> None:
-    global_policy = _plain_policy_text(POLICY.read_text(encoding="utf-8")).lower()
-    assert "advanced" not in global_policy
-    assert "these five tools are the whole mcp surface" in global_policy
-
-    mcp_instructions = _plain_policy_text(mcp.instructions).lower()
-    assert "advanced" not in mcp_instructions
-    # Delegated clusters now appear inside server_groups. The retired
-    # scheduler tools must not reappear in policy or instructions.
-    for advanced_tool in (
-        "gpu_scheduler_targets",
-        "gpu_scheduler_access_status",
-        "gpu_scheduler_profiles",
-        "gpu_scheduler_submit_profile",
-        "gpu_scheduler_submit_once",
-        "gpu_scheduler_job_status",
-        "gpu_scheduler_cancel",
-        "gpu_scheduler_upload",
-        "gpu_scheduler_transfer_status",
-    ):
-        assert advanced_tool not in global_policy
-        assert advanced_tool not in mcp_instructions
-
-
-def test_install_refuses_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_install_refuses_a_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     codex_home = tmp_path / "codex-home"
     codex_home.mkdir()
     target = tmp_path / "actual.md"
@@ -387,7 +218,7 @@ def test_install_refuses_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
     with pytest.raises(ValueError, match="refusing to replace symlink"):
-        install("codex", "new policy")
+        install_policy("codex", "new policy")
 
     assert target.read_text(encoding="utf-8") == "keep me\n"
     assert (codex_home / "AGENTS.md").is_symlink()
@@ -397,7 +228,7 @@ def test_install_refuses_symlink(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     os.name != "posix",
     reason="Windows has no POSIX mode bits for chmod to preserve",
 )
-def test_install_preserves_existing_file_mode(
+def test_install_preserves_an_existing_file_mode(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     codex_home = tmp_path / "codex-home"
@@ -407,13 +238,32 @@ def test_install_preserves_existing_file_mode(
     policy_path.chmod(0o640)
     monkeypatch.setenv("CODEX_HOME", str(codex_home))
 
-    install("codex", "new policy")
+    install_policy("codex", "new policy")
 
     assert stat.S_IMODE(policy_path.stat().st_mode) == 0o640
 
 
-def test_install_all_labels_results_and_explains_cursor(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_cli_requires_exactly_one_action() -> None:
+    assert runner.invoke(app, ["mcp", "policy"]).exit_code == 2
+    assert runner.invoke(app, ["mcp", "policy", "--print", "--check"]).exit_code == 2
+
+
+def test_cli_print_writes_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
+
+    result = runner.invoke(app, ["mcp", "policy", "--print"])
+
+    assert result.exit_code == 0
+    for client in MCP_CLIENTS:
+        assert f"[{client}] rules block" in result.stdout
+    assert POLICY_BLOCK_MARKERS[0] in result.stdout
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cli_install_writes_the_file_clients_and_explains_the_rest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setenv("HOME", str(tmp_path))
     # Path.home() reads USERPROFILE on Windows, so HOME alone would let the
@@ -421,24 +271,33 @@ def test_install_all_labels_results_and_explains_cursor(
     monkeypatch.setenv("USERPROFILE", str(tmp_path))
     monkeypatch.setenv("CODEX_HOME", str(tmp_path / "codex-home"))
 
-    assert main(["all", "--install"]) == 0
+    result = runner.invoke(app, ["mcp", "policy", "--install"])
 
-    output = capsys.readouterr().out
-    assert "[codex] installed:" in output
-    assert "[claude] installed:" in output
-    assert "[cursor] not installed; use --print cursor" in output
-    assert (tmp_path / "codex-home" / "AGENTS.md").is_file()
-    assert (tmp_path / ".claude" / "CLAUDE.md").is_file()
+    assert result.exit_code == 0
+    assert "[cursor] keeps its rules in its own settings UI" in result.stdout
+    installed = (tmp_path / "codex-home" / "AGENTS.md").read_text(encoding="utf-8")
+    assert installed == render_policy_block(render_agent_policy())
+    assert (tmp_path / ".claude" / "CLAUDE.md").read_text(encoding="utf-8") == installed
 
 
-def test_cursor_install_is_rejected_without_writing(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+def test_cli_check_passes_on_this_checkout() -> None:
+    result = runner.invoke(app, ["mcp", "policy", "--check"])
+
+    assert result.exit_code == 0, result.output
+    assert "match the contract" in result.stdout
+
+
+def test_cli_check_fails_and_shows_the_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
+    stale = tmp_path / "AGENT_MCP_policy.en.md"
+    stale.write_text("someone edited the rendering\n", encoding="utf-8")
+    monkeypatch.setattr(
+        "serverpilot.cli.generated_agent_files", lambda: {stale: "the contract's own text\n"}
+    )
 
-    with pytest.raises(SystemExit) as error:
-        main(["cursor", "--install"])
+    result = runner.invoke(app, ["mcp", "policy", "--check"])
 
-    assert error.value.code == 2
-    assert "[cursor] install is manual" in capsys.readouterr().err
-    assert list(tmp_path.iterdir()) == []
+    assert result.exit_code == 1
+    assert "someone edited the rendering" in result.output
+    assert "the contract's own text" in result.output
