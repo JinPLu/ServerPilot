@@ -554,6 +554,14 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let lifecycleState: String?
     public let monitorStatus: String
     public let monitorError: String?
+    /// One value from the collector's closed failure vocabulary. The app reads
+    /// this and never the free text beside it: matching English substrings
+    /// against a message the server had already classified meant every new
+    /// phrasing silently became "check SSH".
+    public let monitorErrorCode: String?
+    /// How long ago this endpoint last answered, in seconds, computed by the
+    /// broker against the clock that wrote the timestamp.
+    public let monitorLastSuccessAgeSeconds: Double?
     public let monitorLastSuccessAt: String?
     public let monitorLastAttemptAt: String?
     public let cpuUtilizationFraction: Double?
@@ -586,7 +594,7 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.workspacePath = raw.string("workspace_path")
         let pathOverride = raw.string("workspace_path_override")?.trimmingCharacters(in: .whitespacesAndNewlines)
         self.workspacePathOverride = (pathOverride?.isEmpty == false) ? pathOverride : nil
-        self.observationProfile = raw.string("observation_profile") ?? "linux-nvidia"
+        self.observationProfile = raw.string("observation_profile") ?? "linux"
         self.keepaliveAdapterID = raw.string("keepalive_adapter_id")
         guard let keepalive = EndpointKeepaliveSummary(
             raw: raw["keepalive"] as? [String: Any] ?? [:],
@@ -598,6 +606,8 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         let monitor = raw["monitor"] as? [String: Any] ?? [:]
         self.monitorStatus = (monitor.string("status") ?? "PENDING").uppercased()
         self.monitorError = monitor.string("last_error")
+        self.monitorErrorCode = monitor.string("error_code")
+        self.monitorLastSuccessAgeSeconds = monitor.optionalDouble("last_success_age_seconds")
         self.monitorLastSuccessAt = monitor.string("last_success_at")
         self.monitorLastAttemptAt = monitor.string("last_attempt_at")
         let hostTelemetry = raw["host_telemetry"] as? [String: Any] ?? [:]
@@ -662,31 +672,57 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
             return "正在进行首次连接"
         }
         if monitorStatus == "ERROR" || monitorStatus == "STALE" {
-            if let monitorError, !monitorError.isEmpty {
-                let lowered = monitorError.lowercased()
-                if lowered.contains("timed out") || lowered.contains("timeout") {
-                    return "连接或更新超时 · 检查服务器和 SSH"
-                }
-                if lowered.contains("connection refused") {
-                    return "连接被拒绝 · 检查 SSH 服务和端口"
-                }
-                if lowered.contains("permission denied") || lowered.contains("authentication") {
-                    return "SSH 验证失败 · 检查账号和密钥"
-                }
-                if lowered.contains("no route to host") || lowered.contains("network is unreachable") {
-                    return "网络不可达"
-                }
-                return "无法连接服务器 · 检查 SSH"
-            }
-            return monitorStatus == "STALE" ? "最近一次服务器数据已过期" : "连接或更新失败"
+            let cause = EndpointRecord.causeText(for: monitorErrorCode)
+                ?? (monitorStatus == "STALE" ? "最近一次服务器数据已过期" : "连接或更新失败")
+            // A host that has never answered has no "since" to report, and
+            // saying its data is out of date would contradict that. How long
+            // the silence has lasted only means something once there was sound.
+            guard let since = monitorLastSuccessSummary else { return cause }
+            return "\(cause) · \(since)"
         }
-        if let monitorLastSuccessAt, !monitorLastSuccessAt.isEmpty {
-            return "上次连接成功：\(monitorLastSuccessAt)"
+        if let monitorLastSuccessSummary {
+            return monitorLastSuccessSummary
         }
         if let monitorLastAttemptAt, !monitorLastAttemptAt.isEmpty {
             return "上次尝试连接：\(monitorLastAttemptAt)"
         }
         return nil
+    }
+
+    /// How long the silence has lasted, phrased the way a person asks it.
+    /// A raw timestamp made the reader subtract two times to learn the one
+    /// thing that decides whether this is a blip or an outage.
+    public var monitorLastSuccessSummary: String? {
+        guard let age = monitorLastSuccessAgeSeconds else {
+            // No age means the broker has no successful observation to date
+            // it from, so there is nothing to summarize.
+            return monitorLastSuccessAt.flatMap { $0.isEmpty ? nil : "上次连接成功：\($0)" }
+        }
+        if age < 90 { return "上次成功 \(Int(age.rounded())) 秒前" }
+        if age < 5400 { return "上次成功 \(Int((age / 60).rounded())) 分钟前" }
+        if age < 172_800 { return "上次成功 \(Int((age / 3600).rounded())) 小时前" }
+        return "上次成功 \(Int((age / 86400).rounded())) 天前"
+    }
+
+    /// The closed vocabulary, in the user's language. Each says what to check,
+    /// because a cause the reader cannot act on is not worth the line.
+    static func causeText(for code: String?) -> String? {
+        switch code {
+        case "auth_failed": return "SSH 验证失败 · 检查账号和密钥"
+        case "host_key_rejected": return "主机密钥不被接受 · 需要人工确认服务器指纹"
+        case "connection_refused": return "连接被拒绝 · 检查 SSH 服务和端口"
+        case "network_unreachable": return "网络不可达 · 检查网络或 VPN"
+        case "dns_failure": return "主机名无法解析 · 检查地址"
+        case "connect_timeout": return "连接超时 · 检查网络或 VPN"
+        case "connection_reset": return "连接被中断 · 检查网络或 VPN"
+        case "command_timeout": return "服务器响应过慢 · 检查服务器负载"
+        case "remote_error": return "服务器上的采集命令失败 · 检查 nvidia-smi 与权限"
+        case "parse_error": return "服务器返回的数据无法解析"
+        case "plugin_error": return "插件无法连接该集群 · 按插件说明手动建立连接"
+        case "ssh_failed": return "无法连接服务器 · 检查 SSH"
+        case "local_error": return "本机采集出错 · 见 ServerPilot 日志"
+        default: return nil
+        }
     }
 
     public var cpuLoadFraction: Double? {
@@ -1507,25 +1543,14 @@ public struct ObservationProfileRecord: Equatable, Sendable, Identifiable, Hasha
         self.capabilities = (raw["capabilities"] as? [String]) ?? []
     }
 
+    /// Shown only when the broker cannot be reached for its own catalog.
+    /// There is one built-in profile; anything else in the picker is a plugin
+    /// the broker discovered, which this app cannot know about on its own.
     public static let serverCatalogFallback: [ObservationProfileRecord] = [
         ObservationProfileRecord(
-            id: "linux-nvidia",
-            displayName: "标准 NVIDIA 采集",
-            description: "使用内置、只读的 Linux NVIDIA 观测配置。",
-            source: "builtin",
-            capabilities: ["observe"]
-        ),
-        ObservationProfileRecord(
-            id: "linux-host",
-            displayName: "主机容量采集",
-            description: "使用内置、只读的 Linux 主机容量观测配置。",
-            source: "builtin",
-            capabilities: ["observe"]
-        ),
-        ObservationProfileRecord(
-            id: "server-script-v1",
-            displayName: "服务器采集脚本",
-            description: "使用远端密封只读采集脚本；不能输入命令或容器参数。",
+            id: "linux",
+            displayName: "Linux 只读采集",
+            description: "内置的只读 SSH 探测：有 NVIDIA 卡就采集显卡与进程，没有就按纯 CPU 主机采集。",
             source: "builtin",
             capabilities: ["observe"]
         ),

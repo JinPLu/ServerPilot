@@ -3,7 +3,10 @@
 import asyncio
 import contextlib
 import functools
+import hashlib
+import logging
 import os
+import random
 import re
 import threading
 import time
@@ -19,7 +22,11 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 from pydantic import ValidationError
 
 from serverpilot import API_CAPABILITIES, SCHEMA_VERSION, __version__
-from serverpilot.adapters import AdapterCommandError, endpoint_keepalive_adapter
+from serverpilot.adapters import (
+    AdapterCommandError,
+    clear_control_sockets,
+    endpoint_keepalive_adapter,
+)
 from serverpilot.collector import SSHCollector
 from serverpilot.config import Settings, load_inventory
 from serverpilot.database import Database
@@ -40,6 +47,11 @@ from serverpilot.schemas import (
 )
 from serverpilot.service import SYSTEM_ACTOR_ID, ActorContext, BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
+
+logger = logging.getLogger(__name__)
+
+# How often the supervisor notices an endpoint that was added or removed.
+COLLECTOR_SUPERVISOR_INTERVAL_SECONDS = 10
 
 
 class RateLimiter:
@@ -350,10 +362,7 @@ def create_app(
         """Require a post-action, endpoint-scoped fresh collection."""
 
         try:
-            collected = await shared_collector.collect_once(
-                service,
-                endpoints=[endpoint],
-            )
+            collected = await shared_collector.collect_selected(service, [endpoint])
         except Exception:
             raise BrokerError(
                 "keepalive_observation_failed",
@@ -1051,6 +1060,8 @@ def create_app(
 
     # Reconcile tasks outlive the collection cycle that spawned them, so the
     # identity they run under is bound once instead of per cycle.
+    collector_state: dict[str, float] = {"next_prune_at": 0.0}
+
     collector_system_actor = ActorContext(
         id=SYSTEM_ACTOR_ID,
         role="admin",
@@ -1072,46 +1083,83 @@ def create_app(
                 idempotency_key=f"keepalive-reconcile:{endpoint.id}:{key_suffix}",
             )
 
-    async def collector_loop() -> None:
-        next_prune_at = 0.0
+    async def observe_endpoint_forever(endpoint: Any) -> None:
+        """One endpoint's own probe loop. Nothing here is shared with another.
+
+        The phase is derived from the endpoint id so the hosts spread out over
+        the interval deterministically, and the small jitter keeps them from
+        re-converging after they were all held up by the same stall. Correlated
+        probes were what turned any local hiccup into "every server is down".
+        """
+
+        interval = service.collector_interval_seconds()
+        phase = interval * (
+            int.from_bytes(hashlib.sha256(endpoint.id.encode()).digest()[:4], "big") % 1000
+        ) / 1000
+        await asyncio.sleep(phase)
         while True:
-            interval = service.collector_interval_seconds()
-            try:
-                endpoints = await service.in_domain(service.collector_endpoints_due)
-                collected = await shared_collector.collect_once(
-                    service,
-                    endpoints=endpoints,
-                    stagger_seconds=0.0,
+            result = await shared_collector.observe_and_ingest(service, endpoint)
+            if isinstance(result, dict) and "error" not in result:
+                # A reconcile outlives the probe that noticed it needed doing.
+                # Awaited inline, a shutdown that cancels this probe loop would
+                # cancel a helper start already in flight, leaving a worker
+                # holding a GPU with nothing in the ledger pointing at it.
+                # Shutdown waits on this set instead.
+                task = asyncio.create_task(
+                    reconcile_collected(endpoint, result),
+                    name=f"serverpilot-keepalive-{endpoint.id}",
                 )
+                keepalive_reconcile_tasks.add(task)
+                task.add_done_callback(keepalive_reconcile_tasks.discard)
+            interval = service.collector_interval_seconds()
+            await asyncio.sleep(interval * random.uniform(0.9, 1.1))
+
+    async def collector_supervisor() -> None:
+        """Keep one probe task alive per endpoint, and prune the retired ones.
+
+        A failing endpoint is not backed off. Back-off existed to keep a shared
+        cycle short, and there is no shared cycle now; a dead host's own task
+        simply cannot re-probe faster than its connect budget allows.
+        """
+
+        tasks: dict[str, asyncio.Task[None]] = {}
+        try:
+            while True:
+                try:
+                    endpoints = await service.in_domain(service.collector_endpoints)
+                except Exception:
+                    logger.exception("could not list endpoints to collect")
+                    endpoints = []
+                current = {endpoint.id for endpoint in endpoints}
                 for endpoint in endpoints:
-                    result = collected.get(endpoint.id)
-                    if not isinstance(result, dict) or "error" in result:
-                        continue
-                    task = asyncio.create_task(
-                        reconcile_collected(endpoint, result),
-                        name=f"serverpilot-keepalive-{endpoint.id}",
-                    )
-                    keepalive_reconcile_tasks.add(task)
-                    task.add_done_callback(keepalive_reconcile_tasks.discard)
-            except Exception:
-                # Per-endpoint failures are already recorded by SSHCollector. This
-                # protects the service loop from an unexpected local failure.
-                pass
-            if time.monotonic() >= next_prune_at:
-                with contextlib.suppress(Exception):
-                    await service.in_domain(service.prune_telemetry_history)
-                next_prune_at = time.monotonic() + 3600
-            # A fixed gap, not a fixed period. Subtracting the cycle time makes
-            # a slow cycle collapse into a back-to-back loop that never lets
-            # the event loop drain; `stale_after` is three intervals, so a gap
-            # leaves room for a cycle that runs long.
-            await asyncio.sleep(interval)
+                    task = tasks.get(endpoint.id)
+                    if task is None or task.done():
+                        tasks[endpoint.id] = asyncio.create_task(
+                            observe_endpoint_forever(endpoint),
+                            name=f"serverpilot-observe-{endpoint.id}",
+                        )
+                for endpoint_id in [key for key in tasks if key not in current]:
+                    tasks.pop(endpoint_id).cancel()
+                if time.monotonic() >= collector_state["next_prune_at"]:
+                    with contextlib.suppress(Exception):
+                        await service.in_domain(service.prune_telemetry_history)
+                    collector_state["next_prune_at"] = time.monotonic() + 3600
+                await asyncio.sleep(COLLECTOR_SUPERVISOR_INTERVAL_SECONDS)
+        finally:
+            for task in tasks.values():
+                task.cancel()
+            await asyncio.gather(*tasks.values(), return_exceptions=True)
 
     @contextlib.asynccontextmanager
     async def lifespan(application: FastAPI):
         task = None
         if inventory.collector.enabled:
-            task = asyncio.create_task(collector_loop(), name="serverpilot-collector")
+            # A socket left behind by a killed daemon makes ControlMaster=auto
+            # refuse to multiplex for as long as the file exists, which would
+            # silently put every probe back on a full handshake.
+            with contextlib.suppress(OSError):
+                clear_control_sockets(shared_collector.control_dir)
+            task = asyncio.create_task(collector_supervisor(), name="serverpilot-collector")
         application.state.collector_task = task
         try:
             yield
@@ -1551,7 +1599,7 @@ def create_app(
         mutation_key = _idempotency_key(idempotency_key)
         observation_not_before = utcnow()
         endpoint = await service.in_domain(service.collector_endpoint, endpoint_id)
-        await shared_collector.collect_once(service, endpoints=[endpoint])
+        await shared_collector.collect_selected(service, [endpoint])
         return await service.in_domain(
             service.release_empty_conflicted_lease,
             actor,
@@ -1616,7 +1664,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
         endpoint = await service.in_domain(service.collector_endpoint, endpoint_data.id)
-        await shared_collector.collect_once(service, endpoints=[endpoint])
+        await shared_collector.collect_selected(service, [endpoint])
         observation = await service.in_domain(service.endpoint_reachability, endpoint_data.id)
         return {**created, "observation": observation}
 

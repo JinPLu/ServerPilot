@@ -44,12 +44,20 @@ class Database:
         cursor.close()
 
     def migrate(self) -> None:
-        config_path = self.project_root / "alembic.ini"
-        config = Config(str(config_path)) if config_path.is_file() else Config()
-        source_migrations = self.project_root / "src" / "serverpilot" / "migrations"
-        packaged_migrations = Path(__file__).resolve().parent / "migrations"
-        script_location = source_migrations if source_migrations.is_dir() else packaged_migrations
-        config.set_main_option("script_location", str(script_location))
+        """Upgrade to the head the running package ships, and only that one.
+
+        The script directory used to be preferred from a source tree found by
+        walking up from the working directory, so a daemon started inside any
+        checkout stamped that checkout's revisions into the shared database.
+        The next start, from a different directory, then could not resolve the
+        revision it found and died in a loop. Migrations belong to the code that
+        is running, which is this package.
+        """
+
+        config = Config()
+        config.set_main_option(
+            "script_location", str(Path(__file__).resolve().parent / "migrations")
+        )
         config.set_main_option("sqlalchemy.url", self.url)
         command.upgrade(config, "head")
 

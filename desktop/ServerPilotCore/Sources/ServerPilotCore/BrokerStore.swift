@@ -815,12 +815,10 @@ public final class BrokerStore: ObservableObject {
         } else {
             payload["workspace_path"] = draft.workspacePath
         }
-        if draft.observationProfile == "server-script-v1" {
-            // The helper is a sealed ServerPilot capability, not a user-supplied
-            // command or profile.  New GUI servers should be ready for the
-            // explicit Start occupancy action without a second setup screen.
-            payload["keepalive_adapter_id"] = "server-script-v1"
-        }
+        // The occupancy helper is attached by the broker when a person turns
+        // occupancy on, which is the moment that authorizes it. Guessing it
+        // here from the observation profile was a second path to the same
+        // decision, and it guessed from a profile that no longer exists.
         return payload
     }
 

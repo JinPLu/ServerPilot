@@ -4,6 +4,16 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Servers no longer report a connection failure at the slightest disturbance, and no longer fail six at a time.** One timeout was serving as both the SSH connect limit and the limit for the whole observation. A successful observation measured 2.3-2.9 seconds on average and up to 12.8 at the tail, against a budget of 8, so any network wobble pushed every host over the same line at once. Connecting and running the remote command now have separate budgets, collection reuses a persistent SSH connection (nothing is installed on the servers), and each server is probed on its own schedule. Measured on the same machine: one observation went from 2.3-2.9 seconds to 0.5-0.9, and the worst case from 12.8 seconds to 1.0.
+- **A server that recovers is shown as online immediately, instead of a minute later.** Three consecutive failures used to stop probing that server for 60 seconds, during which it kept reporting a connection failure even after it was fixed.
+- **One server's trouble no longer becomes every server's trouble.** All servers shared one collection pass and one deadline, so a stall anywhere failed all of them together. Each server now has its own clock. A server whose settings cannot be read is likewise only its own problem, instead of silently stopping the whole collection pass.
+- **A failed connection now says what actually failed** - authentication, a changed host key, a refused connection, an unreachable network, a name that does not resolve, a remote command that ran too long, a plugin failure - rather than one undifferentiated "connection failed".
+- **One way to observe a server, instead of three.** `linux-nvidia`, `linux-host` and `server-script-v1` are replaced by `linux`. The probe already worked out for itself whether a machine has NVIDIA cards, so the choice only gave people a way to register a server that connects but reports no GPUs. Registered servers migrate automatically, and plugins for shared clusters are unaffected.
+- **The log can be read.** The daemon log now carries a UTC timestamp, the process id and the server it is about, and rotates. It used to be one ever-growing file with no timestamps at all.
+- **Only one daemon can run on a machine.** Two installations could claim the same port and restart each other indefinitely, and a retired startup item was only unloaded rather than removed, so it came back at the next login to claim the port again.
+
 ## 2.4.0 - 2026-08-31
 
 - A card that is running a job is no longer read as empty because one collection failed to list its processes. On a containerized server nvidia-smi sometimes cannot see its own compute processes, and that single reading used to be enough.

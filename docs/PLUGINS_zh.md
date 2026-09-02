@@ -30,7 +30,7 @@ v3 的 `info` **必须**带 `limits` 对象，四键齐全、不许多键。缺�
 | `apply_max_seconds` | 这次 `apply` 最多等多久。**这是强制超时，不是说明**：`apply` 超过它就被终止并按失败处理。上限 180 秒，因为没有调用方会等得更久（`client.CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS` 是另一半，`tests/test_client.py` 把两者钉在一起）。不声明等待窗口就写 `null`，此时回落到通用变更超时。**声明超过 180 会让 `info` 校验失败，于是整个插件在发现阶段静默消失、对应集群从容量里不见**——只有 `serverpilot doctor` 会指出来。 | 正整数（1–180）或 `null` |
 | `queues` | 当前契约不接受排队。 | 必须是 `false` |
 
-内置观测 profile（`linux-nvidia` / `linux-host` / `server-script-v1`）等价于 `on_release`、`max_lease_seconds: null`、`queues: false`。它们不声明 `apply_max_seconds`：直连申请的成本不由 profile 公布，而是由一次申请实际花掉的 adapter 与采集超时推导（`adapters.direct_claim_budget_seconds`），由所属服务器分组投影出来。随包 `slurm-immediate` 声明 `hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、`queues: false`。
+内置观测 profile（`linux`）等价于 `on_release`、`max_lease_seconds: null`、`queues: false`。它们不声明 `apply_max_seconds`：直连申请的成本不由 profile 公布，而是由一次申请实际花掉的 adapter 与采集超时推导（`adapters.direct_claim_budget_seconds`），由所属服务器分组投影出来。随包 `slurm-immediate` 声明 `hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、`queues: false`。
 
 ### 停留在 v2 会怎样
 
@@ -71,7 +71,7 @@ serverpilot plugin add ./my-plugin
 
 插件只用来补内置采集覆盖不了的缺口。怎么选：
 
-- **普通服务器 / 自建节点**：能用 `serverpilot-collect` 就用它，profile 选 `linux-nvidia` / `server-script-v1`，不需要插件。
+- **普通服务器 / 自建节点**：profile 用内置的 `linux` 即可，远端不需要装任何东西，也不需要插件。
 - **共享调度器集群（Slurm / LSF / PBS）**：内置采集会把整个集群当成一台裸机，也分不清哪几张卡是别人作业占的。这时用插件接管观测，只登记当前用户自己的作业；可选实现 `apply`，用 `srun --immediate` 一类的立即申请。
 - **只能看容量、做不到立即申请**的集群：只声明 `observe`，把空闲量放进 `scheduler` 提示，不实现 `apply`；ServerPilot 仍能看到容量，但分配会明确返回 `no_capacity`。
 

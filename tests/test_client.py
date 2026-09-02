@@ -206,7 +206,7 @@ def test_claim_timeout_outlasts_every_budget_the_server_can_spend() -> None:
     from serverpilot.plugins import MAX_PROFILE_APPLY_SECONDS
 
     assert CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS > MAX_PROFILE_APPLY_SECONDS
-    assert direct_claim_budget_seconds(60) < CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
+    assert direct_claim_budget_seconds() < CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
 
     assert control_plane_request_timeout("/api/v1/snapshot") == CONTROL_PLANE_READ_TIMEOUT_SECONDS
     for path in ("/api/v1/claims", "/api/v1/routine/claims"):

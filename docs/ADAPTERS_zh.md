@@ -5,7 +5,7 @@ ServerPilot。它不是第二个控制面，也不是远程命令入口。
 
 密封的是调用契约（动词固定、参数形状固定、输出严格校验），不再是实现来源。
 配置只能选择当前可发现的 observation profile：三个内置值
-`linux-nvidia`、`linux-host`、`server-script-v1`，或本机已发现的插件 ID。
+内置的 `linux`，或本机已发现的插件 ID。
 不能携带 shell、argv、SSH 参数、机密信息或 Agent 自定义 target。
 
 本机插件以当前用户权限运行，放进插件目录的脚本由用户自己负责。

@@ -59,33 +59,19 @@ DIRECT_PROFILE_LIMITS: dict[str, Any] = {
     "queues": False,
 }
 
-BUILTIN_OBSERVATION_PROFILES: tuple[str, ...] = (
-    "linux-nvidia",
-    "linux-host",
-    "server-script-v1",
-)
+# One built-in profile.  There used to be three: two differed only by a shell
+# string, and the combined probe already reports a host with no nvidia-smi as
+# CPU-only, so the second was a choice a user could get wrong for no gain.  The
+# third required installing a collector script on every host and no endpoint
+# ever used it.  A plugin's `observe` is the only extension point.
+BUILTIN_OBSERVATION_PROFILE = "linux"
+BUILTIN_OBSERVATION_PROFILES: tuple[str, ...] = (BUILTIN_OBSERVATION_PROFILE,)
 
 BUILTIN_PROFILE_CATALOG: tuple[dict[str, Any], ...] = (
     {
-        "id": "linux-nvidia",
-        "display_name": "标准 NVIDIA 采集",
-        "description": "使用内置、只读的 Linux NVIDIA 观测配置。",
-        "source": "builtin",
-        "capabilities": ["observe"],
-        "limits": dict(DIRECT_PROFILE_LIMITS),
-    },
-    {
-        "id": "linux-host",
-        "display_name": "主机容量采集",
-        "description": "使用内置、只读的 Linux 主机容量观测配置。",
-        "source": "builtin",
-        "capabilities": ["observe"],
-        "limits": dict(DIRECT_PROFILE_LIMITS),
-    },
-    {
-        "id": "server-script-v1",
-        "display_name": "服务器采集脚本",
-        "description": "使用远端密封只读采集脚本；不能输入命令或容器参数。",
+        "id": BUILTIN_OBSERVATION_PROFILE,
+        "display_name": "Linux 只读采集",
+        "description": "内置的只读 SSH 探测：有 NVIDIA 卡就采集显卡与进程，没有就按纯 CPU 主机采集。",
         "source": "builtin",
         "capabilities": ["observe"],
         "limits": dict(DIRECT_PROFILE_LIMITS),
@@ -236,7 +222,13 @@ def _probe_plugin_cached(path: Path, *, source: PluginSource) -> PluginInfo | st
     try:
         verdict: PluginInfo | str = probe_plugin(path, source=source)
     except PluginError as exc:
-        verdict = str(exc)
+        # Only a success is remembered.  Caching the failure too meant one
+        # transient miss -- a fork that lost a race, an interpreter briefly off
+        # PATH -- made the plugin unknown for the daemon's whole life, and an
+        # unknown profile took the entire collector down with it.  A broken
+        # plugin costs one fork per discovery; a name that is not a plugin
+        # candidate never reaches this function at all.
+        return str(exc)
     _PROBE_CACHE[str(resolved)] = (fingerprint, verdict)
     return verdict
 

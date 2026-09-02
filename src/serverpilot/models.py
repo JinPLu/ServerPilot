@@ -94,7 +94,7 @@ class Endpoint(Base):
     # only; it never authorizes ServerPilot to launch a workload there.
     workspace_path: Mapped[str | None] = mapped_column(String(2000))
     observation_profile: Mapped[str] = mapped_column(
-        String(40), nullable=False, default="linux-nvidia"
+        String(40), nullable=False, default="linux"
     )
     keepalive_adapter_id: Mapped[str | None] = mapped_column(String(40))
     # This is desired state only. Per-GPU keepalive ownership lives in leases;
@@ -559,6 +559,9 @@ class ProviderState(Base):
     last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_error: Mapped[str | None] = mapped_column(String(1000))
+    # One value from the collector's closed failure vocabulary. The free-text
+    # ``last_error`` above stays for detail; only this is branched on.
+    last_error_code: Mapped[str | None] = mapped_column(String(32))
     revision: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 

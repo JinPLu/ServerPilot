@@ -12,7 +12,6 @@ import pytest
 from serverpilot import __version__, server_collector
 from serverpilot.adapters import HOST_RESOURCES_QUERY, RAW_SSH_OBSERVATION_ADAPTER, RawSSHResult
 from serverpilot.collector import (
-    COMBINED_QUERY,
     GPU_CPU_ONLY,
     GPU_UNAVAILABLE,
     MAX_SERVER_SCRIPT_SNAPSHOT_BYTES,
@@ -26,7 +25,6 @@ from serverpilot.collector import (
     parse_server_script_snapshot,
 )
 from serverpilot.collector_protocol import (
-    SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
     take_collector_implementation_version,
 )
@@ -235,30 +233,29 @@ def test_server_collector_reads_cgroup_memory_and_omits_missing_files(
 
 
 def test_fake_collector_never_needs_a_shell(service, inventory) -> None:
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
+    async def fake_runner(endpoint, probe):  # type: ignore[no-untyped-def]
         assert endpoint.id == "endpoint-a"
-        if command == COMBINED_QUERY:
-            return (
-                "__SERVERPILOT_GPU__\n"
-                "0, GPU-endpoint-a-0, Test GPU, 100000, 0, 100000, 0, 0, 35, 100.0, P0, 00000000:01:00.0\n"
-                "__SERVERPILOT_PROCESSES__\n"
-                "__SERVERPILOT_PROCESS_DETAILS__\n"
-                "__SERVERPILOT_IDENTITY__\n"
-                "host-a\nboot-a\n"
-                "__SERVERPILOT_HOST_RESOURCES__\n"
-                "64\n262144 196608\n4.25\n1000 750\n"
-            )
-        raise AssertionError(f"unexpected command {command}")
+        assert probe == "endpoint-telemetry"
+        return (
+            "__SERVERPILOT_GPU__\n"
+            "0, GPU-endpoint-a-0, Test GPU, 100000, 0, 100000, 0, 0, 35, 100.0, P0, 00000000:01:00.0\n"
+            "__SERVERPILOT_PROCESSES__\n"
+            "__SERVERPILOT_PROCESS_DETAILS__\n"
+            "__SERVERPILOT_IDENTITY__\n"
+            "host-a\nboot-a\n"
+            "__SERVERPILOT_HOST_RESOURCES__\n"
+            "64\n262144 196608\n4.25\n1000 750\n"
+        )
 
     collector = SSHCollector(inventory, runner=fake_runner)
-    result = asyncio.run(collector.collect_once(service))
+    result = asyncio.run(collector.collect_selected(service, service.collector_endpoints()))
     assert result["endpoint-a"]["gpu_count"] == 1
     snapshot = service.snapshot(service.local_actor("human"))["data"]
     assert snapshot["endpoints"][0]["host_telemetry"]["memory_available_mib"] == 196608
     assert snapshot["endpoints"][0]["host_telemetry"]["cpu_total_ticks"] == 1000
     assert snapshot["endpoints"][0]["host_telemetry"]["cpu_idle_ticks"] == 750
     # endpoint-b is intentionally a fake failure; no network access happened.
-    assert result["endpoint-b"]["error"] == "AssertionError"
+    assert result["endpoint-b"]["error"] == "local_error"
 
 
 def test_collector_imports_process_details_with_one_combined_ssh(
@@ -266,9 +263,9 @@ def test_collector_imports_process_details_with_one_combined_ssh(
 ) -> None:
     calls: list[str] = []
 
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
+    async def fake_runner(endpoint, probe):  # type: ignore[no-untyped-def]
         assert endpoint.id == "endpoint-a"
-        calls.append(command)
+        calls.append(probe)
         return (
             "__SERVERPILOT_GPU__\n"
             "0, GPU-endpoint-a-0, Test GPU, 100000, 1024, 98976, 10, 2, 35, 100.0, P0, 00000000:01:00.0\n"
@@ -286,7 +283,7 @@ def test_collector_imports_process_details_with_one_combined_ssh(
         SSHCollector(inventory, runner=fake_runner).observe_endpoint(inventory.endpoints[0])
     )
 
-    assert calls == [COMBINED_QUERY]
+    assert calls == ["endpoint-telemetry"]
     assert len(observation.processes) == 1
     process = observation.processes[0]
     assert process.pid == 123
@@ -300,8 +297,8 @@ def test_collector_without_processes_uses_one_combined_ssh(
 ) -> None:
     calls: list[str] = []
 
-    async def fake_runner(_endpoint, command):  # type: ignore[no-untyped-def]
-        calls.append(command)
+    async def fake_runner(_endpoint, probe):  # type: ignore[no-untyped-def]
+        calls.append(probe)
         return (
             "__SERVERPILOT_GPU__\n"
             "0, GPU-endpoint-a-0, Test GPU, 100000, 0, 100000, 0, 0, 35, 100.0, P0, 00000000:01:00.0\n"
@@ -317,7 +314,7 @@ def test_collector_without_processes_uses_one_combined_ssh(
         SSHCollector(inventory, runner=fake_runner).observe_endpoint(inventory.endpoints[0])
     )
 
-    assert calls == [COMBINED_QUERY]
+    assert calls == ["endpoint-telemetry"]
     assert observation.processes == []
 
 
@@ -333,11 +330,11 @@ def test_hung_probe_timeout_is_recorded_as_endpoint_failure(
     collector = SSHCollector(inventory)
 
     result = asyncio.run(
-        collector.collect_once(service, endpoints=[inventory.endpoints[0]])
+        collector.collect_selected(service, [inventory.endpoints[0]])
     )
     endpoint = service.snapshot(service.local_actor("human"))["data"]["endpoints"][0]
 
-    assert result == {"endpoint-a": {"error": "TimeoutError"}}
+    assert result == {"endpoint-a": {"error": "command_timeout"}}
     assert endpoint["monitor"]["status"] == "ERROR"
     assert endpoint["monitor"]["last_attempt_at"] is not None
     assert endpoint["monitor"]["last_success_at"] is None
@@ -349,9 +346,9 @@ def test_hung_probe_timeout_is_recorded_as_endpoint_failure(
 def test_collector_keeps_unconfirmed_gpu_probe_online_for_host_telemetry(
     service, inventory
 ) -> None:
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
+    async def fake_runner(endpoint, probe):  # type: ignore[no-untyped-def]
         assert endpoint.id == "endpoint-a"
-        assert command == COMBINED_QUERY
+        assert probe == "endpoint-telemetry"
         return (
             "__SERVERPILOT_GPU__\n"
             f"{GPU_UNAVAILABLE}\n"
@@ -386,9 +383,9 @@ def test_collector_keeps_unconfirmed_gpu_probe_online_for_host_telemetry(
 def test_collector_keeps_cpu_only_endpoint_online_when_nvidia_smi_returns_no_rows(
     service, inventory
 ) -> None:
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
+    async def fake_runner(endpoint, probe):  # type: ignore[no-untyped-def]
         assert endpoint.id == "endpoint-a"
-        assert command == COMBINED_QUERY
+        assert probe == "endpoint-telemetry"
         return (
             "__SERVERPILOT_GPU__\n"
             f"{GPU_CPU_ONLY}\n"
@@ -467,52 +464,10 @@ def _server_script_snapshot(*, gpu_probe_available: bool = True) -> dict[str, ob
     }
 
 
-def _server_script_endpoint(inventory: InventoryConfig) -> EndpointConfig:
-    return inventory.endpoints[0].model_copy(update={"observation_profile": "server-script-v1"})
-
-
-def test_server_script_collector_uses_one_immutable_entry_and_imports_processes(
-    inventory: InventoryConfig,
-) -> None:
-    calls: list[str] = []
-
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
-        assert endpoint.id == "endpoint-a"
-        calls.append(command)
-        return json.dumps(_server_script_snapshot())
-
-    observation = asyncio.run(
-        SSHCollector(inventory, runner=fake_runner).observe_endpoint(_server_script_endpoint(inventory))
-    )
-
-    assert calls == [SERVER_SCRIPT_REMOTE_COMMAND]
-    assert observation.observation_complete is True
-    assert observation.gpus[0].gpu_uuid == "GPU-script-0"
-    assert observation.processes[0].pid == 123
-    assert observation.processes[0].username == "gpu"
-
-
-def test_server_script_collector_keeps_cpu_only_host_online(
-    inventory: InventoryConfig,
-) -> None:
-    async def fake_runner(_endpoint, command):  # type: ignore[no-untyped-def]
-        assert command == SERVER_SCRIPT_REMOTE_COMMAND
-        return json.dumps(_server_script_snapshot(gpu_probe_available=False))
-
-    observation = asyncio.run(
-        SSHCollector(inventory, runner=fake_runner).observe_endpoint(_server_script_endpoint(inventory))
-    )
-
-    assert observation.observation_complete is False
-    assert observation.gpus == []
-    assert observation.processes == []
-    assert observation.host.cpu_count == 64
-
-
 def test_raw_ssh_host_snapshot_forwards_cgroup_line(inventory: InventoryConfig) -> None:
-    async def fake_runner(endpoint, command):  # type: ignore[no-untyped-def]
+    async def fake_runner(endpoint, probe):  # type: ignore[no-untyped-def]
         assert endpoint.id == "endpoint-a"
-        assert command == COMBINED_QUERY
+        assert probe == "endpoint-telemetry"
         return (
             "__SERVERPILOT_GPU__\n"
             f"{GPU_CPU_ONLY}\n"

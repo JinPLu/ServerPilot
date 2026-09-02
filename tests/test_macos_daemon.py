@@ -49,17 +49,17 @@ def _config(tmp_path: Path) -> DaemonConfig:
     )
 
 
-def test_resolve_daemon_config_uses_application_support_and_explicit_executable(
+def test_resolve_daemon_config_uses_application_support_and_the_one_installed_executable(
     tmp_path: Path,
 ) -> None:
-    executable = tmp_path / "serverpilot"
+    executable = tmp_path / ".local/share/uv/tools/serverpilot/bin/serverpilot"
+    executable.parent.mkdir(parents=True, exist_ok=True)
     executable.write_text("#!/bin/sh\n", encoding="utf-8")
     executable.chmod(0o755)
 
     config = resolve_daemon_config(
         {
             "HOME": str(tmp_path),
-            "SERVERPILOT_DAEMON_EXECUTABLE": str(executable),
             "SERVERPILOT_URL": "http://127.0.0.1:8787",
             "SERVERPILOT_DATA_DIR": str(tmp_path / "ignored-data"),
             "SERVERPILOT_DATABASE_PATH": str(tmp_path / "ignored.sqlite3"),
@@ -70,7 +70,7 @@ def test_resolve_daemon_config_uses_application_support_and_explicit_executable(
     assert config.data_dir == tmp_path / "Library/Application Support/ServerPilot"
     assert config.database_path == config.data_dir / "state/serverpilot.sqlite3"
     assert config.inventory_path == config.data_dir / "inventory.yaml"
-    assert config.executable == executable
+    assert config.executable == executable.resolve()
 
 
 @pytest.mark.parametrize(
@@ -86,14 +86,10 @@ def test_resolve_daemon_config_rejects_non_loopback_or_ambiguous_urls(
     tmp_path: Path,
     url: str,
 ) -> None:
-    executable = tmp_path / "serverpilot"
-    executable.write_text("#!/bin/sh\n", encoding="utf-8")
-    executable.chmod(0o755)
     with pytest.raises(DaemonError):
         resolve_daemon_config(
             {
                 "HOME": str(tmp_path),
-                "SERVERPILOT_DAEMON_EXECUTABLE": str(executable),
                 "SERVERPILOT_URL": url,
             }
         )

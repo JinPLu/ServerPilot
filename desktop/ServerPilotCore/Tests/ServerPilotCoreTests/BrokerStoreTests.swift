@@ -170,8 +170,15 @@ import Testing
 
         store.useFixture(snapshot: try Self.snapshot(named: "error"))
 
+        // The cause comes from the broker's closed error code, and the app
+        // adds how long the silence has lasted. It no longer guesses a cause
+        // by matching English substrings in the server's own message.
         #expect(store.snapshot.endpoints.first?.monitorLabel == "连接失败")
-        #expect(store.snapshot.endpoints.first?.monitorDetail == "连接或更新超时 · 检查服务器和 SSH")
+        #expect(store.snapshot.endpoints.first?.monitorErrorCode == "connect_timeout")
+        #expect(
+            store.snapshot.endpoints.first?.monitorDetail
+                == "连接超时 · 检查网络或 VPN · 上次成功 7 分钟前"
+        )
     }
 
     @Test func testFixtureWithOldEndpointTelemetryRemainsLoadedAndReadOnly() throws {
@@ -222,21 +229,24 @@ import Testing
             port: 2201,
             sshUser: "collector",
             workspacePath: "/srv/storyboard",
-            observationProfile: "server-script-v1",
+            observationProfile: "linux",
             suppliedID: ""
         )
 
         #expect(draft.id == "gpu-example-test-p2201")
         #expect(draft.host == "gpu.example.test")
         #expect(draft.workspacePath == "/srv/storyboard")
-        #expect(draft.observationProfile == "server-script-v1")
-        #expect(ObservationProfileRecord.serverCatalogFallback.first { $0.id == draft.observationProfile }?.displayName == "服务器采集脚本")
+        #expect(draft.observationProfile == "linux")
+        #expect(
+            ObservationProfileRecord.serverCatalogFallback
+                .first { $0.id == draft.observationProfile }?.displayName == "Linux 只读采集"
+        )
         #expect(throws: (any Error).self) { try EndpointDraft(
                 host: "",
                 port: 0,
                 sshUser: "collector",
                 workspacePath: "relative/path",
-                observationProfile: "linux-nvidia",
+                observationProfile: "linux",
                 suppliedID: "bad id"
             ) }
     }
@@ -674,7 +684,7 @@ import Testing
             draft: try EndpointUpdateDraft(
                 sshUser: "collector",
                 workspacePath: "/srv/storyboard",
-                observationProfile: "server-script-v1"
+                observationProfile: "linux"
             )
         ) { success, message in
             updateRecorder.success = success
@@ -688,7 +698,7 @@ import Testing
         let updatePayload = try #require(try JSONSerialization.jsonObject(with: updateBody) as? [String: Any])
         #expect(updatePayload["ssh_user"] as? String == "collector")
         #expect(updatePayload["workspace_path"] as? String == "/srv/storyboard")
-        #expect(updatePayload["observation_profile"] as? String == "server-script-v1")
+        #expect(updatePayload["observation_profile"] as? String == "linux")
 
         let keepaliveRecorder = CompletionRecorder()
         store.setEndpointKeepalive(endpoint, enabled: true) { success, message in

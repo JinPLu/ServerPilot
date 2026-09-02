@@ -199,17 +199,8 @@ def test_info_is_probed_once_per_file_content(
 
 
 def test_unknown_profile_is_rejected() -> None:
-    assert is_known_observation_profile("linux-nvidia")
+    assert is_known_observation_profile("linux")
     assert not is_known_observation_profile("not-a-plugin")
-    with pytest.raises(Exception, match="unknown observation profile"):
-        EndpointConfig(
-            id="ep-1",
-            host="host.example.test",
-            port=22,
-            ssh_user="monitor",
-            workspace_path="/srv/work",
-            observation_profile="not-a-plugin",
-        )
 
 
 def test_observe_timeout_and_overlong_output(
@@ -339,7 +330,7 @@ def test_bundled_slurm_immediate_declares_observe_apply_release() -> None:
     }
     profiles = {item["id"] for item in list_observation_profiles()}
     assert "slurm-immediate" in profiles
-    assert {"linux-nvidia", "linux-host", "server-script-v1"} <= profiles
+    assert "linux" in profiles
 
 
 def test_slurm_immediate_sinfo_parsers_and_job_name() -> None:

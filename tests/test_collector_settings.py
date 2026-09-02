@@ -9,7 +9,6 @@ from sqlalchemy import select
 from serverpilot.models import RuntimeSetting
 from serverpilot.schemas import CollectorSettingsUpdate
 from serverpilot.service import BrokerService
-from tests.helpers import observation
 
 
 def test_collector_setting_is_persisted_and_restored(
@@ -18,7 +17,7 @@ def test_collector_setting_is_persisted_and_restored(
     initial = service.collector_settings(admin)["data"]
     assert initial == {
         "interval_seconds": 10,
-        "stale_after_seconds": 30,
+        "stale_after_seconds": 40,
         "allowed_intervals": [5, 10, 30],
     }
 
@@ -28,7 +27,7 @@ def test_collector_setting_is_persisted_and_restored(
         idempotency_key="collector-interval-5",
     )
     assert changed["settings"]["interval_seconds"] == 5
-    assert changed["settings"]["stale_after_seconds"] == 15
+    assert changed["settings"]["stale_after_seconds"] == 35
     assert service.collector_interval_seconds() == 5
 
     replay = service.update_collector_settings(
@@ -45,11 +44,10 @@ def test_collector_setting_is_persisted_and_restored(
 
     restarted_inventory = inventory.model_copy(deep=True)
     restarted_inventory.collector.interval_seconds = 10
-    restarted_inventory.collector.stale_after_seconds = 30
     restarted = BrokerService(service.database, restarted_inventory)
     restarted.initialize()
     assert restarted.collector_interval_seconds() == 5
-    assert restarted.inventory.collector.stale_after_seconds == 15
+    assert restarted.inventory.collector.stale_after_seconds == 35
 
 
 def test_collector_setting_commit_failure_does_not_mutate_runtime(
@@ -70,7 +68,7 @@ def test_collector_setting_commit_failure_does_not_mutate_runtime(
             )
 
     assert service.collector_interval_seconds() == 10
-    assert service.inventory.collector.stale_after_seconds == 30
+    assert service.inventory.collector.stale_after_seconds == 40
     with service.database.session() as session:
         assert session.get(RuntimeSetting, "collector_interval_seconds") is None
 
@@ -106,63 +104,7 @@ def test_collector_settings_api_requires_supported_value_and_idempotency(build_a
             json={"interval_seconds": 5},
         )
         assert response.status_code == 200
-        assert response.json()["settings"]["stale_after_seconds"] == 15
-
-
-def test_failing_endpoint_is_backed_off_but_healthy_ones_stay_every_cycle(service, admin) -> None:
-    """A host that stopped answering must not cost a connect timeout per cycle.
-
-    Backoff changes only the probe rhythm. Admission is already fail-closed
-    through stale telemetry, so the endpoint stays in the inventory every other
-    caller sees, and it returns to the regular cycle on its first success.
-    """
-
-    from datetime import timedelta
-
-    from sqlalchemy import select
-
-    from serverpilot.models import ProviderState
-    from serverpilot.service import DEGRADED_ENDPOINT_PROBE_SECONDS
-    from serverpilot.timeutil import utcnow
-
-    service.ingest_observation(observation("endpoint-a", count=1))
-    service.ingest_observation(observation("endpoint-b", count=1))
-    assert [item.id for item in service.collector_endpoints_due()] == [
-        "endpoint-a",
-        "endpoint-b",
-    ]
-
-    service.record_provider_failure("endpoint-b", "CollectionError: timed out")
-    with service.database.session() as session:
-        state = session.scalar(
-            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
-        )
-        assert state is not None
-        stale = utcnow() - timedelta(seconds=service.inventory.collector.stale_after_seconds + 60)
-        state.last_success_at = stale
-        state.last_attempt_at = utcnow()
-        session.commit()
-
-    assert [item.id for item in service.collector_endpoints_due()] == ["endpoint-a"]
-    # Every other caller still sees the full inventory: backoff is a rhythm,
-    # not a lifecycle change.
-    assert [item.id for item in service.collector_endpoints()] == [
-        "endpoint-a",
-        "endpoint-b",
-    ]
-
-    with service.database.session() as session:
-        state = session.scalar(
-            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
-        )
-        assert state is not None
-        state.last_attempt_at = utcnow() - timedelta(seconds=DEGRADED_ENDPOINT_PROBE_SECONDS + 1)
-        session.commit()
-
-    assert [item.id for item in service.collector_endpoints_due()] == [
-        "endpoint-a",
-        "endpoint-b",
-    ]
+        assert response.json()["settings"]["stale_after_seconds"] == 35
 
 
 def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: ANN001
@@ -172,8 +114,9 @@ def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: A
     absence window says how long the endpoint's own unbroken complete
     observations must leave a process out before it stops being a fact. The
     second is measured on ``absent_since``, which an outage clears, so it needs
-    no ordering against the first and an inventory that only ever widened
-    ``stale_after_seconds`` keeps loading unchanged.
+    no ordering against the first, and it is unaffected by ``interval_seconds``
+    changes since ``stale_after_seconds`` is now derived from the interval
+    rather than settable independently.
     """
 
     from serverpilot.config import CollectorConfig
@@ -181,8 +124,8 @@ def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: A
     default = CollectorConfig()
     assert default.process_absence_grace_seconds == 60
 
-    widened = CollectorConfig(interval_seconds=10, stale_after_seconds=600)
-    assert widened.stale_after_seconds == 600
+    widened = CollectorConfig(interval_seconds=10)
+    assert widened.stale_after_seconds == 40
     assert widened.process_absence_grace_seconds == 60
 
     service.update_collector_settings(
@@ -190,7 +133,7 @@ def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: A
         CollectorSettingsUpdate(interval_seconds=30),
         idempotency_key="collector-interval-30-order",
     )
-    assert service.inventory.collector.stale_after_seconds == 90
+    assert service.inventory.collector.stale_after_seconds == 60
     assert service.inventory.collector.process_absence_grace_seconds == 60
 
 

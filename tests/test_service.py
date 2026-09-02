@@ -486,12 +486,10 @@ def test_endpoint_identity_is_enforced(service, admin) -> None:
         EndpointUpdate(
             ssh_user="gpu-updated",
             workspace_path="/srv/project-new-updated",
-            observation_profile="server-script-v1",
         ),
         idempotency_key="endpoint-update",
     )
     assert updated["endpoint"]["ssh_user"] == "gpu-updated"
-    assert updated["endpoint"]["observation_profile"] == "server-script-v1"
     assert updated["endpoint"]["workspace_path"] == "/srv/project-new-updated"
     paused = service.pause_endpoint(admin, "endpoint-new", idempotency_key="endpoint-pause")
     assert paused["endpoint"]["lifecycle_state"] == "draining"

@@ -215,13 +215,7 @@ class FakeTargetedCollector:
         ]
         return [*keepers, *foreign]
 
-    async def collect_once(
-        self,
-        service,
-        *,
-        endpoints=None,
-        stagger_seconds: float = 0.0,
-    ):  # type: ignore[no-untyped-def]
+    async def collect_selected(self, service, endpoints):  # type: ignore[no-untyped-def]
         assert endpoints is not None
         endpoint_ids = [endpoint.id for endpoint in endpoints]
         self.calls.append(endpoint_ids)
@@ -317,52 +311,22 @@ class BlockingKeepaliveAdapter(FakeKeepaliveAdapter):
 class PeriodicFakeCollector:
     def __init__(self) -> None:
         self.calls = 0
-        self.call_options: list[float] = []
         self.second_collection = threading.Event()
+        self.control_dir = Path("/tmp/serverpilot-test-periodic-collector")
 
-    async def collect_once(
-        self,
-        service,
-        *,
-        endpoints=None,
-        stagger_seconds: float = 0.0,
-    ):  # type: ignore[no-untyped-def]
-        assert endpoints is not None
+    async def observe_and_ingest(self, service, endpoint):  # type: ignore[no-untyped-def]
         self.calls += 1
-        self.call_options.append(stagger_seconds)
-        results = {
-            endpoint.id: service.ingest_observation(
-                observation(
-                    endpoint.id,
-                    count=1,
-                    gpu_uuids=[GPU_UUIDS[0]],
-                    observed_at=datetime.now(UTC),
-                )
+        result = service.ingest_observation(
+            observation(
+                endpoint.id,
+                count=1,
+                gpu_uuids=[GPU_UUIDS[0]],
+                observed_at=datetime.now(UTC),
             )
-            for endpoint in endpoints
-        }
+        )
         if self.calls >= 2:
             self.second_collection.set()
-        return results
-
-
-class SchedulingCollector:
-    def __init__(self) -> None:
-        self.calls: list[tuple[list[str], float]] = []
-        self.collected = threading.Event()
-
-    async def collect_once(
-        self,
-        _service,
-        *,
-        endpoints=None,
-        stagger_seconds: float = 0.0,
-    ):  # type: ignore[no-untyped-def]
-        assert endpoints is not None
-        endpoint_ids = [endpoint.id for endpoint in endpoints]
-        self.calls.append((endpoint_ids, stagger_seconds))
-        self.collected.set()
-        return {endpoint_id: {"error": "Skipped"} for endpoint_id in endpoint_ids}
+        return result
 
 
 class WorkloadConflictCollector(FakeTargetedCollector):
@@ -370,13 +334,7 @@ class WorkloadConflictCollector(FakeTargetedCollector):
         super().__init__(adapter)
         self.conflict_created = False
 
-    async def collect_once(
-        self,
-        service,
-        *,
-        endpoints=None,
-        stagger_seconds: float = 0.0,
-    ):  # type: ignore[no-untyped-def]
+    async def collect_selected(self, service, endpoints):  # type: ignore[no-untyped-def]
         if self.adapter.active_pids and not self.conflict_created:
             second_gpu_id = f"endpoint-a:{GPU_UUIDS[1]}"
             service.create_request(
@@ -398,11 +356,7 @@ class WorkloadConflictCollector(FakeTargetedCollector):
                 activate_if_allocated=True,
             )
             self.conflict_created = True
-        return await super().collect_once(
-            service,
-            endpoints=endpoints,
-            stagger_seconds=stagger_seconds,
-        )
+        return await super().collect_selected(service, endpoints)
 
 
 def _keepalive_app(
@@ -507,13 +461,21 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
     assert collector.calls[-1] == ["endpoint-a"]
 
 
-def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcile(
+def test_periodic_collection_reconciles_then_resumes_without_a_duplicate_reconcile(
     build_app, inventory: InventoryConfig
 ) -> None:
+    """A collection that lands while a reconcile is in flight does not queue a second.
+
+    Collection must not wait for the reconcile it triggered, and must not stack
+    up another one for the same endpoint behind it. The assertions below are in
+    this order on purpose: the second collection has to be observed *while* the
+    first reconcile is still blocked, because that is the only moment at which
+    a duplicate could be created.
+    """
+
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = True
     configured.collector.interval_seconds = 1
-    configured.collector.stale_after_seconds = 3
     configured.endpoints = [configured.endpoints[0]]
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].keepalive_policy = "idle_keepalive"
@@ -530,8 +492,8 @@ def test_periodic_collection_does_not_wait_or_queue_duplicate_keepalive_reconcil
 
     with TestClient(app):
         assert adapter.started.wait(timeout=2)
+        # Still blocked in the first reconcile, and collection has moved on.
         assert collector.second_collection.wait(timeout=2)
-        assert collector.call_options[:2] == [0.0, 0.0]
         assert adapter.calls == [("endpoint-a", True, (GPU_UUIDS[0],))]
         adapter.release()
         assert adapter.cleaned.wait(timeout=2)
@@ -781,47 +743,12 @@ def test_claims_on_different_server_groups_do_not_block_each_other(
     ]
 
 
-def test_periodic_collection_starts_four_endpoints_together_with_existing_limit(
-    build_app, inventory: InventoryConfig
-) -> None:
-    configured = inventory.model_copy(deep=True)
-    configured.collector.enabled = True
-    configured.collector.interval_seconds = 1
-    configured.collector.stale_after_seconds = 3
-    base_endpoint = configured.endpoints[0]
-    configured.endpoints = [
-        base_endpoint.model_copy(
-            update={
-                "id": f"endpoint-{suffix}",
-                "host": f"gpu-{suffix}.example.test",
-            }
-        )
-        for suffix in ("a", "b", "c", "d")
-    ]
-    collector = SchedulingCollector()
-    app = build_app(
-        "parallel-collector",
-        inventory_config=configured,
-        project_root=Path(__file__).resolve().parents[1],
-        collector=collector,
-    )
-
-    with TestClient(app):
-        assert collector.collected.wait(timeout=2)
-
-    assert collector.calls[0] == (
-        ["endpoint-a", "endpoint-b", "endpoint-c", "endpoint-d"],
-        0.0,
-    )
-
-
 def test_shutdown_waits_for_inflight_start_cleanup_without_leaving_ownership(
     build_app, inventory: InventoryConfig
 ) -> None:
     configured = inventory.model_copy(deep=True)
     configured.collector.enabled = True
     configured.collector.interval_seconds = 1
-    configured.collector.stale_after_seconds = 3
     configured.endpoints = [configured.endpoints[0]]
     configured.endpoints[0].keepalive_adapter_id = "server-script-v1"
     configured.endpoints[0].keepalive_policy = "idle_keepalive"
@@ -1929,7 +1856,7 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
 
     async def next_collection() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
-        await collector.collect_once(app.state.service, endpoints=[endpoint])
+        await collector.collect_selected(app.state.service, [endpoint])
         await app.state.reconcile_endpoint_keepalive(
             app.state.service.local_actor("agent-a"),
             "endpoint-a",
@@ -2006,7 +1933,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
 
     async def collect_restarted_workers() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
-        await collector.collect_once(app.state.service, endpoints=[endpoint])
+        await collector.collect_selected(app.state.service, [endpoint])
 
     asyncio.run(collect_restarted_workers())
     unavailable = tools.gpu_status()
@@ -2053,7 +1980,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
 
     async def restore_then_disable() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
-        await collector.collect_once(app.state.service, endpoints=[endpoint])
+        await collector.collect_selected(app.state.service, [endpoint])
         await app.state.reconcile_endpoint_keepalive(
             app.state.service.local_actor("agent-a"),
             "endpoint-a",
@@ -2111,7 +2038,7 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
 
     async def collect_then_recover() -> None:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
-        await collector.collect_once(app.state.service, endpoints=[endpoint])
+        await collector.collect_selected(app.state.service, [endpoint])
         await app.state.reconcile_endpoint_keepalive(
             app.state.service.local_actor("agent-a"),
             "endpoint-a",
@@ -2152,7 +2079,7 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
 
     async def collect_then_reconcile() -> dict:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
-        await collector.collect_once(app.state.service, endpoints=[endpoint])
+        await collector.collect_selected(app.state.service, [endpoint])
         return await app.state.reconcile_endpoint_keepalive(
             app.state.service.local_actor("agent-a"),
             "endpoint-a",

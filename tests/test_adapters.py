@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from typing import Any
 
 import pytest
@@ -10,11 +11,10 @@ from serverpilot.adapters import (
     MAX_RAW_SSH_STDERR_BYTES,
     MAX_RAW_SSH_STDOUT_BYTES,
     RAW_SSH_COMBINED_QUERY,
-    RAW_SSH_HOST_ONLY_QUERY,
     AdapterRegistryError,
     RawSSHObservationAdapter,
+    observation_ssh_argv,
 )
-from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
 from serverpilot.config import EndpointConfig
 
 
@@ -32,7 +32,7 @@ def test_registry_is_sealed_to_known_adapters() -> None:
 
 
 def test_raw_ssh_adapter_runs_fixed_ssh_invocation(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     calls: list[tuple[Any, ...]] = []
 
@@ -56,29 +56,19 @@ def test_raw_ssh_adapter_runs_fixed_ssh_invocation(
         RawSSHObservationAdapter().run_probe(
             endpoint,
             probe="endpoint-telemetry",
-            connect_timeout_seconds=7,
+            control_dir=tmp_path,
         )
     )
 
     assert result.stdout == "ok\n"
     assert calls == [
-        (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ConnectTimeout=7",
-            "-p",
-            "2202",
-            "gpu@gpu.example.test",
-            RAW_SSH_COMBINED_QUERY,
+        observation_ssh_argv(
+            endpoint, control_dir=tmp_path, remote_command=RAW_SSH_COMBINED_QUERY
         )
     ]
 
 
-def test_raw_ssh_adapter_rejects_arbitrary_probe() -> None:
+def test_raw_ssh_adapter_rejects_arbitrary_probe(tmp_path: Path) -> None:
     adapter = RawSSHObservationAdapter()
     endpoint = EndpointConfig(
         id="endpoint-a", host="gpu.example.test", port=2202, ssh_user="gpu",
@@ -86,98 +76,13 @@ def test_raw_ssh_adapter_rejects_arbitrary_probe() -> None:
     )
 
     with pytest.raises(ValueError, match="unknown raw SSH probe"):
-        asyncio.run(adapter.run_probe(endpoint, probe="arbitrary", connect_timeout_seconds=7))  # type: ignore[arg-type]
-
-
-def test_raw_ssh_adapter_uses_the_configured_sealed_observation_profile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[Any, ...]] = []
-
-    class FakeProcess:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"ok\n", b""
-
-    async def fake_create_subprocess_exec(*command: Any, **_kwargs: Any) -> FakeProcess:
-        calls.append(command)
-        return FakeProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    endpoint = EndpointConfig(
-        id="endpoint-host",
-        host="host.example.test",
-        port=22,
-        ssh_user="monitor",
-        workspace_path="/srv/project-host",
-        observation_profile="linux-host",
-    )
-
-    asyncio.run(
-        RawSSHObservationAdapter().run_probe(
-            endpoint,
-            probe="endpoint-telemetry",
-            connect_timeout_seconds=7,
+        asyncio.run(
+            adapter.run_probe(endpoint, probe="arbitrary", control_dir=tmp_path)  # type: ignore[arg-type]
         )
-    )
-
-    assert calls[0][-1] == RAW_SSH_HOST_ONLY_QUERY
-    assert "nvidia-smi" not in RAW_SSH_HOST_ONLY_QUERY
-
-
-def test_raw_ssh_adapter_uses_the_exact_server_script_entry_invocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[tuple[Any, ...]] = []
-
-    class FakeProcess:
-        returncode = 0
-
-        async def communicate(self) -> tuple[bytes, bytes]:
-            return b"{}\n", b""
-
-    async def fake_create_subprocess_exec(*command: Any, **_kwargs: Any) -> FakeProcess:
-        calls.append(command)
-        return FakeProcess()
-
-    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
-    endpoint = EndpointConfig(
-        id="endpoint-script",
-        host="script.example.test",
-        port=22,
-        ssh_user="monitor",
-        workspace_path="/srv/project-script",
-        observation_profile="server-script-v1",
-    )
-
-    asyncio.run(
-        RawSSHObservationAdapter().run_probe(
-            endpoint,
-            probe="endpoint-telemetry",
-            connect_timeout_seconds=7,
-        )
-    )
-
-    assert calls == [
-        (
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            "ConnectTimeout=7",
-            "-p",
-            "22",
-            "monitor@script.example.test",
-            SERVER_SCRIPT_REMOTE_COMMAND,
-        )
-    ]
 
 
 def test_raw_ssh_adapter_bounds_and_drains_noisy_remote_streams(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     class FakeProcess:
         returncode = 0
@@ -206,7 +111,7 @@ def test_raw_ssh_adapter_bounds_and_drains_noisy_remote_streams(
         RawSSHObservationAdapter().run_probe(
             endpoint,
             probe="endpoint-telemetry",
-            connect_timeout_seconds=7,
+            control_dir=tmp_path,
         )
     )
 
@@ -217,8 +122,11 @@ def test_raw_ssh_adapter_bounds_and_drains_noisy_remote_streams(
 
 
 def test_raw_ssh_adapter_times_out_and_reaps_a_hung_connected_probe(
-    monkeypatch: pytest.MonkeyPatch,
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
+    from serverpilot import adapters as adapters_module
+    from serverpilot.config import SSHBudgets
+
     class FakeProcess:
         returncode: int | None = None
         killed = False
@@ -244,6 +152,13 @@ def test_raw_ssh_adapter_times_out_and_reaps_a_hung_connected_probe(
         return process
 
     monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    # The probe deadline is a fixed sum of the two SSH budgets; shrink it here
+    # so the timeout path can be exercised without a real 30-second wait.
+    monkeypatch.setattr(
+        adapters_module,
+        "SSH_BUDGETS",
+        SSHBudgets(connect_seconds=0, command_seconds=0.01),  # type: ignore[arg-type]
+    )
     endpoint = EndpointConfig(
         id="endpoint-a", host="gpu.example.test", port=22, ssh_user="gpu",
         workspace_path="/srv/project-a",
@@ -257,7 +172,7 @@ def test_raw_ssh_adapter_times_out_and_reaps_a_hung_connected_probe(
             RawSSHObservationAdapter().run_probe(
                 endpoint,
                 probe="endpoint-telemetry",
-                connect_timeout_seconds=0.01,  # type: ignore[arg-type]
+                control_dir=tmp_path,
             )
         )
 

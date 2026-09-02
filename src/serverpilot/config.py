@@ -20,12 +20,76 @@ KeepalivePolicy = Literal["disabled", "idle_keepalive"]
 RESERVED_SYSTEM_ID = "serverpilot-system"
 
 
+@dataclass(frozen=True, slots=True)
+class SSHBudgets:
+    """The time an observation may take, split by what each phase can do.
+
+    One number cannot mean both "how long may a TCP connection and an
+    authentication take" and "how long may the whole observation take".  It did,
+    and a probe that spent its budget reaching the host had none left to run
+    `nvidia-smi`, so a slow network read as a dead server.  `connect` is handed
+    to OpenSSH, which enforces it on connection setup alone; `command` is what
+    the remote work gets afterwards.  Our own wall clock is their sum, so an
+    expiry is unambiguous: ssh would already have exited with a message inside
+    the connect budget, therefore a wall-clock expiry is always the command.
+    """
+
+    connect_seconds: int = 10
+    command_seconds: int = 20
+    # A master outlives an interval by a wide margin, so a healthy endpoint
+    # never pays a handshake twice.  It is short enough that a socket left by a
+    # crashed daemon stops being interesting within minutes.
+    control_persist_seconds: int = 300
+    # A channel whose peer stopped answering (laptop sleep, VPN drop) must die
+    # and unlink its socket before the next probe reaches for it, or the probe
+    # inherits a dead connection and waits out the whole command budget.
+    server_alive_interval_seconds: int = 5
+    server_alive_count_max: int = 3
+
+    @property
+    def probe_deadline_seconds(self) -> int:
+        """The single wall clock one observation gets."""
+
+        return self.connect_seconds + self.command_seconds
+
+    @property
+    def master_dead_after_seconds(self) -> int:
+        return self.server_alive_interval_seconds * self.server_alive_count_max
+
+
+SSH_BUDGETS = SSHBudgets()
+
+
+def default_control_dir(home: Path | None = None) -> Path:
+    """Where the daemon keeps its own multiplexed SSH sockets.
+
+    Deliberately not the user's own control directory: a human-opened master
+    (a cluster that costs a one-time authenticator code per login, say) must
+    never be reused, evicted, or closed by the daemon.
+    """
+
+    root = home or Path.home()
+    return (root / "Library/Application Support/ServerPilot/ssh").resolve()
+
+
+def stale_after_seconds(interval_seconds: int) -> int:
+    """When silence from an endpoint stops being an interval and becomes news.
+
+    The only definition.  A host is not late until one full cycle plus one full
+    probe could have completed and did not; deriving it from the interval alone
+    (it used to be `interval * 3`) made the threshold shorter than a single
+    legal slow probe, so a healthy host that answered slowly was reported
+    unreachable.
+    """
+
+    return interval_seconds + SSH_BUDGETS.probe_deadline_seconds
+
+
 class CollectorConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     enabled: bool = False
     interval_seconds: int = Field(default=10, ge=1, le=3600)
-    stale_after_seconds: int = Field(default=30, ge=2, le=86400)
     # How long a compute process stays a current fact after its last sighting.
     # The compute-app probe is separate from the GPU query and returns an empty
     # list both for "nothing runs here" and for "this PID namespace cannot see
@@ -39,13 +103,10 @@ class CollectorConfig(BaseModel):
     # counting toward it, so the window can be short enough that a card its
     # owner has released comes back quickly.
     process_absence_grace_seconds: int = Field(default=60, ge=30, le=3600)
-    ssh_connect_timeout_seconds: int = Field(default=8, ge=1, le=120)
 
-    @model_validator(mode="after")
-    def stale_after_interval(self) -> CollectorConfig:
-        if self.stale_after_seconds < self.interval_seconds:
-            raise ValueError("stale_after_seconds must be >= interval_seconds")
-        return self
+    @property
+    def stale_after_seconds(self) -> int:
+        return stale_after_seconds(self.interval_seconds)
 
 
 class ProjectConfig(BaseModel):
@@ -106,7 +167,12 @@ class EndpointConfig(BaseModel):
     # A closed profile chooses the probe. Built-in ids plus discovered plugin
     # ids are accepted; this is not a command, shell fragment, key path, or
     # SSH option supplied by inventory.
-    observation_profile: str = Field(default="linux-nvidia", min_length=1, max_length=40)
+    #
+    # Whether the name resolves is checked where an endpoint is written, not
+    # here.  Validating it here meant building a config object could fork a
+    # plugin's `info`, so listing the endpoints to collect could fail on one bad
+    # row and take every other endpoint's collection down with it.
+    observation_profile: str = Field(default="linux", min_length=1, max_length=40)
     # Optional sealed lifecycle adapter. None means keepalive is completely off.
     keepalive_adapter_id: KeepaliveAdapterId | None = None
     # Desired policy only; actual ownership remains a per-GPU lease and starts
@@ -136,15 +202,6 @@ class EndpointConfig(BaseModel):
         if value is None:
             return None
         return absolute_single_line_path(value)
-
-    @field_validator("observation_profile")
-    @classmethod
-    def known_observation_profile(cls, value: str) -> str:
-        from serverpilot.plugins import is_known_observation_profile
-
-        if not is_known_observation_profile(value):
-            raise ValueError(f"unknown observation profile: {value}")
-        return value
 
     @model_validator(mode="after")
     def idle_keepalive_requires_adapter(self) -> EndpointConfig:

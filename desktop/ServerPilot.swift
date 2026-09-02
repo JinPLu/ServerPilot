@@ -4648,7 +4648,7 @@ private struct AddServerSheet: View {
     @State private var serverGroupID = ""
     @State private var inheritGroupPath = true
     @State private var workspacePath = ""
-    @State private var observationProfile = "server-script-v1"
+    @State private var observationProfile = "linux"
     @State private var validationMessage: String?
     @State private var isSubmitting = false
 

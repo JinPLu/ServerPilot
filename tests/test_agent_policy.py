@@ -139,9 +139,7 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
         "gpu_release",
         "gpu_add_server",
         "gpu_update_server",
-        "linux-nvidia",
-        "linux-host",
-        "server-script-v1",
+        "linux",
         "human-readable",
         "ui title",
         "ssh",
@@ -176,9 +174,12 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # from a partition advertising twenty-seven free and never gets them,
     # and that a grouped delegated cluster is claimed by server_group_id,
     # or it pins that host with server_id and the claim never reaches the
-    # plugin.
+    # plugin.  It moved from 420 to 430 when the observation-layer redesign
+    # collapsed three observation profiles into one and added a standing
+    # reminder to call gpu_status before allocating rather than trust a stale
+    # read from earlier in the conversation.
     # Contract sentences are never cut to fit this bound.
-    assert len(adapter.split()) < 420
+    assert len(adapter.split()) < 430
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",
@@ -264,7 +265,14 @@ def test_global_policy_describes_the_no_setup_routine_gpu_path() -> None:
     # is what happened. The sentence has to say both halves: asking keeps the
     # claim, and the cards it is not using still come back on their own, or the
     # caller learns to poll instead of to release.
-    assert len(mcp.instructions) < 2900
+    # It moved from 2900 to 3000 when release and task stopped being
+    # under-specified. The text named gpu_release only for the failure case, so
+    # a caller finishing normally read release as optional and left the lease
+    # held; it named task only as "the task name", so a caller wrote a short
+    # label instead of what the lease is actually for. It also gained a
+    # standing reminder to call gpu_status before allocating rather than trust
+    # a stale read from earlier in the conversation.
+    assert len(mcp.instructions) < 3000
     for removed_routine_step in (
         "gpu_bind_observed_workload",
         "gpu_renew_lease",

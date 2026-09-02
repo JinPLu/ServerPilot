@@ -82,18 +82,21 @@ def _loopback_url(value: str) -> tuple[str, int, str]:
 
 
 def _daemon_executable(environment: Mapping[str, str], home: Path) -> Path:
-    configured = environment.get("SERVERPILOT_DAEMON_EXECUTABLE")
-    candidates = [
-        Path(configured).expanduser() if configured else None,
-        home / ".local/share/uv/tools/serverpilot/bin/serverpilot",
-        Path(shutil.which("serverpilot") or ""),
-        Path(sys.executable).with_name("serverpilot"),
-    ]
-    for candidate in candidates:
-        if candidate and candidate.is_file() and os.access(candidate, os.X_OK):
-            return candidate.resolve()
+    """The one install the daemon may run from.
+
+    This used to try four candidates, including whatever was first on PATH and
+    a sibling of the current interpreter. Two builds on one machine therefore
+    took turns writing the same launch agent, under the same label, at the same
+    port, into the same log file, and each restarted the other -- which is what
+    filled the log with address-already-in-use and unresolvable-revision errors
+    that belonged to neither build alone.
+    """
+
+    executable = home / ".local/share/uv/tools/serverpilot/bin/serverpilot"
+    if executable.is_file() and os.access(executable, os.X_OK):
+        return executable.resolve()
     raise DaemonError(
-        "cannot find a durable serverpilot executable; install it with "
+        f"no serverpilot executable at {executable}; install it with "
         "`uv tool install --force /path/to/serverpilot`"
     )
 
@@ -478,13 +481,28 @@ class MacOSDaemonManager:
             + (f": {details}" if details else "")
         )
 
+    def _remove_legacy_plist(self) -> bool:
+        """Delete the retired agent's plist, not just unload it.
+
+        Unloading a plist that stays on disk with RunAtLoad only postpones it to
+        the next login, where it binds the same port this daemon wants and the
+        loser logs an address conflict nobody can trace back to it.
+        """
+
+        legacy_plist = self.config.plist_path.with_name(f"{LEGACY_DAEMON_LABEL}.plist")
+        if not legacy_plist.exists():
+            return False
+        legacy_plist.unlink()
+        return True
+
     def _bootout_legacy_if_loaded(self) -> bool:
         if not self._legacy_loaded():
-            return False
+            return self._remove_legacy_plist()
         result = self._launchctl("bootout", self.legacy_service_target, check=False)
         deadline = time.monotonic() + 3.0
         while time.monotonic() < deadline:
             if not self._legacy_loaded():
+                self._remove_legacy_plist()
                 return True
             time.sleep(0.05)
         details = (result.stderr or result.stdout).strip()
@@ -667,6 +685,11 @@ class MacOSDaemonManager:
             "loaded": self._loaded(),
             "live": live is not None,
             "ready": ready is not None,
+            # Which release is installed and which one is answering are
+            # different facts, and the status that could not tell them apart is
+            # exactly the status a restart-after-upgrade needs to be checked by.
+            "installed_version": __version__,
+            "running_version": live.get("version") if live else None,
             "base_url": self.config.base_url,
             "data_dir": str(self.config.data_dir),
             "database_path": str(self.config.database_path),

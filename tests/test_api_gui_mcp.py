@@ -595,7 +595,7 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
     )
     assert created.status_code == 200
     assert created.json()["endpoint"]["lifecycle_state"] == "active"
-    assert created.json()["endpoint"]["observation_profile"] == "linux-nvidia"
+    assert created.json()["endpoint"]["observation_profile"] == "linux"
     assert created.json()["endpoint"]["workspace_path"] == "/srv/endpoint-lifecycle"
     duplicate = client.post(
         "/api/v1/endpoints",
@@ -719,15 +719,13 @@ def test_mcp_exposes_required_tools() -> None:
         "pass lease_id for per-card telemetry on cards you hold."
     )
     add_schema = by_name["gpu_add_server"].inputSchema
-    # A server registered without saying what it is is a GPU host. The old
-    # default named the one profile that cannot work on a plain NVIDIA box --
-    # the host-carries-its-own-script contract -- so a caller that omitted the
-    # field registered a machine that connects and reports no GPUs.
-    assert add_schema["properties"]["observation_profile"]["default"] == "linux-nvidia"
+    # A server registered without saying what it is is a GPU host. The one
+    # sealed profile works for any ordinary machine reached over SSH, with or
+    # without NVIDIA GPUs, so a caller that omits the field still registers a
+    # working host.
+    assert add_schema["properties"]["observation_profile"]["default"] == "linux"
     add_profile = add_schema["properties"]["observation_profile"]["description"]
-    assert "linux-nvidia" in add_profile
-    assert "linux-host" in add_profile
-    assert "server-script-v1" in add_profile
+    assert "linux" in add_profile
     assert "plugin" in add_profile.lower()
     # Both tools must be able to place a host in a group. The domain and REST
     # have carried server_group_id since grouping existed; MCP exposed it on
@@ -818,7 +816,7 @@ def test_mcp_endpoint_administration_uses_rest_with_its_own_replay_key(monkeypat
             "ssh_alias": None,
             "workspace_path": "/srv/server-a",
             "server_group_id": None,
-            "observation_profile": "linux-nvidia",
+            "observation_profile": "linux",
             "labels": [],
             "storage_group": None,
             "expected_gpu_count": None,
@@ -1784,12 +1782,10 @@ class _RegistrationCollector:
         self.error = error
         self.collected: list[list[str]] = []
 
-    async def collect_once(
+    async def collect_selected(
         self,
         service,  # noqa: ANN001
-        *,
-        endpoints=None,  # noqa: ANN001
-        stagger_seconds: float = 0.0,
+        endpoints,  # noqa: ANN001
     ) -> dict[str, object]:
         self.collected.append([endpoint.id for endpoint in endpoints or []])
         for endpoint in endpoints or []:

@@ -9,11 +9,13 @@ from __future__ import annotations
 import asyncio
 import csv
 import json
+import logging
 import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from pathlib import Path
 from typing import Any, NamedTuple
 
 from serverpilot.adapters import (
@@ -30,17 +32,18 @@ from serverpilot.adapters import (
     RawSSHProbe,
 )
 from serverpilot.collector_protocol import (
-    SERVER_SCRIPT_REMOTE_COMMAND,
     SERVER_SCRIPT_SCHEMA_VERSION,
     remember_collector_implementation_version,
 )
-from serverpilot.config import EndpointConfig, InventoryConfig
+from serverpilot.config import EndpointConfig, InventoryConfig, default_control_dir
 from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
 from serverpilot.service import BrokerService
 from serverpilot.timeutil import utcnow
 
 # Compatibility alias for deterministic test runners. Production collection
 # passes a typed probe kind to the sealed adapter instead of a command string.
+logger = logging.getLogger(__name__)
+
 COMBINED_QUERY = RAW_SSH_COMBINED_QUERY
 
 # The adapter enforces this bound for real SSH subprocesses.  The collector
@@ -53,6 +56,75 @@ MAX_SERVER_SCRIPT_PROCESS_COUNT = 16_384
 
 class CollectionError(RuntimeError):
     pass
+
+
+class ProbeFailed(CollectionError):
+    """An SSH probe that ran and came back non-zero, with what it came back with.
+
+    Kept apart from a plain ``CollectionError`` so the failure is classified
+    once, here, by the code that chose the ssh options and pinned LogLevel --
+    not a second time by a client matching English substrings.
+    """
+
+    def __init__(
+        self, message: str, *, returncode: int, stderr: str, reached_remote: bool
+    ) -> None:
+        super().__init__(message)
+        self.returncode = returncode
+        self.stderr = stderr
+        self.reached_remote = reached_remote
+
+
+# A closed vocabulary. Every collection failure is exactly one of these, and
+# nothing downstream parses a message to find out which.
+_SSH_STDERR_CODES: tuple[tuple[str, str], ...] = (
+    ("host key verification failed", "host_key_rejected"),
+    ("remote host identification has changed", "host_key_rejected"),
+    ("no matching host key", "host_key_rejected"),
+    ("permission denied", "auth_failed"),
+    ("too many authentication failures", "auth_failed"),
+    ("could not resolve hostname", "dns_failure"),
+    ("name or service not known", "dns_failure"),
+    ("nodename nor servname provided", "dns_failure"),
+    ("connection refused", "connection_refused"),
+    ("no route to host", "network_unreachable"),
+    ("network is unreachable", "network_unreachable"),
+    ("connection timed out", "connect_timeout"),
+    ("operation timed out", "connect_timeout"),
+    ("connection closed by", "connection_reset"),
+    ("connection reset", "connection_reset"),
+)
+
+
+def classify_failure(exc: BaseException) -> str:
+    """Name one collection failure, from the closed vocabulary above.
+
+    The discriminator that matters is ``reached_remote``: ssh reports its own
+    failures as exit code 255, but 255 is also a legal exit code for the remote
+    command, so the code alone cannot tell "I never got there" from "the host
+    answered badly". Seeing our own section marker in stdout proves the remote
+    shell ran.
+    """
+
+    from serverpilot.plugins import PluginError
+
+    if isinstance(exc, TimeoutError):
+        return "command_timeout"
+    if isinstance(exc, PluginError):
+        return "plugin_error"
+    if isinstance(exc, ProbeFailed):
+        if exc.reached_remote:
+            return "remote_error"
+        lowered = exc.stderr.lower()
+        for needle, code in _SSH_STDERR_CODES:
+            if needle in lowered:
+                return code
+        return "ssh_failed"
+    if isinstance(exc, CollectionError):
+        return "parse_error"
+    if isinstance(exc, ValueError):
+        return "parse_error"
+    return "local_error"
 
 
 _PCI_BUS_ID_PATTERN = re.compile(
@@ -70,7 +142,7 @@ def _pci_bus_key(value: str | None) -> tuple[int, int, int, int]:
     )
 
 
-Runner = Callable[[EndpointConfig, str], Awaitable[str]]
+Runner = Callable[[EndpointConfig, RawSSHProbe], Awaitable[str]]
 
 
 def _no_duplicate_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -861,43 +933,44 @@ def parse_ps_output(raw: str, observed_at) -> dict[int, tuple[str | None, object
 async def default_runner(
     endpoint: EndpointConfig,
     probe: RawSSHProbe,
-    connect_timeout_seconds: int = 8,
+    *,
+    control_dir: Path,
 ) -> str:
     """Execute a sealed, read-only SSH probe without a local shell."""
 
     result = await RAW_SSH_OBSERVATION_ADAPTER.run_probe(
-        endpoint,
-        probe=probe,
-        connect_timeout_seconds=connect_timeout_seconds,
+        endpoint, probe=probe, control_dir=control_dir
     )
     if result.stdout_truncated or result.stderr_truncated:
         raise CollectionError(f"SSH probe output exceeded bounded limits for {endpoint.id}")
     if result.returncode != 0:
         detail = result.stderr.strip().replace("\n", " ")[:500]
-        raise CollectionError(f"SSH probe failed for {endpoint.id}: {detail or result.returncode}")
+        raise ProbeFailed(
+            f"SSH probe failed for {endpoint.id}: {detail or result.returncode}",
+            returncode=result.returncode,
+            stderr=result.stderr,
+            reached_remote=GPU_SECTION in result.stdout,
+        )
     return result.stdout
 
 
 class SSHCollector:
-    def __init__(self, inventory: InventoryConfig, runner: Runner = default_runner) -> None:
+    def __init__(
+        self,
+        inventory: InventoryConfig,
+        runner: Runner = default_runner,
+        *,
+        control_dir: Path | None = None,
+    ) -> None:
         self.inventory = inventory
         self.runner = runner
+        self.control_dir = control_dir or default_control_dir()
 
-    async def _run(
-        self,
-        endpoint: EndpointConfig,
-        command: str,
-        *,
-        probe: RawSSHProbe,
-    ) -> str:
+    async def _run(self, endpoint: EndpointConfig, *, probe: RawSSHProbe) -> str:
         if self.runner is default_runner:
-            output = await default_runner(
-                endpoint,
-                probe,
-                self.inventory.collector.ssh_connect_timeout_seconds,
-            )
+            output = await default_runner(endpoint, probe, control_dir=self.control_dir)
         else:
-            output = await self.runner(endpoint, command)
+            output = await self.runner(endpoint, probe)
         try:
             output_size = len(output.encode("utf-8"))
         except UnicodeEncodeError as exc:
@@ -919,18 +992,8 @@ class SSHCollector:
                 endpoint_id=endpoint.id,
                 observed_at=observed_at,
             )
-        if endpoint.observation_profile == "server-script-v1":
-            return parse_server_script_snapshot(
-                await self._run(
-                    endpoint,
-                    SERVER_SCRIPT_REMOTE_COMMAND,
-                    probe="endpoint-telemetry",
-                ),
-                endpoint_id=endpoint.id,
-                observed_at=observed_at,
-            )
         gpu_raw, process_raw, process_details_raw, identity_raw, host_raw = parse_combined_probe(
-            await self._run(endpoint, COMBINED_QUERY, probe="endpoint-telemetry")
+            await self._run(endpoint, probe="endpoint-telemetry")
         )
         # CPU-only is a positive discovery result: the NVIDIA runtime is
         # absent, or it successfully reports no rows. A failed query remains
@@ -988,35 +1051,45 @@ class SSHCollector:
             gpu_probe_status=gpu_probe_status,
         )
 
-    async def collect_once(
-        self,
-        service: BrokerService,
-        *,
-        endpoints: list[EndpointConfig] | None = None,
-        stagger_seconds: float = 0.0,
+    async def observe_and_ingest(
+        self, service: BrokerService, endpoint: EndpointConfig
     ) -> dict[str, object]:
-        """Observe every selected endpoint once, concurrently.
+        """Observe one endpoint and record what came back. Never raises.
 
-        A cycle costs as long as the slowest host, not the sum of the hosts.
-        There is no fan-out constant to tune: each endpoint is already bounded
-        by its own connect timeout, and a fixed cap only makes the endpoints
-        past it wait for a host that has stopped answering.
+        One endpoint's failure is its own. This used to be a whole-cycle
+        ``gather`` under one deadline, so six hosts crossed the same line in the
+        same instant whenever anything slowed down, and one host that stopped
+        answering made every other host's answer late.
         """
 
-        async def collect(index: int, endpoint: EndpointConfig) -> tuple[str, dict[str, object]]:
-            if stagger_seconds > 0 and index:
-                await asyncio.sleep(index * stagger_seconds)
-            try:
-                observation = await self.observe_endpoint(endpoint)
-                return endpoint.id, await service.in_domain(service.ingest_observation, observation)
-            except Exception as exc:
-                # Service records only the bounded failure class/message, never SSH secrets.
-                await service.in_domain(service.record_provider_failure, endpoint.id, f"{type(exc).__name__}: {exc}")
-                return endpoint.id, {"error": type(exc).__name__}
+        try:
+            observation = await self.observe_endpoint(endpoint)
+            return await service.in_domain(service.ingest_observation, observation)
+        except Exception as exc:
+            code = classify_failure(exc)
+            # The bounded class and message only; never SSH output or secrets.
+            await service.in_domain(
+                service.record_provider_failure,
+                endpoint.id,
+                f"{type(exc).__name__}: {exc}",
+                code,
+            )
+            logger.warning(
+                "collection failed: %s", code, extra={"endpoint_id": endpoint.id}
+            )
+            return {"error": code}
 
-        # DB inventory is the mutable owner after bootstrap; YAML only seeds it.
-        selected = endpoints if endpoints is not None else await service.in_domain(service.collector_endpoints)
+    async def collect_selected(
+        self, service: BrokerService, endpoints: list[EndpointConfig]
+    ) -> dict[str, object]:
+        """Observe the given endpoints concurrently, for a targeted check.
+
+        The periodic path does not come through here: it runs one independent
+        task per endpoint so that nothing is shared between them, not even a
+        start time.
+        """
+
         results = await asyncio.gather(
-            *(collect(index, endpoint) for index, endpoint in enumerate(selected))
+            *(self.observe_and_ingest(service, endpoint) for endpoint in endpoints)
         )
-        return dict(results)
+        return {endpoint.id: result for endpoint, result in zip(endpoints, results, strict=True)}

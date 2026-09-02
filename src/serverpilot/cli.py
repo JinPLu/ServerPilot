@@ -26,9 +26,11 @@ from serverpilot.daemon import (
     MacOSDaemonManager,
     daemon_instance_id_for_paths,
     format_status,
+    resolve_daemon_config,
 )
 from serverpilot.database import Database
 from serverpilot.importer import import_servers_files, write_inventory
+from serverpilot.logging_setup import configure_logging
 from serverpilot.mcp_entry import (
     MCP_CLIENTS,
     MCP_SERVER_NAME,
@@ -215,6 +217,7 @@ def serve(
         bind_port=port,
         daemon_instance_id=daemon_instance_id,
     )
+    configure_logging(resolve_daemon_config().log_dir)
     uvicorn.run(
         create_app(settings),
         host=host,

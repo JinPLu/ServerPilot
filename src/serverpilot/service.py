@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import hashlib
+import logging
 import re
 import secrets
 import threading
@@ -16,12 +17,19 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, TypeVar
 
+from pydantic import ValidationError
 from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from serverpilot import SCHEMA_VERSION, __version__
-from serverpilot.config import RESERVED_SYSTEM_ID, EndpointConfig, InventoryConfig
+from serverpilot.config import (
+    RESERVED_SYSTEM_ID,
+    EndpointConfig,
+    InventoryConfig,
+    stale_after_seconds,
+)
 from serverpilot.database import Database
+from serverpilot.freshness import Freshness, freshness_of
 from serverpilot.models import (
     Actor,
     ActorProject,
@@ -87,14 +95,9 @@ TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
 PROCESS_START_TIME_JITTER_SECONDS = 2
 MUTATING_ROLES = {"allocator", "operator", "admin"}
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
+logger = logging.getLogger(__name__)
+
 COLLECTOR_INTERVAL_SETTING_KEY = "collector_interval_seconds"
-# How long to leave an endpoint whose collection keeps failing out of the
-# regular cycle. Once its telemetry is stale the endpoint is already
-# fail-closed, so probing it every interval changes no answer; what it does
-# spend is a failed-collection write and a revision bump every cycle, which
-# makes every reader think something changed. Kept close to the interval so a
-# host someone has just repaired rejoins without anyone having to ask.
-DEGRADED_ENDPOINT_PROBE_SECONDS = 60
 PLUGIN_CAPACITY_SETTING_PREFIX = "pc:"
 COLLECTOR_VERSION_SETTING_PREFIX = "civ:"
 REMOTE_COLLECTOR_PROFILES = frozenset({"server-script-v1"})
@@ -268,7 +271,6 @@ class BrokerService:
         if interval_seconds not in COLLECTOR_INTERVAL_PRESETS:
             return
         self.inventory.collector.interval_seconds = interval_seconds
-        self.inventory.collector.stale_after_seconds = interval_seconds * 3
 
     def collector_interval_seconds(self) -> int:
         return self.inventory.collector.interval_seconds
@@ -325,7 +327,7 @@ class BrokerService:
             revision = self._bump_revision(session, now)
             after = {
                 "interval_seconds": settings.interval_seconds,
-                "stale_after_seconds": settings.interval_seconds * 3,
+                "stale_after_seconds": stale_after_seconds(settings.interval_seconds),
                 "allowed_intervals": sorted(COLLECTOR_INTERVAL_PRESETS),
             }
             event = self._audit(
@@ -358,7 +360,6 @@ class BrokerService:
             result, applied = self._write(operation)
             if applied:
                 self.inventory.collector.interval_seconds = settings.interval_seconds
-                self.inventory.collector.stale_after_seconds = settings.interval_seconds * 3
             return result
 
     def _upsert_server_groups(self, session: Session, now: datetime) -> None:
@@ -779,9 +780,7 @@ class BrokerService:
             "memory_mib_per_gpu": None,
             # A direct claim's cost is one host's stop plus one observation, so
             # the group can publish it instead of leaving the caller to guess.
-            "apply_max_seconds": direct_claim_budget_seconds(
-                self.inventory.collector.ssh_connect_timeout_seconds
-            ),
+            "apply_max_seconds": direct_claim_budget_seconds(),
         }
         return {
             "allocation": "direct",
@@ -830,6 +829,7 @@ class BrokerService:
 
         def operation(session: Session) -> list[EndpointConfig]:
             values: list[EndpointConfig] = []
+            unreadable: list[tuple[str, str]] = []
             endpoints = session.scalars(
                 select(Endpoint)
                 .where(Endpoint.lifecycle_state.in_({"active", "draining"}))
@@ -837,8 +837,12 @@ class BrokerService:
             ).all()
             groups = self._server_groups_by_id(session)
             for endpoint in endpoints:
-                values.append(
-                    EndpointConfig(
+                # Per row, not per list. One unreadable row used to raise out of
+                # the whole comprehension, and the caller swallowed it, so a
+                # single bad endpoint silently stopped every endpoint from being
+                # probed at all until they all aged out together.
+                try:
+                    config = EndpointConfig(
                         id=endpoint.id,
                         host=endpoint.host,
                         port=endpoint.port,
@@ -857,39 +861,19 @@ class BrokerService:
                         expected_gpu_total_vram_mib=endpoint.expected_gpu_total_vram_mib,
                         project_ids=[],
                     )
+                except ValidationError as exc:
+                    unreadable.append((endpoint.id, str(exc)))
+                    continue
+                values.append(config)
+            for endpoint_id, detail in unreadable:
+                logger.warning(
+                    "endpoint row cannot be read as a config: %s",
+                    detail.replace("\n", " ")[:300],
+                    extra={"endpoint_id": endpoint_id},
                 )
             return values
 
         return self._read(operation)
-
-    def collector_endpoints_due(self) -> list[EndpointConfig]:
-        """Return the endpoints to probe this cycle.
-
-        A healthy endpoint is probed every cycle. One whose collection keeps
-        failing is backed off so the cycle stays as short as the hosts that do
-        answer; it rejoins every cycle on its first success. Backoff changes
-        only the probe rhythm, never admission: a degraded endpoint is already
-        fail-closed through stale telemetry.
-        """
-
-        def operation(session: Session) -> set[str]:
-            now = utcnow()
-            stale_after = timedelta(seconds=self.inventory.collector.stale_after_seconds)
-            backoff = timedelta(seconds=DEGRADED_ENDPOINT_PROBE_SECONDS)
-            deferred: set[str] = set()
-            for state in session.scalars(select(ProviderState)).all():
-                if state.endpoint_id is None:
-                    continue
-                last_success = _as_utc(state.last_success_at)
-                if last_success is not None and now - last_success <= stale_after:
-                    continue
-                last_attempt = _as_utc(state.last_attempt_at)
-                if last_attempt is not None and now - last_attempt < backoff:
-                    deferred.add(state.endpoint_id)
-            return deferred
-
-        deferred = self._read(operation)
-        return [item for item in self.collector_endpoints() if item.id not in deferred]
 
     def collector_endpoint(self, endpoint_id: str) -> EndpointConfig:
         """Return one sealed endpoint configuration for targeted verification.
@@ -944,7 +928,7 @@ class BrokerService:
                     ProviderState.endpoint_id == endpoint_id,
                 )
             )
-            observed_at = _as_utc(state.last_success_at) if state is not None else None
+            freshness = self._freshness(state, utcnow())
             gpu_count = (
                 session.scalar(
                     select(func.count())
@@ -957,10 +941,11 @@ class BrokerService:
                 or 0
             )
             return {
-                "observed": observed_at is not None,
-                "observed_at": _iso(observed_at),
+                "observed": freshness.observed,
+                "observed_at": _iso(freshness.observed_at),
                 "gpu_count": gpu_count,
-                "error": state.last_error if state is not None else None,
+                "error": freshness.error_detail,
+                "error_code": freshness.error_code,
             }
 
         return self._read(operation)
@@ -1135,6 +1120,29 @@ class BrokerService:
             .limit(1)
         )
 
+    def _freshness(self, state: ProviderState | None, now: datetime) -> Freshness:
+        """The one reachability value, built from one provider-state row."""
+
+        return freshness_of(
+            observed_at=_as_utc(state.last_success_at) if state is not None else None,
+            attempted_at=_as_utc(state.last_attempt_at) if state is not None else None,
+            error_code=state.last_error_code if state is not None else None,
+            error_detail=state.last_error if state is not None else None,
+            now=now,
+            stale_after_seconds=self.inventory.collector.stale_after_seconds,
+        )
+
+    def _endpoint_freshness(
+        self, session: Session, endpoint_id: str, now: datetime
+    ) -> Freshness:
+        state = session.scalar(
+            select(ProviderState).where(
+                ProviderState.provider == "raw-ssh",
+                ProviderState.endpoint_id == endpoint_id,
+            )
+        )
+        return self._freshness(state, now)
+
     def _endpoint_is_unreachable(self, session: Session, endpoint_id: str, now: datetime) -> bool:
         """True when ServerPilot can no longer learn anything about this host.
 
@@ -1153,18 +1161,7 @@ class BrokerService:
         claiming the cards were observed empty.
         """
 
-        state = session.scalar(
-            select(ProviderState).where(
-                ProviderState.provider == "raw-ssh",
-                ProviderState.endpoint_id == endpoint_id,
-            )
-        )
-        if state is None or state.last_error is None:
-            return False
-        last_success = _as_utc(state.last_success_at)
-        if last_success is None:
-            return True
-        return now - last_success > timedelta(seconds=self.inventory.collector.stale_after_seconds)
+        return self._endpoint_freshness(session, endpoint_id, now).unreachable
 
     @staticmethod
     def _endpoint_has_active_leases(session: Session, endpoint_id: str) -> bool:
@@ -4198,15 +4195,17 @@ class BrokerService:
 
             def endpoint_snapshot(endpoint: Endpoint) -> dict[str, Any]:
                 provider_state = provider_states.get(endpoint.id)
-                last_success = _as_utc(provider_state.last_success_at) if provider_state else None
+                freshness = self._freshness(provider_state, now)
+                # Two axes, read separately. A human's own setting is not
+                # evidence about the network, and collapsing them into one
+                # enumeration is what made "paused" display as "connection
+                # failed".
                 if endpoint.lifecycle_state == "draining":
                     monitor_status = "DRAINING"
                 elif not endpoint.enabled:
                     monitor_status = "DISABLED"
-                elif provider_state is None:
-                    monitor_status = "PENDING"
                 elif (
-                    provider_state.last_error == "incomplete endpoint observation"
+                    freshness.error_detail == "incomplete endpoint observation"
                     and gpu_counts[endpoint.id] == 0
                     and endpoint.expected_gpu_count is None
                     and host_telemetry_by_endpoint.get(endpoint.id) is not None
@@ -4215,20 +4214,8 @@ class BrokerService:
                     # NVIDIA runtime data is unavailable.  Keepalive-enabled
                     # GPU endpoints still require a complete observation.
                     monitor_status = "ONLINE"
-                elif last_success is not None and now - last_success <= timedelta(
-                    seconds=self.inventory.collector.stale_after_seconds
-                ):
-                    # Connectivity has a single criterion: how old the last
-                    # successful observation is, the same one
-                    # `_endpoint_is_unreachable` uses.  `last_error` describes
-                    # the most recent attempt, not the host, so one failed
-                    # probe against a host we heard from seconds ago leaves it
-                    # ONLINE.
-                    monitor_status = "ONLINE"
-                elif provider_state.last_error:
-                    monitor_status = "ERROR"
                 else:
-                    monitor_status = "STALE"
+                    monitor_status = freshness.status
                 host_telemetry = host_telemetry_by_endpoint.get(endpoint.id)
                 host_telemetry_payload = self._host_telemetry_dict(host_telemetry)
                 if host_telemetry_payload is not None:
@@ -4256,13 +4243,21 @@ class BrokerService:
                             for gpu in endpoint_gpus
                             if gpu.endpoint_id == endpoint.id and not gpu.present
                         ),
-                        "last_success_at": _iso(provider_state.last_success_at)
-                        if provider_state
-                        else None,
-                        "last_attempt_at": _iso(provider_state.last_attempt_at)
-                        if provider_state
-                        else None,
-                        "last_error": provider_state.last_error if provider_state else None,
+                        "last_success_at": _iso(freshness.observed_at),
+                        "last_attempt_at": _iso(freshness.attempted_at),
+                        # Age is computed here, against the clock that wrote the
+                        # timestamp, so a client never subtracts two clocks to
+                        # decide how stale a host is.
+                        "last_success_age_seconds": (
+                            None
+                            if freshness.age_seconds is None
+                            else round(freshness.age_seconds, 1)
+                        ),
+                        "stale_after_seconds": freshness.stale_after_seconds,
+                        # The closed code is what a client reads. The free text
+                        # beside it is detail for a log line or a tooltip.
+                        "error_code": freshness.error_code,
+                        "last_error": freshness.error_detail,
                     },
                 }
 
@@ -5719,6 +5714,10 @@ class BrokerService:
             incomplete_error = (
                 None if observation.observation_complete else "incomplete endpoint observation"
             )
+            # The code travels with the text it describes. Clearing one and not
+            # the other would leave a recovered host carrying the name of a
+            # failure it no longer has, and every consumer reads the code.
+            incomplete_error_code = None if observation.observation_complete else "parse_error"
             if provider_state is None:
                 session.add(
                     ProviderState(
@@ -5727,6 +5726,7 @@ class BrokerService:
                         last_success_at=now if observation.observation_complete else None,
                         last_attempt_at=now,
                         last_error=incomplete_error,
+                        last_error_code=incomplete_error_code,
                         revision=revision,
                     )
                 )
@@ -5735,6 +5735,7 @@ class BrokerService:
                     provider_state.last_success_at = now
                 provider_state.last_attempt_at = now
                 provider_state.last_error = incomplete_error
+                provider_state.last_error_code = incomplete_error_code
                 provider_state.revision = revision
             if recovered:
                 for alert in session.scalars(
@@ -5920,8 +5921,19 @@ class BrokerService:
         return stripped.rsplit("/", maxsplit=1)[-1][:255] or "unknown"
 
     def record_provider_failure(
-        self, endpoint_id: str, message: str, *, provider: str = "raw-ssh"
+        self,
+        endpoint_id: str,
+        message: str,
+        error_code: str = "local_error",
+        *,
+        provider: str = "raw-ssh",
     ) -> None:
+        """Record one failed attempt, with a code from the closed vocabulary.
+
+        The code is what every consumer reads. ``message`` stays as bounded
+        detail for a log line or a tooltip, and nothing branches on it.
+        """
+
         def operation(session: Session) -> None:
             now = utcnow()
             endpoint = session.get(Endpoint, endpoint_id)
@@ -5951,12 +5963,14 @@ class BrokerService:
                         last_success_at=None,
                         last_attempt_at=now,
                         last_error=message[:1000],
+                        last_error_code=error_code,
                         revision=revision,
                     )
                 )
             else:
                 state.last_attempt_at = now
                 state.last_error = message[:1000]
+                state.last_error_code = error_code
                 state.revision = revision
             # A failed attempt is a fact worth recording, but it is not yet a
             # host in trouble.  The alert waits for the same criterion the

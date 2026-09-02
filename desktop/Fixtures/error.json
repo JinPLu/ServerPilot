@@ -32,7 +32,9 @@
           "enabled": true,
           "monitor": {
             "status": "ERROR",
-            "last_error": "operation timed out"
+            "error_code": "connect_timeout",
+            "last_success_age_seconds": 412.0,
+            "last_error": "ProbeFailed: SSH probe failed for gpu-a: ssh: connect to host 10.0.0.9 port 22: Operation timed out"
           },
           "host_telemetry": {
             "cpu_count": 64,

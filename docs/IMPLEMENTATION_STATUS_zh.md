@@ -1,8 +1,60 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-08-28（Asia/Shanghai）
+更新时间：2026-09-03（Asia/Shanghai）
 
 本文只记录当前事实、直接证据和仍未验证的边界。源码与构建完成不等于本机正在运行或已部署。当前包装版本为 `2.0.0`；工作树已实现一等服务器分组与任务声明 GPU 需求，去掉外部调度器提交、通用资源规划、工作负载预设和整套浏览器 `/ui`，并把插件接入的集群并入同一个集群模型：不再有平行的 `scheduler_servers` 顶层桶，每个分组投影同形的 `allocation` / `limits` / `largest_allocatable_block`。同时取消了 PyPI 发布工作流，`tag` 与 `__version__` 的一致性校验移入 Windows release 工作流。本文件不宣称已重启 daemon、已重装 MCP 入口，或已重新生成现场连接器描述。下文 `1.7.0` 自动化、固定夹具桌面验收和 Windows 打包规格检查，以及 `1.6.0` 及更早的现场验收，仍是当时工作树的证据，与本次源码变更分开记录。历史过程见 `docs/archive/`。
+
+## 当前工作树：观测层重做（2026-09-03，已在本机运行并验证）
+
+用户报告服务器反复显示「连接失败」、经常六台同时。根因是 `ssh_connect_timeout_seconds = 8`
+同时充当 OpenSSH 的 `ConnectTimeout` 和整次观测的 wall-clock 上限，而实测一次成功观测均值
+2.3–2.9 秒、尾部 7.8–12.8 秒；六个探测又在同一个 `asyncio.gather` 里以 `stagger_seconds=0.0`
+同时发出，共享同一起点与同一条线，于是任何整体抖动让所有主机在同一轮越线。失败三轮后
+`collector_endpoints_due` 还会把端点冻结 60 秒不再探测，机器恢复了界面仍显红。
+
+已执行的改动：
+
+- **传输**：`adapters.observation_ssh_argv` 是唯一的选项列表，加 `ControlMaster=auto` /
+  `ControlPersist=300` / `ServerAliveInterval=5 × CountMax=3`，master 由第一次探测隐式打开，
+  没有监督任务也没有重试包装；daemon 启动清空自己的 control 目录。control 路径必须加引号
+  ——真实目录含 "Application Support" 的空格，不加引号 ssh 会把整条选项判为
+  "extra arguments at end of line"，全机所有探测一起失败。
+- **预算**：`config.SSHBudgets` 把连接（10s）与远端命令（20s）分开，`probe_deadline = 30s`；
+  `config.stale_after_seconds(interval) = interval + 30` 成为唯一定义（原来是 `interval * 3`，
+  比一次合法的慢探测还短）。不变式 `interval < master_dead(15) < probe_deadline(30) <
+  stale_after(35)` 由 `test_budget_ordering` 锁住。
+- **节奏**：删除整轮 `gather`、`collect_once`、`collector_endpoints_due` 与
+  `DEGRADED_ENDPOINT_PROBE_SECONDS`；改为每端点一个 asyncio task，确定性起始相位加 ±10% 抖动。
+  keepalive reconcile 仍是独立 task 并由 shutdown 等待，不能内联——否则关机取消探测循环会取消
+  正在进行的占卡启动，留下一个占着卡却没有账本记录的 worker。
+- **观测面**：`linux-nvidia` / `linux-host` / `server-script-v1` 收口为 `linux`；删除
+  `_OBSERVATION_QUERIES` 与 `RAW_SSH_HOST_ONLY_QUERY`，`observe_endpoint` 只剩两臂
+  （内置探测 / 插件 `observe`）。
+- **错误**：`collector.classify_failure` 是唯一分类点，13 个闭合错误码写进
+  `provider_states.last_error_code`；rc=255 且 stdout 含 `__SERVERPILOT_GPU__` 判 `remote_error`
+  （255 既是 ssh 的失败码又是合法远端退出码）。桌面端改读该码，删掉子串匹配级联。
+- **可达性**：新增 `serverpilot.freshness`，`Freshness` / `freshness_of` 成为唯一所有者；
+  `endpoint_reachability`、`_endpoint_is_unreachable`、snapshot 的 monitor 推导都读它。
+  快照 `monitor` 新增 `error_code`、`last_success_age_seconds`、`stale_after_seconds`。
+- **生命周期与日志**：`_daemon_executable` 只解析 uv tool 那一份（删除 PATH/sys.executable
+  候选与 `SERVERPILOT_DAEMON_EXECUTABLE`）；install 会删除旧 `local.gpu-broker.daemon.plist`
+  而不只是 bootout；`Database.migrate()` 永远用包内 migrations（不再优先 cwd 祖先的源码树）；
+  新增 `logging_setup.py`，日志带 UTC 时间、PID、endpoint 名并轮转。
+- 迁移 `20260903_0035`：改写 `endpoints.observation_profile` 为 `linux`，新增
+  `provider_states.last_error_code`（不回填猜测的码）。
+
+**本机实测（同一台机器，改前 / 改后）**：
+
+| 指标 | 改前 | 改后 |
+| --- | --- | --- |
+| 单次观测耗时（`collected_at - observed_at`） | 均值 2.27–2.90s，最大 7.8–12.8s | 均值 0.15–0.37s，最大 0.83s |
+| 采集失败 | 过去 48h 内 100% 是 `TimeoutError ... after 8 seconds`，峰值 121 次/小时 | 新构建运行期间 0 次 |
+| 同一 10 秒窗口 ≥3 台同时失败 | 约 15 次/小时 | 0 次 |
+| 日志噪声（`No such revision` / `Errno 48` / instance-id 不匹配 / `Unknown child process`） | 462 / 462 / 373 / 12 | 0 / 0 / 0 / 0 |
+| 复用连接 | 无（每 5 秒每台一次完整握手） | 6 个 master socket，6 个 `ssh [mux]` 进程 |
+
+`hanhai22-p22` 仍是 `plugin_error`，这是既有且真实的情况：该集群不能用密钥、每次登录要一个
+一次性验证码，插件按设计复用人工打开的 ControlMaster，需要人工先 `ssh -fN hanhai22`。
 
 ## 当前功能
 

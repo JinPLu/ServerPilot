@@ -8,17 +8,17 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import json
 import re
 import shlex
 import subprocess
-from collections.abc import Mapping
 from dataclasses import dataclass
+from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from serverpilot.collector_protocol import SERVER_SCRIPT_REMOTE_COMMAND
-from serverpilot.config import EndpointConfig
+from serverpilot.config import SSH_BUDGETS, EndpointConfig
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_INSPECT_COMMAND,
     KEEPALIVE_PROTOCOL_INFO_CAPABILITIES,
@@ -106,24 +106,13 @@ RAW_SSH_COMBINED_QUERY = (
     f"printf '{IDENTITY_SECTION}\\n'; {IDENTITY_QUERY}; "
     f"printf '{HOST_RESOURCES_SECTION}\\n'; {HOST_RESOURCES_QUERY}"
 )
-RAW_SSH_HOST_ONLY_QUERY = (
-    f"set -e; printf '{GPU_SECTION}\\n{GPU_CPU_ONLY}\\n'; "
-    f"printf '{PROCESS_SECTION}\\n'; "
-    f"printf '{PROCESS_DETAILS_SECTION}\\n'; "
-    f"printf '{IDENTITY_SECTION}\\n'; {IDENTITY_QUERY}; "
-    f"printf '{HOST_RESOURCES_SECTION}\\n'; {HOST_RESOURCES_QUERY}"
-)
 
-_OBSERVATION_QUERIES: Mapping[ObservationProfile, str] = MappingProxyType(
-    {
-        "linux-nvidia": RAW_SSH_COMBINED_QUERY,
-        "linux-host": RAW_SSH_HOST_ONLY_QUERY,
-        # This is an immutable entry invocation, not an endpoint-configured
-        # shell, path, argv, or local prefix.  The remote administrator may
-        # maintain the command's local implementation behind this contract.
-        "server-script-v1": SERVER_SCRIPT_REMOTE_COMMAND,
-    }
-)
+# The one sealed observation profile.  There is no table: a second entry that
+# differed from this one by a shell string ("linux-host") was a distinction the
+# probe already makes for itself, because the combined query reports
+# GPU_CPU_ONLY when nvidia-smi is absent.  A plugin's `observe` is the only
+# extension point.
+BUILTIN_OBSERVATION_PROFILE: ObservationProfile = "linux"
 
 
 class AdapterRegistryError(KeyError):
@@ -204,6 +193,104 @@ def _decode_remote_output(value: bytes, *, stream_name: str) -> str:
         raise ValueError(f"SSH {stream_name} is not valid UTF-8") from exc
 
 
+def control_socket_path(endpoint: EndpointConfig, control_dir: Path) -> Path:
+    """Where this endpoint's multiplexed channel lives.
+
+    Not OpenSSH's own `%C`: that expands to 64 hex characters, and under a macOS
+    Application Support directory the result exceeds the 104-byte `sun_path`
+    limit, at which point multiplexing silently does not happen.  A 16-character
+    digest of the connection triple keeps the whole path short while still
+    giving one socket per (user, host, port).
+    """
+
+    digest = hashlib.sha256(
+        f"{endpoint.ssh_user}@{endpoint.host}:{endpoint.port}".encode()
+    ).hexdigest()[:16]
+    return control_dir / digest
+
+
+def observation_ssh_argv(
+    endpoint: EndpointConfig, *, control_dir: Path, remote_command: str
+) -> tuple[str, ...]:
+    """The sealed option list for one observation. One definition, one caller.
+
+    Multiplexing is the point: without it every cycle paid a full TCP handshake,
+    key exchange and authentication per host, which over a VPN cost more than
+    half of a probe's entire budget and made a slow moment look like six dead
+    servers.  `ControlMaster=auto` means the first probe opens the channel and
+    every later one rides it; nothing in ServerPilot supervises, restarts or
+    health-checks a master, because OpenSSH already does.
+
+    The user's own `~/.ssh/config` is deliberately still read (a host may need
+    ProxyJump or a non-default identity), while every option that decides how a
+    probe fails is pinned here so an endpoint cannot configure it.
+    """
+
+    return (
+        "ssh",
+        "-T",
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", f"ConnectTimeout={SSH_BUDGETS.connect_seconds}",
+        # A channel whose peer vanished must die on its own before the next
+        # probe reaches for it; otherwise the probe inherits a dead connection
+        # and spends the full command budget discovering that.
+        "-o", f"ServerAliveInterval={SSH_BUDGETS.server_alive_interval_seconds}",
+        "-o", f"ServerAliveCountMax={SSH_BUDGETS.server_alive_count_max}",
+        "-o", "ControlMaster=auto",
+        # Quoted: ssh parses an option value by whitespace, and the macOS data
+        # directory is under "Application Support". An unquoted path with a
+        # space is rejected as "extra arguments at end of line", which fails
+        # every probe on the machine while looking like an SSH problem.
+        "-o", f'ControlPath="{control_socket_path(endpoint, control_dir)}"',
+        "-o", f"ControlPersist={SSH_BUDGETS.control_persist_seconds}",
+        # Offer one identity rather than every key an agent holds, so a
+        # misconfigured host fails as auth instead of exhausting MaxAuthTries.
+        "-o", "IdentitiesOnly=yes",
+        "-o", "PreferredAuthentications=publickey",
+        "-o", "NumberOfPasswordPrompts=0",
+        "-o", "LogLevel=ERROR",
+        "-p", str(endpoint.port),
+        f"{endpoint.ssh_user}@{endpoint.host}",
+        remote_command,
+    )
+
+
+def clear_control_sockets(control_dir: Path) -> None:
+    """Drop sockets left by a previous daemon generation.
+
+    A socket file whose master died with the process makes `ControlMaster=auto`
+    refuse to multiplex for as long as the file exists, which would silently
+    return every probe to the un-multiplexed cost that this design exists to
+    remove.  Any master that genuinely survived exits on its own ControlPersist
+    timer.
+    """
+
+    control_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+    for socket_path in control_dir.iterdir():
+        with contextlib.suppress(OSError):
+            socket_path.unlink()
+
+
+async def close_control_socket(endpoint: EndpointConfig, control_dir: Path) -> None:
+    """Ask a multiplexed master to exit, for an endpoint we stop observing."""
+
+    path = control_socket_path(endpoint, control_dir)
+    if not path.exists():
+        return
+    with contextlib.suppress(OSError):
+        process = await asyncio.create_subprocess_exec(
+            "ssh",
+            "-O", "exit",
+            "-o", f'ControlPath="{path}"',
+            f"{endpoint.ssh_user}@{endpoint.host}",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(process.wait(), timeout=5)
+
+
 class RawSSHObservationAdapter:
     id: AdapterId = "raw-ssh"
 
@@ -212,29 +299,17 @@ class RawSSHObservationAdapter:
         endpoint: EndpointConfig,
         *,
         probe: RawSSHProbe,
-        connect_timeout_seconds: int,
+        control_dir: Path,
     ) -> RawSSHResult:
-        if probe == "endpoint-telemetry":
-            try:
-                remote_command = _OBSERVATION_QUERIES[endpoint.observation_profile]
-            except KeyError as exc:  # defensive for pre-migration/corrupt rows
-                raise ValueError(
-                    f"unknown endpoint observation profile: {endpoint.observation_profile}"
-                ) from exc
-        else:
+        if probe != "endpoint-telemetry":
             raise ValueError(f"unknown raw SSH probe: {probe}")
         process = await asyncio.create_subprocess_exec(
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"ConnectTimeout={connect_timeout_seconds}",
-            "-p",
-            str(endpoint.port),
-            f"{endpoint.ssh_user}@{endpoint.host}",
-            remote_command,
+            *observation_ssh_argv(
+                endpoint,
+                control_dir=control_dir,
+                remote_command=RAW_SSH_COMBINED_QUERY,
+            ),
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
@@ -261,19 +336,20 @@ class RawSSHObservationAdapter:
 
         try:
             stdout, stderr, stdout_truncated, stderr_truncated = await asyncio.wait_for(
-                read_result(), timeout=connect_timeout_seconds
+                read_result(), timeout=SSH_BUDGETS.probe_deadline_seconds
             )
         except TimeoutError as exc:
-            # OpenSSH's ConnectTimeout only covers connection establishment. A
-            # connected session or remote probe can still hang indefinitely,
-            # which used to stop the periodic collector without recording a
-            # provider failure. Bound the whole sealed observation and reap the
-            # child so the next collection cycle can proceed.
+            # OpenSSH enforces ConnectTimeout on connection setup alone, so a
+            # session that connected can still hang on the remote work.  This is
+            # the whole observation's wall clock, and because it is strictly
+            # longer than the connect budget, reaching it always means the
+            # remote command is what did not finish.
             with contextlib.suppress(ProcessLookupError):
                 process.kill()
             await process.wait()
             raise TimeoutError(
-                f"SSH observation timed out after {connect_timeout_seconds} seconds for {endpoint.id}"
+                "SSH observation timed out after "
+                f"{SSH_BUDGETS.probe_deadline_seconds} seconds for {endpoint.id}"
             ) from exc
         return RawSSHResult(
             returncode=process.returncode or 0,
@@ -574,7 +650,7 @@ def endpoint_keepalive_adapter(adapter_id: str) -> ServerScriptKeepaliveAdapter:
     return SERVER_SCRIPT_KEEPALIVE_ADAPTER
 
 
-def direct_claim_budget_seconds(ssh_connect_timeout_seconds: int) -> int:
+def direct_claim_budget_seconds() -> int:
     """Worst-case seconds for one direct claim, derived from the timeouts it uses.
 
     A claim holds one host, so the cost is one helper probe, one stop, and the
@@ -587,5 +663,5 @@ def direct_claim_budget_seconds(ssh_connect_timeout_seconds: int) -> int:
     return (
         ServerScriptKeepaliveAdapter.connect_timeout_seconds
         + ServerScriptKeepaliveAdapter.timeout_seconds
-        + ssh_connect_timeout_seconds
+        + SSH_BUDGETS.probe_deadline_seconds
     )
