@@ -12,7 +12,7 @@ from sqlalchemy.exc import IntegrityError
 
 from serverpilot.config import EndpointConfig, InventoryConfig
 from serverpilot.database import Database
-from serverpilot.models import Actor, AllocationRequest, Lease, Project
+from serverpilot.models import Actor, Lease, Project
 from serverpilot.schemas import EndpointCreate, EndpointUpdate, RequestCreate
 from serverpilot.service import (
     SYSTEM_ACTOR_ID,
@@ -114,7 +114,7 @@ def test_runtime_keepalive_policy_survives_static_inventory_restart_when_not_exp
     )
 
     restarted = BrokerService(database, configured)
-    restarted.initialize(sync_inventory=True)
+    restarted.initialize()
     assert restarted.get_endpoint_keepalive_summary("endpoint-a")["keepalive"]["policy"] == "idle_keepalive"
 
 
@@ -226,7 +226,7 @@ def test_initialize_fails_closed_if_reserved_identity_attributes_were_repurposed
     assert conflict.value.code == "reserved_system_identity_conflict"
 
 
-def test_workload_kind_is_explicit_and_keepalive_is_outside_quota_and_fair_queue(
+def test_workload_kind_is_explicit_and_keepalive_stays_outside_project_quota(
     service, admin
 ) -> None:
     service.ingest_observation(observation(count=1))
@@ -240,54 +240,15 @@ def test_workload_kind_is_explicit_and_keepalive_is_outside_quota_and_fair_queue
     now = utcnow()
     with service.database.session() as session:
         session.add(
-            AllocationRequest(
-                id="keepalive-queued-test",
+            Lease(
+                id="keepalive-lease-test",
                 actor_id=SYSTEM_ACTOR_ID,
                 project_id=SYSTEM_PROJECT_ID,
-                auto_activate=False,
-                task_ref="keepalive",
-                purpose="internal keepalive",
-                constraints_json=json_dump({"gpu_count": 1}),
-                duration_seconds=3600,
-                expected_duration_seconds=None,
-                start_after=None,
-                deadline=None,
-                approval_ref=None,
-                state="QUEUED",
-                priority_class="keepalive",
-                blocked_reason=None,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        session.add(
-            AllocationRequest(
-                id="keepalive-leased-test",
-                actor_id=SYSTEM_ACTOR_ID,
-                project_id=SYSTEM_PROJECT_ID,
-                auto_activate=False,
+                kind="keepalive",
                 task_ref="keepalive-active",
                 purpose="internal keepalive",
                 constraints_json=json_dump({"gpu_count": 1}),
                 duration_seconds=3600,
-                expected_duration_seconds=None,
-                start_after=None,
-                deadline=None,
-                approval_ref=None,
-                state="LEASED",
-                priority_class="keepalive",
-                blocked_reason=None,
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        session.add(
-            Lease(
-                id="keepalive-lease-test",
-                request_id="keepalive-leased-test",
-                actor_id=SYSTEM_ACTOR_ID,
-                project_id=SYSTEM_PROJECT_ID,
-                kind="keepalive",
                 state="HELD",
                 issued_at=now,
                 expires_at=now + timedelta(hours=1),
@@ -304,9 +265,6 @@ def test_workload_kind_is_explicit_and_keepalive_is_outside_quota_and_fair_queue
         gpu_usage, lease_usage = service._project_usage(session)
         assert SYSTEM_PROJECT_ID not in gpu_usage
         assert SYSTEM_PROJECT_ID not in lease_usage
-        assert "keepalive-queued-test" not in {
-            request.id for request in service._queue_candidates(session, now)
-        }
 
     assert "keepalive-lease-test" not in {
         lease["id"] for lease in service.list_leases(admin)["data"]

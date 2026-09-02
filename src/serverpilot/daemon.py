@@ -24,7 +24,12 @@ import httpx
 
 from . import API_CAPABILITIES, __version__
 from .client import control_plane_http_request
-from .config import ConfigurationError, load_inventory
+from .config import (
+    ConfigurationError,
+    autostart_enabled,
+    control_plane_url,
+    load_inventory,
+)
 
 try:
     import fcntl
@@ -106,9 +111,7 @@ def resolve_daemon_config(
 ) -> DaemonConfig:
     environment = os.environ if environment is None else environment
     home = _home(environment)
-    host, port, base_url = _loopback_url(
-        environment.get("SERVERPILOT_URL", "http://127.0.0.1:8787")
-    )
+    host, port, base_url = _loopback_url(control_plane_url(environment=environment))
     data_dir = (home / "Library/Application Support/ServerPilot").resolve()
     database_path = data_dir / "state/serverpilot.sqlite3"
     inventory_path = data_dir / "inventory.yaml"
@@ -728,9 +731,7 @@ class MacOSDaemonManager:
 def assert_control_plane_matches_release(*, base_url: str | None = None) -> None:
     """Refuse an MCP session whose loopback service is not this release."""
 
-    url = (base_url or os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787")).rstrip(
-        "/"
-    )
+    url = control_plane_url(base_url).rstrip("/")
     payload = _probe_json(url, "/health/live")
     if payload is None:
         raise DaemonError(
@@ -749,9 +750,7 @@ def assert_control_plane_matches_release(*, base_url: str | None = None) -> None
 
 
 def ensure_broker_ready_for_mcp() -> None:
-    if sys.platform == "darwin" and os.environ.get(
-        "SERVERPILOT_AUTOSTART", "1"
-    ).lower() not in {"0", "false", "no"}:
+    if sys.platform == "darwin" and autostart_enabled():
         MacOSDaemonManager().ensure()
     assert_control_plane_matches_release()
 

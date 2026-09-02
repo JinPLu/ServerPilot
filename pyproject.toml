@@ -56,7 +56,6 @@ dev = [
 [project.scripts]
 serverpilot = "serverpilot.cli:app"
 serverpilot-mcp = "serverpilot.mcp_server:main"
-serverpilot-collect = "serverpilot.server_collector:main"
 serverpilot-keepalive = "serverpilot.server_keepalive:main"
 
 [tool.setuptools.dynamic]

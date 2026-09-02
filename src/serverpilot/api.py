@@ -18,7 +18,7 @@ from typing import Annotated, Any
 from fastapi import Depends, FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse
 from pydantic import ValidationError
 
 from serverpilot import API_CAPABILITIES, SCHEMA_VERSION, __version__
@@ -28,7 +28,7 @@ from serverpilot.adapters import (
     endpoint_keepalive_adapter,
 )
 from serverpilot.collector import SSHCollector
-from serverpilot.config import Settings, load_inventory
+from serverpilot.config import Settings, load_inventory, project_root_override
 from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
@@ -996,7 +996,6 @@ def create_app(
                 actor,
                 retry_data,
                 idempotency_key=idempotency_key,
-                activate_if_allocated=True,
                 persistent_lease=persistent_lease,
                 plugin_allocation=overlay,
             )
@@ -1033,7 +1032,6 @@ def create_app(
                     actor,
                     request_data,
                     idempotency_key=idempotency_key,
-                    activate_if_allocated=True,
                     persistent_lease=persistent_lease,
                 )
             except BrokerError as exc:
@@ -1048,7 +1046,6 @@ def create_app(
                         actor,
                         request_data,
                         idempotency_key=idempotency_key,
-                        activate_if_allocated=True,
                         persistent_lease=persistent_lease,
                     ),
                     idempotency_key=idempotency_key,
@@ -1257,10 +1254,6 @@ def create_app(
             },
         )
 
-    @app.get("/metrics", response_class=PlainTextResponse)
-    def metrics() -> str:
-        return service.metrics()
-
     @app.get("/api/v1/snapshot")
     def snapshot(
         actor: ApiActor,
@@ -1329,10 +1322,6 @@ def create_app(
             compact=compact,
         )
 
-    @app.get("/api/v1/requests")
-    def requests(actor: ApiActor) -> dict[str, Any]:
-        return service.list_requests(actor)
-
     @app.get("/api/v1/leases")
     def leases(actor: ApiActor) -> dict[str, Any]:
         return service.list_leases(actor)
@@ -1361,30 +1350,6 @@ def create_app(
         return service.update_collector_settings(
             actor,
             settings_data,
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-
-    @app.post("/api/v1/requests")
-    def create_request(
-        request_data: RequestCreate,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.create_request(
-            actor,
-            request_data,
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-
-    @app.post("/api/v1/requests/{request_id}/cancel")
-    def cancel_request(
-        request_id: str,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.cancel_request(
-            actor,
-            request_id,
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
@@ -1787,8 +1752,8 @@ def create_app(
 def _find_project_root() -> Path:
     """Find the source release root, falling back to packaged migrations."""
 
-    configured = os.environ.get("SERVERPILOT_PROJECT_ROOT")
-    candidates = [Path(configured)] if configured else []
+    configured = project_root_override()
+    candidates = [configured] if configured is not None else []
     candidates.extend([Path.cwd(), *Path.cwd().parents])
     for candidate in candidates:
         if (candidate / "alembic.ini").is_file() and (

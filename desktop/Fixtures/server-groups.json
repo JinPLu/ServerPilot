@@ -38,8 +38,6 @@
           "expected_gpu_count": 1,
           "expected_gpu_total_vram_mib": 81920,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -73,7 +71,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -84,7 +81,6 @@
         }
       ],
       "leases": [],
-      "requests": [],
       "data_age_seconds": 2,
       "reservations": [],
       "freshness_seconds": 30,

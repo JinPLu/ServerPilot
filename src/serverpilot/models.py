@@ -38,12 +38,42 @@ class Revision(Base):
 
 
 class RuntimeSetting(Base):
-    """Small persisted runtime settings owned by the local control plane."""
+    """Knobs a user changed, and nothing else.
+
+    One row per setting the app or the CLI can change and the control plane has
+    to remember across a restart. Derived facts about an endpoint belong in
+    ``endpoint_observation_facts``; putting them here behind key prefixes meant
+    a query for "what has the user changed" had to know which prefixes to skip.
+    """
 
     __tablename__ = "runtime_settings"
 
     key: Mapped[str] = mapped_column(String(64), primary_key=True)
     value: Mapped[str] = mapped_column(String(255), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EndpointObservationFact(Base):
+    """What observing one endpoint produced, cached until the next observation.
+
+    These are not settings.  Nobody chose them, nothing is lost by dropping a
+    row but one round trip to the endpoint, and they answer questions the
+    endpoint answers.  They used to live in ``runtime_settings`` behind two key
+    prefixes, which made that table three stores at once and forced a hashed
+    endpoint id to stand in for the foreign key that belongs here.
+    """
+
+    __tablename__ = "endpoint_observation_facts"
+
+    endpoint_id: Mapped[str] = mapped_column(
+        ForeignKey("endpoints.id", ondelete="CASCADE"), primary_key=True
+    )
+    # Allocatable capacity a delegated cluster reported for itself, as the JSON
+    # the plugin contract validates. NULL when the profile does not delegate.
+    plugin_capacity_json: Mapped[str | None] = mapped_column(Text)
+    # The ServerPilot version of the collector installed on the endpoint, which
+    # `doctor` compares against this process. NULL until one reports.
+    collector_version: Mapped[str | None] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
@@ -119,8 +149,6 @@ class Endpoint(Base):
     owner_project_id: Mapped[str | None] = mapped_column(
         ForeignKey("projects.id", ondelete="RESTRICT"), index=True
     )
-    lifecycle_state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
@@ -207,7 +235,6 @@ class GPUDevice(Base):
     compute_capability: Mapped[str | None] = mapped_column(String(40))
     labels_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     health: Mapped[str] = mapped_column(String(32), nullable=False, default="UNKNOWN")
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     present: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -346,30 +373,6 @@ class ActorProject(Base):
     )
 
 
-class AllocationRequest(Base):
-    __tablename__ = "allocation_requests"
-    __table_args__ = (Index("ix_request_queue", "state", "created_at"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False, index=True)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
-    # A routine claim activates as soon as GPUs are allocated.
-    auto_activate: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
-    task_ref: Mapped[str] = mapped_column(String(255), nullable=False)
-    purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
-    constraints_json: Mapped[str] = mapped_column(Text, nullable=False)
-    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
-    expected_duration_seconds: Mapped[int | None] = mapped_column(Integer)
-    start_after: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    deadline: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    approval_ref: Mapped[str | None] = mapped_column(String(500))
-    state: Mapped[str] = mapped_column(String(40), nullable=False, default="QUEUED")
-    priority_class: Mapped[str] = mapped_column(String(32), nullable=False, default="normal")
-    blocked_reason: Mapped[str | None] = mapped_column(String(1000))
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
 class Lease(Base):
     __tablename__ = "leases"
     __table_args__ = (
@@ -378,12 +381,15 @@ class Lease(Base):
     )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    request_id: Mapped[str] = mapped_column(
-        ForeignKey("allocation_requests.id", ondelete="RESTRICT"), nullable=False, unique=True
-    )
     actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False, index=True)
     project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False, index=True)
     kind: Mapped[LeaseKind] = mapped_column(String(16), nullable=False, default="workload")
+    #: What the claimant asked for. One claim is one lease, so the ask and the
+    #: allocation it produced live in the same row.
+    task_ref: Mapped[str] = mapped_column(String(255), nullable=False)
+    purpose: Mapped[str] = mapped_column(String(1000), nullable=False)
+    constraints_json: Mapped[str] = mapped_column(Text, nullable=False)
+    duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
     state: Mapped[str] = mapped_column(String(40), nullable=False, default="HELD")
     issued_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))

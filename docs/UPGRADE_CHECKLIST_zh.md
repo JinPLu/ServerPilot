@@ -40,21 +40,20 @@ Cursor 不能写盘：只能 `--print`，再手工粘贴到 User Rules。Codex /
 
 漏做：Agent 仍按旧规则理解工具和分组，例如继续找已经取消的 `scheduler_servers`，或用空闲容量反推 `gpu_count`。
 
-## 4. 每台 GPU 服务器重装同版本 `serverpilot-collect`
+## 4. GPU 服务器无需任何安装
 
-控制面版本必须和每台被观测主机上的采集入口一致。入口必须在**非交互 SSH** 的 `PATH` 上，不是你手工登录时的 PATH。
+被观测主机上不需要装 ServerPilot，也没有需要跟控制面对齐的采集入口：观测是一条固定的
+只读 SSH 探测。升级控制面不需要动任何一台 GPU 服务器。
+
+要确认一台主机可被观测，只要确认非交互 SSH 能连上、而且 GPU 主机上 `nvidia-smi` 在那条
+`PATH` 上（登录 shell 的 PATH 不算）：
 
 ```bash
-# 本机
-serverpilot --version
-
-# 每台 GPU 服务器，装同一版本，然后：
-ssh user@host serverpilot-collect --schema-version 2
+ssh user@host true
+ssh user@host nvidia-smi -L
 ```
 
-第二条必须只打印一行 JSON。登录 shell 里能跑、非交互 SSH 失败，是最常见的假象。
-
-漏做：采集失败或仍走旧入口。控制面按 fail closed 停掉该机分配，看起来像「服务器没了」而不是「没升级远端」。
+第二条在纯 CPU 主机上没有输出是正常的，这类主机会按 CPU-only 登记，不参与 GPU 分配。
 
 ## 5. 单独部署占卡 helper
 

@@ -14,7 +14,6 @@ from serverpilot.database import Database
 from serverpilot.models import (
     Actor,
     Alert,
-    AllocationRequest,
     AuditEvent,
     EndpointTelemetrySnapshot,
     GPUDevice,
@@ -59,7 +58,7 @@ def test_inventory_unknown_is_fail_closed(service, admin) -> None:
     with pytest.raises(BrokerError) as error:
         service.create_request(admin, request_data("unknown"), idempotency_key="unknown-1")
     assert error.value.code == "no_capacity"
-    assert service.list_requests(admin)["data"] == []
+    assert service.list_leases(admin)["data"] == []
 
 
 def test_initialize_has_no_bootstrap_login_token(tmp_path: Path, inventory) -> None:
@@ -289,7 +288,7 @@ def test_routine_claim_fails_immediately_and_can_be_retried_when_capacity_arrive
             idempotency_key="queued-claim",
         )
     assert error.value.code == "no_capacity"
-    assert service.list_requests(admin)["data"] == []
+    assert service.list_leases(admin)["data"] == []
 
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
@@ -297,7 +296,6 @@ def test_routine_claim_fails_immediately_and_can_be_retried_when_capacity_arrive
         request_data("retried-run"),
         idempotency_key="retried-claim",
     )
-    assert claimed["request"]["state"] == "LEASED"
     assert claimed["lease"]["state"] == "HELD"
 
 
@@ -374,7 +372,6 @@ def test_failed_claims_are_not_queued_when_capacity_arrives(service, admin) -> N
             )
         assert error.value.code == "no_capacity"
     service.ingest_observation(observation(count=3))
-    assert service.list_requests(admin)["data"] == []
     assert service.list_leases(admin)["data"] == []
 
 
@@ -545,7 +542,7 @@ def test_deleted_inventory_endpoint_is_not_resurrected_on_restart(tmp_path: Path
     assert first.list_endpoints(admin)["data"] == []
 
     restarted = BrokerService(database, inventory)
-    restarted.initialize(sync_inventory=True)
+    restarted.initialize()
     assert restarted.list_endpoints(admin)["data"] == []
 
     created = restarted.create_endpoint(
@@ -571,10 +568,8 @@ def test_claim_auto_creates_project_without_extra_endpoint_scope(service, admin)
         admin,
         request_data("cross-project-claim", project_id="storyboard"),
         idempotency_key="storyboard-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
-    assert claimed["request"]["state"] == "LEASED"
     assert claimed["lease"]["state"] == "HELD"
     assert claimed["lease"]["project_id"] == "storyboard"
     assert any(
@@ -588,7 +583,6 @@ def test_observed_binding_is_visible_on_the_control_plane_snapshot(service, admi
         admin,
         request_data("coordination-run"),
         idempotency_key="coordination-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
     gpu = service.list_gpus(admin)["data"][0]
@@ -603,7 +597,7 @@ def test_observed_binding_is_visible_on_the_control_plane_snapshot(service, admi
     assert bound["lease"]["state"] == "ACTIVE"
     assert bound["lease"]["workloads"][0]["run_id"] == (f"explicit:lease:{claimed['lease']['id']}")
     assert len(bound["lease"]["workloads"][0]["process_keys"]) == 1
-    assert service.list_requests(admin)["data"][0]["state"] == "ACTIVE"
+    assert service.list_leases(admin)["data"][0]["state"] == "ACTIVE"
 
     current = service.control_plane_state(admin)["data"]["current"]
     gpu = current["gpus"][0]
@@ -619,7 +613,6 @@ def test_collector_auto_binds_new_process_to_its_exact_workload_lease(service, a
         admin,
         request_data("auto-observed-run"),
         idempotency_key="auto-observed-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     claimed_gpu_id = claimed["lease"]["gpu_ids"][0]
@@ -654,7 +647,7 @@ def test_collector_auto_binds_new_process_to_its_exact_workload_lease(service, a
     states = {gpu["gpu_uuid"]: gpu["state"] for gpu in service.list_gpus(admin)["data"]}
     assert states[claimed_gpu_uuid] == "RUNNING_MANAGED"
     assert states[other_gpu_uuid] == "BUSY_UNMANAGED"
-    assert service.list_requests(admin)["data"][0]["state"] == "ACTIVE"
+    assert service.list_leases(admin)["data"][0]["state"] == "ACTIVE"
 
 
 def test_bound_workload_clears_historical_keepalive_error_without_mutating_lease(
@@ -667,7 +660,6 @@ def test_bound_workload_clears_historical_keepalive_error_without_mutating_lease
         admin,
         request_data("workload-after-keepalive-error"),
         idempotency_key="workload-after-keepalive-error-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     process = process_for_gpu(gpu_uuid, pid=4401)
@@ -706,7 +698,6 @@ def test_assigned_workload_clears_error_after_process_turnover(service, admin) -
         admin,
         request_data("unknown-after-bound"),
         idempotency_key="unknown-after-bound-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     initial = process_for_gpu(gpu_uuid, pid=4403)
@@ -738,7 +729,6 @@ def test_observed_workload_binding_survives_one_second_process_start_jitter(serv
         admin,
         request_data("jitter-stable-run"),
         idempotency_key="jitter-stable-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -775,7 +765,6 @@ def test_observed_workload_binding_survives_continuous_invisible_pid_metadata(
         admin,
         request_data("namespace-hidden-run"),
         idempotency_key="namespace-hidden-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -813,7 +802,6 @@ def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(service, admi
         admin,
         request_data("bridge-to-lpt", count=4, project_id="agent"),
         idempotency_key="bridge-to-lpt-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     gpu_uuids = [
@@ -872,7 +860,6 @@ def test_task_stays_running_during_overlapping_worker_turnover(service, admin) -
         admin,
         request_data("overlapping-routine-retry", project_id="agent"),
         idempotency_key="overlapping-routine-retry-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     bound_process = process_for_gpu(gpu_uuid, pid=4_150)
@@ -902,7 +889,6 @@ def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(service, admin) 
         admin,
         request_data("empty-routine-retry-window", project_id="agent"),
         idempotency_key="empty-routine-retry-window-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -932,7 +918,6 @@ def test_workload_lease_process_restart_preserves_task_assignment(service, admin
         admin,
         request_data("strict-retry"),
         idempotency_key="strict-retry-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     service.ingest_observation(
@@ -961,7 +946,6 @@ def test_explicit_workload_binding_process_restart_preserves_task_assignment(
         admin,
         request_data("explicit-agent-run", project_id="agent"),
         idempotency_key="explicit-agent-run-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     service.ingest_observation(
@@ -986,7 +970,6 @@ def test_default_explicit_binding_does_not_block_process_turnover(service, admin
         admin,
         request_data("default-explicit-agent-run", project_id="agent"),
         idempotency_key="default-explicit-agent-run-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     service.ingest_observation(
@@ -1017,7 +1000,6 @@ def test_incomplete_process_observation_does_not_change_task_assignment(service,
         admin,
         request_data("incomplete-routine-retry", project_id="agent"),
         idempotency_key="incomplete-routine-retry-claim",
-        activate_if_allocated=True,
     )
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
     service.ingest_observation(
@@ -1058,7 +1040,6 @@ def test_namespace_hidden_pid_reuse_remains_an_observed_task_process(service, ad
         admin,
         request_data("namespace-gap-run"),
         idempotency_key="namespace-gap-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -1096,7 +1077,6 @@ def test_initialize_normalizes_legacy_process_attribution_conflict(service, admi
         admin,
         request_data("recover-attribution-run"),
         idempotency_key="recover-attribution-claim",
-        activate_if_allocated=True,
     )
     assert claimed["lease"] is not None
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -1161,7 +1141,6 @@ def test_endpoint_operator_can_release_empty_conflicted_lease_after_fresh_observ
         admin,
         request_data("clear-empty-conflict"),
         idempotency_key="clear-empty-conflict-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -1222,7 +1201,6 @@ def test_owner_can_release_legacy_conflict_while_process_is_observed(service, ad
         admin,
         request_data("keep-conflict"),
         idempotency_key="keep-conflict-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -1286,7 +1264,6 @@ def test_initialize_resolves_stale_alerts_for_terminal_lease(service, admin) -> 
         admin,
         request_data("startup-alert-repair"),
         idempotency_key="startup-alert-repair-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     service.release_lease(
@@ -1342,7 +1319,6 @@ def test_a_collector_round_resolves_alerts_for_a_lease_without_active_resources(
         admin,
         request_data("resource-alert-repair"),
         idempotency_key="resource-alert-repair-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
 
@@ -1392,7 +1368,6 @@ def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin)
         admin,
         request_data("clear-idle-lease"),
         idempotency_key="clear-idle-lease-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     assert service.list_gpus(admin)["data"][0]["state"] == "HELD"
@@ -2003,9 +1978,9 @@ def test_allocator_can_claim_an_unregistered_project_without_login_token(service
         request_data("unregistered-project", project_id="storyboard"),
         idempotency_key="unregistered-project",
     )
-    assert claimed["request"]["project_id"] == "storyboard"
+    assert claimed["lease"]["project_id"] == "storyboard"
     assert any(
-        item["id"] == claimed["request"]["id"] for item in service.list_requests(agent)["data"]
+        item["id"] == claimed["lease"]["id"] for item in service.list_leases(agent)["data"]
     )
     assert "tokens" not in str(service.snapshot(admin))
 
@@ -2032,7 +2007,7 @@ def test_one_hundred_concurrent_requests_never_double_lease(service, admin) -> N
     leases = [result["lease"] for result in results if result is not None]
     gpu_ids = [gpu_id for lease in leases for gpu_id in lease["gpu_ids"]]
     assert len(gpu_ids) == len(set(gpu_ids)) == 4
-    assert all(result["request"]["state"] == "LEASED" for result in results if result is not None)
+    assert all(result["lease"]["state"] == "HELD" for result in results if result is not None)
 
 
 def test_database_unique_index_rejects_duplicate_active_gpu(service, admin) -> None:
@@ -2045,33 +2020,14 @@ def test_database_unique_index_rejects_duplicate_active_gpu(service, admin) -> N
     assert error.value.code == "no_capacity"
 
     def illegal_duplicate(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
-        request = AllocationRequest(
-            id="illegal-request",
+        lease = Lease(
+            id="illegal",
             actor_id=admin.id,
             project_id="project-a",
-            auto_activate=False,
             task_ref="illegal-duplicate",
             purpose="verify active GPU uniqueness",
             constraints_json="{}",
             duration_seconds=3600,
-            expected_duration_seconds=None,
-            start_after=None,
-            deadline=None,
-            approval_ref=None,
-            state="LEASED",
-            priority_class="normal",
-            blocked_reason=None,
-            created_at=now,
-            updated_at=now,
-        )
-        session.add(request)
-        session.flush()
-        lease = Lease(
-            id="illegal",
-            request_id=request.id,
-            actor_id=admin.id,
-            project_id="project-a",
             state="HELD",
             issued_at=utcnow(),
             expires_at=utcnow() + timedelta(hours=1),
@@ -2115,7 +2071,6 @@ def test_cooperative_actor_labels_are_not_admin_and_lease_ownership_is_exact(ser
         )
     assert override_forbidden.value.code == "operator_role_required"
     assert service.list_leases(other)["data"] == []
-    assert service.list_requests(other)["data"] == []
 
 
 def test_direct_lease_returns_executable_resources_and_accounts_endpoint_commitments(
@@ -2288,7 +2243,6 @@ def test_reassigned_active_task_auto_binds_process_on_its_new_gpu(service, admin
         admin,
         request_data("running-gpu-move"),
         idempotency_key="running-gpu-move-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     service.ingest_observation(
@@ -2479,7 +2433,7 @@ def test_stale_telemetry_resets_the_idle_clock_instead_of_reclaiming(service, ad
     _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
 
     stale_cutoff = utcnow() - timedelta(
-        seconds=service.inventory.collector.stale_after_seconds * 10
+        seconds=service.collector.stale_after_seconds * 10
     )
 
     def age_telemetry(session):  # type: ignore[no-untyped-def]
@@ -2774,7 +2728,7 @@ def test_alerts_do_not_outlive_the_lease_or_server_they_describe(service, admin)
         )
         assert state is not None
         state.last_success_at = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 60
+            seconds=service.collector.stale_after_seconds + 60
         )
         session.commit()
     service.record_provider_failure("endpoint-b", "CollectionError: timed out")
@@ -2849,7 +2803,7 @@ def test_stale_last_success_with_error_reports_error_and_alerts(service, admin) 
         )
         assert state is not None
         state.last_success_at = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 60
+            seconds=service.collector.stale_after_seconds + 60
         )
         session.commit()
 
@@ -2870,7 +2824,7 @@ def test_recovering_observation_clears_error_status_and_alert(service, admin) ->
         )
         assert state is not None
         state.last_success_at = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 60
+            seconds=service.collector.stale_after_seconds + 60
         )
         session.commit()
     service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
@@ -2953,7 +2907,7 @@ def test_one_physical_gpu_belongs_to_exactly_one_endpoint(service, admin) -> Non
         )
         assert gpu is not None
         gpu.last_seen_at = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 60
+            seconds=service.collector.stale_after_seconds + 60
         )
         session.commit()
 
@@ -3076,7 +3030,7 @@ def _make_unreachable(service, endpoint_id: str) -> None:  # noqa: ANN001
         )
         assert state is not None
         state.last_success_at = utcnow() - timedelta(
-            seconds=service.inventory.collector.stale_after_seconds + 600
+            seconds=service.collector.stale_after_seconds + 600
         )
         session.commit()
 
@@ -3256,7 +3210,6 @@ def test_a_card_its_owner_released_comes_back_once_the_absence_closes(service, a
         admin,
         request_data("release-then-reapply", count=2),
         idempotency_key="release-then-reapply-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     service.ingest_observation(
@@ -3284,7 +3237,6 @@ def test_a_card_its_owner_released_comes_back_once_the_absence_closes(service, a
         admin,
         request_data("release-then-reapply-2", count=2),
         idempotency_key="release-then-reapply-claim-2",
-        activate_if_allocated=True,
     )
     assert again["lease"] is not None
     assert len(again["lease"]["gpu_ids"]) == 2

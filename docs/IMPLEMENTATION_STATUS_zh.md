@@ -67,7 +67,7 @@
 
 占卡 GPU 对 APP、REST 和 MCP 仍计为可用；`desired=ON, actual=OFF` 时 GPU 空闲则仍可申请，同时下一轮按策略重新启动 helper。真正分配前，Agent 申请和 macOS App / REST 人工改派都复用同一个「选中 GPU → 逐卡停止 helper → 定向采集 → 结束占卡记录 → 普通申请或改派」实现。
 
-loopback 控制面不使用登录 token：没有 token model、登录页面、签发接口或撤销接口。服务器永久删除只在 REST `DELETE /api/v1/endpoints/{id}` 与桌面 App；它故意不是 MCP 工具。旧 daemon 缺少 `endpoint_delete` 时会被替换为内置后端。删除会写入墓碑，YAML 清单在重启或 `sync_inventory` 时不会把已删服务器复活；用户显式重新添加同一 endpoint 时清除墓碑。有进行中租约时 fail closed，且不停止远端进程。`pause_endpoint` / `resume_endpoint` 与预约/维护创建仍是领域方法，不再作为公共入口。当前源码另有 `20260828_0033`，去掉调度器、规划与预设表，以及 `allocation_requests.profile_id`；本文件不把它记为已在运行库上执行。升级迁移不删除已有 token 表、退役服务器、占卡请求、占卡租约或 lease resource。
+loopback 控制面不使用登录 token：没有 token model、登录页面、签发接口或撤销接口。服务器永久删除只在 REST `DELETE /api/v1/endpoints/{id}` 与桌面 App；它故意不是 MCP 工具。旧 daemon 缺少 `endpoint_delete` 时会被替换为内置后端。删除会写入墓碑，YAML 清单在重启或 `sync_inventory` 时不会把已删服务器复活；用户显式重新添加同一 endpoint 时清除墓碑。有进行中租约时 fail closed，且不停止远端进程。服务器没有停用/排空这一轴：`endpoints.lifecycle_state`、`endpoints.enabled` 与 `gpu_devices.enabled` 已随写它们的方法一并删除，`monitor.status` 与 `gpu.state` 不再有 `DISABLED` / `DRAINING`。一次申请只留一份身份：`allocation_requests` 已删除，`task_ref`、`purpose`、`constraints_json`、`duration_seconds` 四个字段随 `20260903_0037` 迁到 `leases` 上并回填，`leases.request_id` 一并去掉；从来没有一行请求进过 `QUEUED`，`GET/POST /api/v1/requests`、`POST /api/v1/requests/{id}/cancel`、`request` CLI 命令组和 `GET /metrics` 因此一并删除，快照与控制面状态不再有 `requests`，`no_capacity` 改为在 `details.excluded` 里按原因给出计数。`request.created` 等历史审计事件保留。当前源码另有 `20260828_0033`，去掉调度器、规划与预设表，以及 `allocation_requests.profile_id`；本文件不把它记为已在运行库上执行。升级迁移不删除已有 token 表、退役服务器、占卡租约或 lease resource。
 
 占卡链路没有校验摘要、自动重试、退避器、第二套定时器、自动抢占或整机占卡状态机；唯一的身份证明是固定 helper 对自身 v3 state 的只读检查，并且必须与已有 collector 观测一致，不能用于收养任意进程。
 

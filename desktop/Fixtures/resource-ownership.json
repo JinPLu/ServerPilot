@@ -29,8 +29,6 @@
           "port": 22,
           "ssh_user": "compute",
           "workspace_path": "/srv/serverpilot-fixtures",
-          "enabled": true,
-          "lifecycle_state": "active",
           "labels": {
             "fixture": "true",
             "resource_kind": "cpu-only"
@@ -71,8 +69,6 @@
           "ssh_user": "gpu",
           "server_group_id": "training-lab",
           "workspace_path": "/srv/serverpilot-fixtures",
-          "enabled": true,
-          "lifecycle_state": "active",
           "labels": {
             "fixture": "true",
             "resource_kind": "gpu"
@@ -119,7 +115,6 @@
             "fixture": "true"
           },
           "health": "OK",
-          "enabled": true,
           "state": "RUNNING_MANAGED",
           "lease": {
             "id": "lease-vision-train",
@@ -153,7 +148,6 @@
             "fixture": "true"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "processes": [],
           "telemetry": {
@@ -174,7 +168,6 @@
       "leases": [
         {
           "id": "lease-vision-train",
-          "request_id": "request-vision-train",
           "actor_id": "agent-trainer",
           "project_id": "vision-lab",
           "state": "ACTIVE",
@@ -191,21 +184,6 @@
             "blocked_reason": "lease_holder_recently_alive",
             "message": "这个租约的持有者刚刚还在：0 分钟前仍能观察到它的进程或心跳。分阶段的任务在两批之间本来就没有进程，因此要连续 10 分钟既没有进程也没有心跳，才能在这里清理。请稍后再试，或让持有者自己释放。"
           }
-        }
-      ],
-      "requests": [
-        {
-          "id": "request-robotics-gpu",
-          "actor_id": "agent-sim",
-          "project_id": "robotics",
-          "task_ref": "render-simulation",
-          "purpose": "为仿真结果生成可视化",
-          "state": "QUEUED",
-          "blocked_reason": "等待一块可用 GPU",
-          "constraints": {
-            "gpu_count": 1
-          },
-          "created_at": "2026-08-06T08:50:00Z"
         }
       ],
       "reservations": [],

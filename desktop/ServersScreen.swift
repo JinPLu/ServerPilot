@@ -973,9 +973,8 @@ private struct EndpointTableRow: View {
     ///
     /// Unreachable is not one thing: a stale local snapshot is this machine's
     /// loopback hop, not the remote server, and monitorLabel already carries
-    /// the distinct words for connection trouble versus a human-set
-    /// disabled/draining state — collapsing either into "无响应" would relabel
-    /// a deliberate pause as a failure.
+    /// the distinct words for a first connection, a late reading and a failed
+    /// probe — collapsing them into "无响应" would relabel a wait as a failure.
     private var statusWord: String {
         if !isSnapshotFresh { return "本机未更新" }
         if endpoint.monitorStatus != "ONLINE" { return endpoint.monitorLabel }

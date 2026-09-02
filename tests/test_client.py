@@ -71,7 +71,7 @@ def _state(revision: int, current: dict | None = None) -> dict:
         "schema_version": "v1",
         "snapshot_revision": revision,
         "server_time": "2026-08-06T00:00:00Z",
-        "data": {"current": current or {"gpus": [], "leases": [], "requests": []}, "history": {}},
+        "data": {"current": current or {"gpus": [], "leases": []}, "history": {}},
     }
 
 
@@ -155,7 +155,6 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
             {"id": "gpu-b", "endpoint_id": "server-b", "state": "HELD", "processes": []},
         ],
         "leases": [{"id": "lease-a", "project_id": "project-a"}],
-        "requests": [{"id": "req-a", "state": "QUEUED"}, {"id": "req-b", "state": "LEASED"}],
         "reservations": [],
         "host_capacity": [{"endpoint": {"id": "server-a"}, "admission_state": "available"}],
     }
@@ -177,8 +176,8 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
             )
         if url.endswith("/api/v1/endpoints"):
             return httpx.Response(200, json={**envelope, "data": current["endpoints"]})
-        if url.endswith("/api/v1/requests"):
-            return httpx.Response(200, json={**envelope, "data": [current["requests"][0]]})
+        if url.endswith("/api/v1/leases"):
+            return httpx.Response(200, json={**envelope, "data": current["leases"]})
         raise AssertionError(url)
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
@@ -188,7 +187,9 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
     assert client.gpus(only_available=True, compact=True)["data"] == [
         {"id": "gpu-a", "endpoint_id": "server-a", "state": "AVAILABLE"}
     ]
-    assert client.requests(queued_only=True)["data"] == [{"id": "req-a", "state": "QUEUED"}]
+    assert client.leases(project_id="project-a")["data"] == [
+        {"id": "lease-a", "project_id": "project-a"}
+    ]
     assert calls.count(("GET", "http://127.0.0.1:8787/api/v1/gpus")) == 1
     assert all(not url.endswith("/api/v1/state") for _method, url in calls)
 

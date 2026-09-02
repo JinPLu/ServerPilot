@@ -39,6 +39,14 @@ RESOLVED_ALERT_SECONDS: Final = 7 * DAY
 # minutes. Anything this old is history nothing consults.
 PROCESS_OBSERVATION_SECONDS: Final = 7 * DAY
 
+# What an endpoint last reported about itself: its plugin's allocatable
+# capacity, and the collector version installed on it. The row dies with the
+# endpoint through the foreign key, so this window only decides how long a fact
+# about a machine nobody has reached survives. A month of silence is long
+# enough that a live endpoint never ages out and short enough that a host
+# somebody stopped using does not keep answering for itself.
+ENDPOINT_OBSERVATION_FACT_SECONDS: Final = 30 * DAY
+
 # Reclaiming free pages costs a full rewrite of the file, so it is worth doing
 # only when enough of the file is free to matter. Checked after each pass;
 # in a steady state it is false and nothing happens.

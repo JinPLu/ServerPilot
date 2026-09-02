@@ -550,8 +550,6 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let observationProfile: String
     public let keepaliveAdapterID: String?
     public let keepalive: EndpointKeepaliveSummary
-    public let enabled: Bool
-    public let lifecycleState: String?
     public let monitorStatus: String
     public let monitorError: String?
     /// One value from the collector's closed failure vocabulary. The app reads
@@ -601,8 +599,6 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
             fallbackConfigured: keepaliveAdapterID != nil
         ) else { return nil }
         self.keepalive = keepalive
-        self.enabled = raw.bool("enabled", default: true)
-        self.lifecycleState = raw.string("lifecycle_state")?.uppercased()
         let monitor = raw["monitor"] as? [String: Any] ?? [:]
         self.monitorStatus = (monitor.string("status") ?? "PENDING").uppercased()
         self.monitorError = monitor.string("last_error")
@@ -651,23 +647,14 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         case "PENDING": return "正在连接"
         case "STALE": return "采集延迟"
         case "ERROR": return "连接失败"
-        case "DISABLED": return "已停用"
-        case "DRAINING": return "已暂停"
         default: return monitorStatus
         }
     }
 
-    /// Being stopped by a person and being unreachable are different answers to
-    /// different questions, so the human-set states are answered first.  Only
-    /// after them does `monitorError` -- which describes the most recent probe
-    /// attempt, never the host itself -- get read as a reason for silence.
+    /// `monitorError` describes the most recent probe attempt, never the host
+    /// itself, so it is read only as a reason for silence and never as the
+    /// status.
     public var monitorDetail: String? {
-        if monitorStatus == "DISABLED" {
-            return "这台服务器已停用，不接收新任务；不会停止远端任务。"
-        }
-        if lifecycleState == "DRAINING" || monitorStatus == "DRAINING" {
-            return "这台服务器已暂停接收新任务，正在排空；不会停止远端任务。"
-        }
         if monitorStatus == "PENDING" {
             return "正在进行首次连接"
         }
@@ -1049,7 +1036,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
     public var serverGroups: [ServerGroupRecord]
     public var gpus: [GPURecord]
     public var leases: [LeaseRecord]
-    public var requests: [AllocationRequestRecord]
     public var reservations: [ReservationRecord]
     public var history: BrokerStateHistory
     public var dataAgeSeconds: Double?
@@ -1065,7 +1051,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         serverGroups: [],
         gpus: [],
         leases: [],
-        requests: [],
         reservations: [],
         history: .empty,
         dataAgeSeconds: nil,
@@ -1113,15 +1098,14 @@ public struct BrokerSnapshot: Equatable, Sendable {
         gpus = (payload["gpus"] as? [[String: Any]] ?? []).compactMap(GPURecord.init)
         let operationalEndpointIDs = Set(endpoints.map(\.id))
         let endpointAttention = endpoints.filter {
-            ["ERROR", "STALE", "DRAINING"].contains($0.monitorStatus)
+            ["ERROR", "STALE"].contains($0.monitorStatus)
         }.count
-        let gpuAttentionStates = Set(["BUSY_UNMANAGED", "UNKNOWN_RECOVERING", "UNKNOWN_STALE", "UNHEALTHY", "CONFLICT", "ORPHANED_BUSY", "DRAINING"])
+        let gpuAttentionStates = Set(["BUSY_UNMANAGED", "UNKNOWN_RECOVERING", "UNKNOWN_STALE", "UNHEALTHY", "CONFLICT", "ORPHANED_BUSY"])
         let gpuAttention = gpus.filter {
             operationalEndpointIDs.contains($0.endpointID) && gpuAttentionStates.contains($0.state)
         }.count
         summary.attentionResources = max(summary.attentionResources, endpointAttention + gpuAttention)
         leases = (payload["leases"] as? [[String: Any]] ?? []).compactMap(LeaseRecord.init)
-        requests = (payload["requests"] as? [[String: Any]] ?? []).compactMap(AllocationRequestRecord.init)
         reservations = (payload["reservations"] as? [[String: Any]] ?? []).compactMap(ReservationRecord.init)
         dataAgeSeconds = payload.optionalDouble("data_age_seconds")
         freshnessSeconds = payload.optionalDouble("freshness_seconds")
@@ -1137,7 +1121,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         serverGroups: [ServerGroupRecord] = [],
         gpus: [GPURecord],
         leases: [LeaseRecord],
-        requests: [AllocationRequestRecord],
         reservations: [ReservationRecord] = [],
         history: BrokerStateHistory = .empty,
         dataAgeSeconds: Double?,
@@ -1152,7 +1135,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
         self.serverGroups = serverGroups
         self.gpus = gpus
         self.leases = leases
-        self.requests = requests
         self.reservations = reservations
         self.history = history
         self.dataAgeSeconds = dataAgeSeconds
@@ -1171,7 +1153,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
             && serverGroups == other.serverGroups
             && gpus == other.gpus
             && leases == other.leases
-            && requests == other.requests
             && reservations == other.reservations
             && history == other.history
             && dataAgeSeconds == other.dataAgeSeconds
@@ -1218,10 +1199,6 @@ public struct BrokerSnapshot: Equatable, Sendable {
 
     public func stableLeaseSelection(currentID: String) -> String {
         leases.contains { $0.id == currentID } ? currentID : (leases.first?.id ?? "")
-    }
-
-    public func stableRequestSelection(currentID: String) -> String {
-        requests.contains { $0.id == currentID } ? currentID : (requests.first?.id ?? "")
     }
 }
 
@@ -1287,7 +1264,6 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
     }
 
     public let id: String
-    public let requestID: String?
     public let actorID: String
     public let projectID: String
     public let kind: String
@@ -1316,7 +1292,6 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
             return nil
         }
         self.id = id
-        self.requestID = raw.string("request_id")
         self.actorID = actorID
         self.projectID = projectID
         self.kind = (raw.string("kind") ?? "workload").lowercased()
@@ -1342,49 +1317,6 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         }
     }
 
-}
-
-public struct AllocationRequestRecord: Identifiable, Equatable, Sendable {
-    public let id: String
-    public let actorID: String
-    public let projectID: String
-    public let taskReference: String
-    public let purpose: String
-    public let state: String
-    public let blockedReason: String?
-    public let gpuCount: Int
-    public let createdAt: String?
-
-    public init?(raw: [String: Any]) {
-        guard
-            let id = raw.string("id"),
-            let actorID = raw.string("actor_id"),
-            let projectID = raw.string("project_id"),
-            let taskReference = raw.string("task_ref")
-        else {
-            return nil
-        }
-        self.id = id
-        self.actorID = actorID
-        self.projectID = projectID
-        self.taskReference = taskReference
-        self.purpose = raw.string("purpose") ?? ""
-        self.state = (raw.string("state") ?? "UNKNOWN").uppercased()
-        self.blockedReason = raw.string("blocked_reason")
-        self.gpuCount = (raw["constraints"] as? [String: Any])?.int("gpu_count", default: 1) ?? 1
-        self.createdAt = raw.string("created_at")
-    }
-
-    public var stateLabel: String {
-        switch state {
-        case "QUEUED": return "排队中"
-        case "PENDING_APPROVAL": return "等待批准"
-        case "ACTIVE": return "使用中"
-        case "CANCELLED": return "已取消"
-        case "RELEASED": return "已释放"
-        default: return state
-        }
-    }
 }
 
 public struct ClaimSubmissionResult: Equatable, Sendable {

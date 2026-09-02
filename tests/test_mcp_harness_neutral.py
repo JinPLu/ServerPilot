@@ -187,7 +187,7 @@ def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) ->
     assert "coordination_uri" not in lease
     assert lease["expires_at"] is None
     assert lease["state"] == "HELD"
-    assert claimed.json()["request"]["task_ref"] == "训练任务"
+    assert claimed.json()["lease"]["task_ref"] == "训练任务"
     retried = client.post(
         "/api/v1/routine/claims",
         json={
@@ -282,7 +282,7 @@ def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
 
     with pytest.raises(BrokerClientError, match=r"no_capacity"):
         tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
-    assert app.state.service.list_requests(app.state.service.local_actor("agent"))["data"] == []
+    assert app.state.service.list_leases(app.state.service.local_actor("agent"))["data"] == []
 
     app.state.service.ingest_observation(observation(count=2))
     claimed = tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")

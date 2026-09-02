@@ -46,7 +46,6 @@ def test_control_plane_state_route_groups_current_and_history(build_app) -> None
         "gpus",
         "absent_gpu_ids",
         "leases",
-        "requests",
         "alerts",
         "host_capacity",
         "admission_boundary",

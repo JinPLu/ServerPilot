@@ -422,9 +422,6 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 }
 
-// MARK: - ServerPilot API model
-
-
 private struct StableRecordSelection: Identifiable, Equatable {
     let id: String
 }

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pytest
 from sqlalchemy import func, select
 
-from serverpilot.models import AllocationRequest, Lease
+from serverpilot.models import Lease
 from serverpilot.schemas import RequestCreate
 from serverpilot.service import BrokerError
 from tests.helpers import observation
@@ -26,8 +26,8 @@ def test_no_idle_gpu_fails_without_creating_a_waiting_record(service, admin) -> 
         service.create_request(admin, claim("no-gpu"), idempotency_key="no-gpu")
 
     assert error.value.code == "no_capacity"
+    assert error.value.details == {"gpu_count": 1, "candidate_count": 0, "excluded": {}}
     with service.database.session() as session:
-        assert session.scalar(select(func.count()).select_from(AllocationRequest)) == 0
         assert session.scalar(select(func.count()).select_from(Lease)) == 0
 
 
@@ -39,10 +39,11 @@ def test_claim_is_immediate_and_a_second_claim_does_not_queue(service, admin) ->
     with pytest.raises(BrokerError) as error:
         service.create_request(admin, claim("second"), idempotency_key="second")
     assert error.value.code == "no_capacity"
+    # The one card is held by the first claim, and that is what the answer says.
+    assert error.value.details["excluded"] == {"held": 1}
 
     with service.database.session() as session:
-        assert session.scalar(select(func.count()).select_from(AllocationRequest)) == 1
         assert session.scalar(select(func.count()).select_from(Lease)) == 1
 
     current = service.control_plane_state(admin)["data"]["current"]
-    assert current["requests"] == []
+    assert "requests" not in current

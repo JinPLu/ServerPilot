@@ -180,7 +180,6 @@ def test_workload_turnover_on_one_gpu_does_not_block_sibling_keepalive_candidate
             }
         ),
         idempotency_key="conflict-on-one-gpu-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     gpu_uuid = service.list_gpus(admin)["data"][0]["gpu_uuid"]
@@ -446,7 +445,7 @@ def test_stale_keeper_is_not_reclaimable_capacity_and_reports_error(service, adm
     gpu_id = "endpoint-a:GPU-endpoint-a-0"
     assert _gpus(service.snapshot(admin))[gpu_id]["keepalive"]["actual"] == "ON"
 
-    stale = utcnow() - timedelta(seconds=service.inventory.collector.stale_after_seconds + 60)
+    stale = utcnow() - timedelta(seconds=service.collector.stale_after_seconds + 60)
     with service.database.session() as session:
         current = session.get(TelemetryCurrent, gpu_id)
         assert current is not None
@@ -601,7 +600,6 @@ def test_absent_workload_lease_is_not_auto_released_but_can_be_cleared(service, 
             }
         ),
         idempotency_key="absent-workload",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
 

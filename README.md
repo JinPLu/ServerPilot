@@ -146,26 +146,21 @@ Either way it listens on `http://127.0.0.1:8787`.
 
 ### 2. 🖥️ Register your GPU servers
 
-ServerPilot reads a server only through one fixed command, so that command has
-to exist there first. On each Linux GPU server you administer, install the same
-version of this package for the user you will SSH in as:
+Nothing is installed on the GPU servers. ServerPilot reads them with one fixed,
+read-only SSH probe, so a server is ready as soon as you can reach it:
 
 ```bash
-# ServerPilot is not on PyPI. Install the version your control plane runs;
-# `serverpilot --version` prints it there.
-uv tool install --force "git+https://github.com/JinPLu/ServerPilot.git@v<version>"
-serverpilot-collect --schema-version 2       # must print JSON
+ssh user@host true          # must succeed without a prompt
 ```
 
-The version must match your control plane, and the entry point must be on the
-`PATH` of a **non-interactive** SSH session. That is the check that matters:
+The probe runs in a **non-interactive** SSH session, which is where `PATH`
+differs from the one you get logging in by hand. On a GPU host it expects
+`nvidia-smi` to be on that `PATH`; a host without it is registered as a CPU-only
+machine rather than rejected.
 
 ```bash
-ssh user@host serverpilot-collect --schema-version 2
+ssh user@host nvidia-smi -L  # on a GPU host, must list the cards
 ```
-
-A `PATH` set up only for login shells is the usual reason this step looks fine
-when you SSH in by hand and then fails from the control plane.
 
 Then add the SSH connection and an absolute remote working directory in the app.
 A GPU becomes allocatable only after a fresh collection succeeds. Bare metal

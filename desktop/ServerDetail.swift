@@ -174,7 +174,7 @@ struct ServerDetailSheet: View {
                                 // when the machine has stopped answering, so
                                 // that case may not borrow wording that claims
                                 // a collection which did not happen.
-                                let unreachable = !["ONLINE", "DRAINING", "DISABLED"].contains(endpoint.monitorStatus)
+                                let unreachable = endpoint.monitorStatus != "ONLINE"
                                 let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
                                 // The broker decides whether this may be
                                 // cleared. While it says no there is nothing to

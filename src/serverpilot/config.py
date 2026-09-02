@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
@@ -18,6 +19,93 @@ class ConfigurationError(ValueError):
 KeepaliveAdapterId = Literal["server-script-v1"]
 KeepalivePolicy = Literal["disabled", "idle_keepalive"]
 RESERVED_SYSTEM_ID = "serverpilot-system"
+
+# ---- the one configuration resolver ---------------------------------------
+#
+# Every configuration value the process needs is decided by `resolve` below, in
+# one order: an argument the caller was given (a CLI flag) beats the
+# environment, and the environment beats the built-in default.  `resolve` is
+# also the only place that reads the environment for configuration, so the
+# answer to "where does the control plane listen" is one function, not four
+# modules each with its own inline default that could drift from the others.
+#
+# inventory.yaml is deliberately not one of these tiers.  It is a bootstrap
+# seed, not a settings file: the endpoint table is filled from it once, while
+# that table is still empty, and `serverpilot import-servers` exists to write
+# one for that first fill.  Once an endpoint row exists, the app and the CLI
+# own endpoint inventory and the file is never re-applied over them.  What the
+# file still supplies is the collector defaults and the reclaim windows, read
+# at startup and resolved into their own value (see `CollectorSettings`).
+
+CONTROL_PLANE_URL_VARIABLE = "SERVERPILOT_URL"
+DEFAULT_CONTROL_PLANE_URL = "http://127.0.0.1:8787"
+ACTOR_VARIABLE = "SERVERPILOT_ACTOR"
+DEFAULT_ACTOR = "agent"
+AUTOSTART_VARIABLE = "SERVERPILOT_AUTOSTART"
+PROJECT_ROOT_VARIABLE = "SERVERPILOT_PROJECT_ROOT"
+
+
+def resolve(
+    variable: str,
+    *,
+    flag: str | None = None,
+    default: str = "",
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """Decide one configuration value: CLI flag > environment > default.
+
+    Empty means unset at every tier.  An exported-but-empty variable is a shell
+    unsetting it for the child, and a flag threaded through as an empty string
+    is a caller that was given nothing; neither is a claim that the control
+    plane lives at the empty string.
+    """
+
+    if flag:
+        return flag
+    source = os.environ if environment is None else environment
+    return source.get(variable) or default
+
+
+def control_plane_url(
+    flag: str | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """The loopback control plane every client, the MCP and the daemon dial."""
+
+    return resolve(
+        CONTROL_PLANE_URL_VARIABLE,
+        flag=flag,
+        default=DEFAULT_CONTROL_PLANE_URL,
+        environment=environment,
+    )
+
+
+def control_plane_actor(
+    flag: str | None = None,
+    *,
+    environment: Mapping[str, str] | None = None,
+) -> str:
+    """The audit label a request carries; the control plane has no auth."""
+
+    return resolve(ACTOR_VARIABLE, flag=flag, default=DEFAULT_ACTOR, environment=environment)
+
+
+def autostart_enabled(*, environment: Mapping[str, str] | None = None) -> bool:
+    """Whether an MCP session may start the macOS LaunchAgent for the user."""
+
+    return resolve(AUTOSTART_VARIABLE, default="1", environment=environment).lower() not in {
+        "0",
+        "false",
+        "no",
+    }
+
+
+def project_root_override(*, environment: Mapping[str, str] | None = None) -> Path | None:
+    """A source checkout to prefer when locating packaged migrations."""
+
+    configured = resolve(PROJECT_ROOT_VARIABLE, environment=environment)
+    return Path(configured) if configured else None
 
 
 @dataclass(frozen=True, slots=True)
@@ -103,6 +191,35 @@ class CollectorConfig(BaseModel):
     # counting toward it, so the window can be short enough that a card its
     # owner has released comes back quickly.
     process_absence_grace_seconds: int = Field(default=60, ge=30, le=3600)
+
+
+@dataclass(frozen=True, slots=True)
+class CollectorSettings:
+    """The collector settings actually in force, held apart from the file.
+
+    `InventoryConfig.collector` is what inventory.yaml says.  It used to also
+    be what was running: saving a new interval in the app wrote the number back
+    into that parsed object, so one object answered both "what does the file
+    contain" and "what is the collector doing", and after the first save it
+    disagreed with the file on disk.  The two are now separate values, and the
+    running one is immutable -- changing it means building a new one.
+    """
+
+    enabled: bool
+    interval_seconds: int
+    process_absence_grace_seconds: int
+
+    @classmethod
+    def resolved(cls, config: CollectorConfig, *, interval_seconds: int | None = None) -> CollectorSettings:
+        """Same order as `resolve`: the knob a user saved beats the file."""
+
+        return cls(
+            enabled=config.enabled,
+            interval_seconds=(
+                config.interval_seconds if interval_seconds is None else interval_seconds
+            ),
+            process_absence_grace_seconds=config.process_absence_grace_seconds,
+        )
 
     @property
     def stale_after_seconds(self) -> int:
@@ -310,36 +427,3 @@ class Settings:
     daemon_instance_id: str | None = None
     request_body_limit_bytes: int = 256_000
     rate_limit_per_minute: int = 120
-
-    @classmethod
-    def from_env(
-        cls,
-        *,
-        database_url: str | None = None,
-        inventory_path: Path | None = None,
-    ) -> Settings:
-        default_root = Path.cwd()
-        raw_database = database_url or os.environ.get(
-            "SERVERPILOT_DATABASE_URL",
-            f"sqlite:///{default_root / 'state' / 'serverpilot.sqlite3'}",
-        )
-        raw_inventory = inventory_path or Path(
-            os.environ.get("SERVERPILOT_INVENTORY", default_root / "configs" / "inventory.yaml")
-        )
-        host = os.environ.get("SERVERPILOT_BIND_HOST", "127.0.0.1")
-        if host not in {"127.0.0.1", "::1", "localhost"} and not os.environ.get(
-            "SERVERPILOT_ALLOW_NON_LOOPBACK"
-        ):
-            raise ConfigurationError(
-                "refusing non-loopback bind without SERVERPILOT_ALLOW_NON_LOOPBACK=1 and separate deployment approval"
-            )
-        try:
-            port = int(os.environ.get("SERVERPILOT_BIND_PORT", "8787"))
-        except ValueError as exc:
-            raise ConfigurationError("SERVERPILOT_BIND_PORT must be an integer") from exc
-        return cls(
-            database_url=raw_database,
-            inventory_path=Path(raw_inventory),
-            bind_host=host,
-            bind_port=port,
-        )

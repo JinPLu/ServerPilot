@@ -979,7 +979,8 @@ def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry
         assert f'case "{state}": return "{help_text}"' in usage_source
     assert "snapshot.leases" in usage_source
     assert '$0.runtimeState == "RUNNING"' in usage_source
-    assert '["BLOCKED", "QUEUED", "PENDING_APPROVAL", "REQUESTED"]' in usage_source
+    # Nothing is ever queued, so the page reads leases and nothing else.
+    assert "snapshot.requests" not in usage_source
     assert "snapshot.resourceClaims" not in usage_source
     assert "nativeLeaseIDs" not in usage_source
     assert "nativeRequestIDs" not in usage_source
@@ -1046,7 +1047,7 @@ def test_resource_ownership_fixture_covers_all_resource_usage_dimensions() -> No
     assert {lease["project_id"] for lease in leases} == {"vision-lab"}
     assert {lease["task_ref"] for lease in leases} >= {"train-resnet"}
     assert {lease["actor_id"] for lease in leases} >= {"agent-trainer"}
-    assert fixture["requests"][0]["id"] == "request-robotics-gpu"
+    assert "requests" not in fixture
     assert any(endpoint["id"] == "cpu-node-01" for endpoint in fixture["endpoints"])
     gpu_endpoint = next(
         endpoint for endpoint in fixture["endpoints"] if endpoint["id"] == "gpu-node-01"

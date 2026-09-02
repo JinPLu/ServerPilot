@@ -293,7 +293,8 @@ def test_cli_check_fails_and_shows_the_drift(
     stale = tmp_path / "AGENT_MCP_policy.en.md"
     stale.write_text("someone edited the rendering\n", encoding="utf-8")
     monkeypatch.setattr(
-        "serverpilot.cli.generated_agent_files", lambda: {stale: "the contract's own text\n"}
+        "serverpilot.cli.generated_agent_files",
+        lambda root=None: {stale: "the contract's own text\n"},
     )
 
     result = runner.invoke(app, ["mcp", "policy", "--check"])
@@ -301,3 +302,21 @@ def test_cli_check_fails_and_shows_the_drift(
     assert result.exit_code == 1
     assert "someone edited the rendering" in result.output
     assert "the contract's own text" in result.output
+
+
+def test_cli_check_declines_where_there_is_no_checkout_to_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Asked from an installed copy, the question does not apply.
+
+    It used to derive a repository root from the package's own location, which
+    inside a tool virtualenv names two files that were never meant to be there
+    and reports them missing -- indistinguishable from a broken install.
+    """
+
+    monkeypatch.setattr("serverpilot.cli.source_checkout_root", lambda: None)
+
+    result = runner.invoke(app, ["mcp", "policy", "--check"])
+
+    assert result.exit_code == 2
+    assert "no source checkout" in result.output

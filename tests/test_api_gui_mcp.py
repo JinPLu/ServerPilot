@@ -110,7 +110,7 @@ def test_api_gui_and_idempotency(build_app) -> None:
     second = client.post("/api/v1/claims", json=payload, headers=headers)
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
-    assert first.json()["request"]["duration_seconds"] == 8 * 60 * 60
+    assert first.json()["lease"]["duration_seconds"] == 8 * 60 * 60
     snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "test-agent"})
     assert snapshot.status_code == 200
     assert snapshot.json()["data"]["gpus"][0]["state"] == "HELD"
@@ -171,7 +171,6 @@ def test_endpoint_history_omits_absent_and_empty_gpu_series(service, admin) -> N
                 total_vram_mib=80_000,
                 labels_json="[]",
                 health="OK",
-                enabled=True,
                 present=True,
                 first_seen_at=now,
                 last_seen_at=now,
@@ -216,7 +215,6 @@ def test_operator_release_can_correct_another_agents_lease_but_generic_release_c
             }
         ),
         idempotency_key="operator-release-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     client = TestClient(app)
@@ -337,7 +335,6 @@ def test_control_plane_state_api_exposes_current_and_history_contract(
         "endpoints",
         "gpus",
         "leases",
-        "requests",
         "host_capacity",
     }.issubset(current)
     # Reservations and maintenance windows are gone: nothing could create one,
@@ -398,30 +395,33 @@ def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
         headers={"X-ServerPilot-Actor": "claim-agent", "Idempotency-Key": "api-claim"},
     )
     assert claimed.status_code == 200
-    assert claimed.json()["request"]["state"] == "LEASED"
     assert claimed.json()["lease"]["state"] == "HELD"
     assert claimed.json()["lease"]["project_id"] == "s"
-    assert claimed.json()["request"]["duration_seconds"] == 8 * 60 * 60
+    assert claimed.json()["lease"]["duration_seconds"] == 8 * 60 * 60
 
-    request_route = client.post(
-        "/api/v1/requests",
+    # A claim either fits now or answers no_capacity; there is no request row
+    # and no route that would create one.
+    exhausted = client.post(
+        "/api/v1/claims",
         json={
             "project_id": "s",
-            "task_ref": "request-route-no-capacity",
-            "purpose": "request-route-no-capacity",
+            "task_ref": "second-claim-no-capacity",
+            "purpose": "second-claim-no-capacity",
             "constraints": {"gpu_count": 1},
         },
-        headers={"X-ServerPilot-Actor": "claim-agent", "Idempotency-Key": "request-route"},
+        headers={"X-ServerPilot-Actor": "claim-agent", "Idempotency-Key": "second-claim"},
     )
-    assert request_route.status_code == 409
-    assert request_route.json()["error"]["code"] == "no_capacity"
+    assert exhausted.status_code == 409
+    assert exhausted.json()["error"]["code"] == "no_capacity"
+    assert exhausted.json()["error"]["details"]["excluded"] == {"held": 1}
 
-    cancel_route = client.post(
-        "/api/v1/requests/missing-request/cancel",
-        headers={"X-ServerPilot-Actor": "claim-agent", "Idempotency-Key": "cancel-route"},
-    )
-    assert cancel_route.status_code == 404
-    assert cancel_route.json()["error"]["code"] == "request_not_found"
+    for gone in ("/api/v1/requests", "/api/v1/requests/missing-request/cancel"):
+        assert (
+            client.post(gone, json={}, headers={"X-ServerPilot-Actor": "claim-agent"}).status_code
+            == 404
+        )
+    assert client.get("/api/v1/requests", headers={"X-ServerPilot-Actor": "claim-agent"}).status_code == 404
+    assert client.get("/metrics").status_code == 404
 
 
 def test_api_claim_bootstraps_an_empty_project_registry(build_app) -> None:
@@ -597,7 +597,6 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
         "/api/v1/endpoints", json=endpoint, headers={**actor, "Idempotency-Key": "endpoint-create"}
     )
     assert created.status_code == 200
-    assert created.json()["endpoint"]["lifecycle_state"] == "active"
     assert created.json()["endpoint"]["observation_profile"] == "linux"
     assert created.json()["endpoint"]["workspace_path"] == "/srv/endpoint-lifecycle"
     duplicate = client.post(

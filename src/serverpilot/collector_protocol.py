@@ -1,18 +1,15 @@
-"""Shared constants for the sealed remote collector protocol.
+"""The wire shape a plugin's ``observe`` must answer in.
 
-The broker always invokes this exact entry point.  A target administrator may
-implement the command locally (for example to reach a containerized
-``nvidia-smi``), but cannot influence its path or arguments through endpoint
-configuration.
+This was once the protocol for a collector script installed on each observed
+server, invoked over SSH. That path is gone: an endpoint is observed either by
+the one built-in probe, which needs nothing on the remote host, or by a local
+plugin. What survives is the JSON contract itself, because a plugin's
+``observe`` output is validated against exactly this shape.
 """
 
 from __future__ import annotations
 
 SERVER_SCRIPT_SCHEMA_VERSION = 2
-SERVER_SCRIPT_ENTRYPOINT = "serverpilot-collect"
-SERVER_SCRIPT_REMOTE_COMMAND = (
-    f"{SERVER_SCRIPT_ENTRYPOINT} --schema-version {SERVER_SCRIPT_SCHEMA_VERSION}"
-)
 
 # Optional snapshot field. Schema admission stays on ``schema_version``; a
 # missing implementation version must not reject an otherwise valid collector.

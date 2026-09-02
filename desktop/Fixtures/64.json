@@ -28,8 +28,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -63,8 +61,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -98,8 +94,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -133,8 +127,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -168,8 +160,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -203,8 +193,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -238,8 +226,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -273,8 +259,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -308,7 +292,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -329,7 +312,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -350,7 +332,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -371,7 +352,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -392,7 +372,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -413,7 +392,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -434,7 +412,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -455,7 +432,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -476,7 +452,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -497,7 +472,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -518,7 +492,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -539,7 +512,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -560,7 +532,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -581,7 +552,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -602,7 +572,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -623,7 +592,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -644,7 +612,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -665,7 +632,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -686,7 +652,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -707,7 +672,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -728,7 +692,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -749,7 +712,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -770,7 +732,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -791,7 +752,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -812,7 +772,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -833,7 +792,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -854,7 +812,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -875,7 +832,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -896,7 +852,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -917,7 +872,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -938,7 +892,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -959,7 +912,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -980,7 +932,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -1001,7 +952,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -1022,7 +972,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -1043,7 +992,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -1064,7 +1012,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -1085,7 +1032,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -1106,7 +1052,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -1127,7 +1072,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -1148,7 +1092,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -1169,7 +1112,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -1190,7 +1132,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -1211,7 +1152,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -1232,7 +1172,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -1253,7 +1192,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -1274,7 +1212,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -1295,7 +1232,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -1316,7 +1252,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -1337,7 +1272,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -1358,7 +1292,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -1379,7 +1312,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -1400,7 +1332,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -1421,7 +1352,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -1442,7 +1372,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -1463,7 +1392,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -1484,7 +1412,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -1505,7 +1432,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1280,
@@ -1526,7 +1452,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1536,
@@ -1547,7 +1472,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1792,
@@ -1568,7 +1492,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2048,
@@ -1589,7 +1512,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2304,
@@ -1610,7 +1532,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2560,
@@ -1631,7 +1552,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 2816,
@@ -1642,7 +1562,6 @@
         }
       ],
       "leases": [],
-      "requests": [],
       "data_age_seconds": 4,
       "reservations": [],
       "freshness_seconds": 30,

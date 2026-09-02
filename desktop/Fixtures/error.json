@@ -28,8 +28,6 @@
           "expected_gpu_count": 1,
           "expected_gpu_total_vram_mib": 81920,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ERROR",
             "error_code": "connect_timeout",
@@ -66,7 +64,6 @@
             "surface": "desktop-ui"
           },
           "health": "ATTENTION",
-          "enabled": true,
           "state": "UNKNOWN_RECOVERING",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -78,7 +75,6 @@
         }
       ],
       "leases": [],
-      "requests": [],
       "data_age_seconds": null,
       "reservations": [],
       "freshness_seconds": 30,

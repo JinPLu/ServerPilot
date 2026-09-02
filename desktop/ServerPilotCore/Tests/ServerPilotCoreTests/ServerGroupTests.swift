@@ -428,7 +428,7 @@ import Testing
         )
         GroupRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
             "snapshot_revision": 102,
-            "request": ["id": "req-1"],
+            "lease": ["id": "lease-1"],
         ])
         defer { GroupRouteURLProtocol.reset() }
         store.connectForTesting(
@@ -792,7 +792,6 @@ import Testing
                     ],
                     "gpus": [],
                     "leases": [],
-                    "requests": [],
                     "data_age_seconds": 1,
                     "freshness_seconds": 30,
                     "admission_boundary": "test",

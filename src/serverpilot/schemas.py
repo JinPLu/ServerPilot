@@ -138,57 +138,13 @@ class RequestCreate(StrictModel):
     task_ref: str = Field(min_length=1, max_length=255)
     purpose: str = Field(min_length=1, max_length=1000)
     duration_seconds: int = Field(default=DEFAULT_LEASE_WINDOW_SECONDS, ge=60, le=60 * 60 * 24 * 30)
-    start_after: datetime | None = None
-    deadline: datetime | None = None
-    approval_ref: str | None = Field(default=None, max_length=500)
     constraints: ResourceConstraints
 
     @model_validator(mode="after")
-    def validate_times(self) -> RequestCreate:
+    def validate_gpu_count(self) -> RequestCreate:
         if self.constraints.gpu_count == 0:
             raise ValueError("bare-metal requests require gpu_count >= 1")
-        if self.start_after and self.start_after.tzinfo is None:
-            raise ValueError("start_after must include a timezone")
-        if self.deadline and self.deadline.tzinfo is None:
-            raise ValueError("deadline must include a timezone")
-        if self.start_after and self.deadline and self.deadline <= self.start_after:
-            raise ValueError("deadline must be after start_after")
         return self
-
-
-class RequestCreateFlat(StrictModel):
-    """CLI-friendly request form that is converted to the canonical nested schema."""
-
-    project_id: str = Field(min_length=1, max_length=64)
-    task_ref: str = Field(min_length=1, max_length=255)
-    purpose: str = Field(min_length=1, max_length=1000)
-    gpu_count: int = Field(ge=1)
-    duration_seconds: int = Field(default=DEFAULT_LEASE_WINDOW_SECONDS, ge=60)
-    start_after: datetime | None = None
-    deadline: datetime | None = None
-    approval_ref: str | None = Field(default=None, max_length=500)
-    min_available_cpu_cores: float | None = Field(default=None, ge=0)
-    min_available_memory_mib: int | None = Field(default=None, ge=0)
-    min_total_vram_mib: int | None = Field(default=None, ge=1)
-    min_free_vram_mib: int | None = Field(default=None, ge=0)
-    nodes: int = Field(default=1, ge=1)
-    gpus_per_node: int | None = Field(default=None, ge=1)
-    same_host: bool = False
-    placement: Literal["pack", "spread", "exact"] = "pack"
-    endpoint_labels: list[str] = Field(default_factory=list)
-    gpu_labels: list[str] = Field(default_factory=list)
-    endpoint_ids: list[str] = Field(default_factory=list)
-    gpu_ids: list[str] = Field(default_factory=list)
-    deny_endpoint_ids: list[str] = Field(default_factory=list)
-    deny_gpu_ids: list[str] = Field(default_factory=list)
-    server_group_ids: list[str] = Field(default_factory=list)
-    allow_conservative_backfill: bool = False
-
-    def canonical(self) -> RequestCreate:
-        data = self.model_dump()
-        constraint_fields = set(ResourceConstraints.model_fields)
-        constraints = {key: data.pop(key) for key in list(data) if key in constraint_fields}
-        return RequestCreate.model_validate({**data, "constraints": constraints})
 
 
 class LeaseBind(StrictModel):

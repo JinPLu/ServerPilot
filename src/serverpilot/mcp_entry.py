@@ -13,6 +13,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from serverpilot.config import CONTROL_PLANE_URL_VARIABLE, control_plane_url
+
 MCP_SERVER_NAME = "serverpilot"
 MCP_CLIENTS = ("codex", "claude", "cursor")
 MCP_ENTRY_UNAVAILABLE_HINT = (
@@ -53,7 +55,7 @@ def resolve_mcp_command() -> str:
 def mcp_server_entry(command: str) -> dict[str, Any]:
     return {
         "command": command,
-        "env": {"SERVERPILOT_URL": os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787")},
+        "env": {CONTROL_PLANE_URL_VARIABLE: control_plane_url()},
     }
 
 

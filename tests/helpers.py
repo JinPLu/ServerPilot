@@ -88,7 +88,7 @@ def age_out_processes(service: Any) -> None:
     """
 
     stale = datetime.now(UTC) - timedelta(
-        seconds=service.inventory.collector.process_absence_grace_seconds + 60
+        seconds=service.collector.process_absence_grace_seconds + 60
     )
 
     def write(session: Any) -> None:

@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from serverpilot import __version__, server_collector
+from serverpilot import __version__
 from serverpilot.adapters import HOST_RESOURCES_QUERY, RAW_SSH_OBSERVATION_ADAPTER, RawSSHResult
 from serverpilot.collector import (
     GPU_CPU_ONLY,
@@ -149,87 +149,7 @@ def test_host_resource_probe_parses_cgroup_memory_by_marker() -> None:
     assert unread.memory_current_mib is None
 
 
-def test_server_collector_assigns_cuda_ordinals_by_pci_bus(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def fake_query(argument: str) -> str:
-        if argument == server_collector.GPU_QUERY:
-            return (
-                "0, GPU-late, Test GPU, 100000, 0, 100000, 0, 0, 35, 100.0, P0, "
-                "00000000:AF:00.0\n"
-                "7, GPU-early, Test GPU, 100000, 0, 100000, 0, 0, 35, 100.0, P0, "
-                "00000000:01:00.0\n"
-            )
-        if argument == server_collector.PROCESS_QUERY:
-            return "No running processes found\n"
-        raise AssertionError(argument)
 
-    monkeypatch.setattr(server_collector, "_run_nvidia_smi", fake_query)
-
-    gpu_probe_status, gpus, processes = server_collector._gpu_snapshot()
-
-    assert gpu_probe_status == "gpu"
-    assert [
-        (gpu["gpu_uuid"], gpu["gpu_index"], gpu["cuda_ordinal"]) for gpu in gpus
-    ] == [
-        ("GPU-early", 7, 0),
-        ("GPU-late", 0, 1),
-    ]
-    assert processes == []
-
-
-def test_server_collector_reads_cgroup_usage_and_omits_missing_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    cpu_max = tmp_path / "cpu.max"
-    cpu_stat = tmp_path / "cpu.stat"
-    cpu_max.write_text("3000000 100000\n", encoding="utf-8")
-    cpu_stat.write_text("usage_usec 1600000\nuser_usec 10\n", encoding="utf-8")
-    monkeypatch.setattr(server_collector, "CGROUP_CPU_MAX_PATH", str(cpu_max))
-    monkeypatch.setattr(server_collector, "CGROUP_CPU_STAT_PATH", str(cpu_stat))
-    assert server_collector._cgroup_cpu_snapshot() == {
-        "cpu_usage_usec": 1_600_000,
-        "cpu_quota_usec": 3_000_000,
-        "cpu_period_usec": 100_000,
-    }
-
-    cpu_max.write_text("max 100000\n", encoding="utf-8")
-    assert server_collector._cgroup_cpu_snapshot() == {
-        "cpu_usage_usec": 1_600_000,
-        "cpu_quota_usec": None,
-        "cpu_period_usec": 100_000,
-    }
-
-    monkeypatch.setattr(server_collector, "CGROUP_CPU_MAX_PATH", str(tmp_path / "missing.max"))
-    monkeypatch.setattr(server_collector, "CGROUP_CPU_STAT_PATH", str(tmp_path / "missing.stat"))
-    assert server_collector._cgroup_cpu_snapshot() == {}
-
-
-def test_server_collector_reads_cgroup_memory_and_omits_missing_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    memory_max = tmp_path / "memory.max"
-    memory_current = tmp_path / "memory.current"
-    memory_max.write_text("261993005056\n", encoding="utf-8")
-    memory_current.write_text("53687091200\n", encoding="utf-8")
-    monkeypatch.setattr(server_collector, "CGROUP_MEMORY_MAX_PATH", str(memory_max))
-    monkeypatch.setattr(server_collector, "CGROUP_MEMORY_CURRENT_PATH", str(memory_current))
-    assert server_collector._cgroup_memory_snapshot() == {
-        "memory_limit_mib": 249_856,
-        "memory_current_mib": 51_200,
-    }
-
-    memory_max.write_text("max\n", encoding="utf-8")
-    assert server_collector._cgroup_memory_snapshot() == {
-        "memory_limit_mib": None,
-        "memory_current_mib": 51_200,
-    }
-
-    monkeypatch.setattr(server_collector, "CGROUP_MEMORY_MAX_PATH", str(tmp_path / "missing.max"))
-    monkeypatch.setattr(
-        server_collector, "CGROUP_MEMORY_CURRENT_PATH", str(tmp_path / "missing.current")
-    )
-    assert server_collector._cgroup_memory_snapshot() == {}
 
 
 def test_fake_collector_never_needs_a_shell(service, inventory) -> None:

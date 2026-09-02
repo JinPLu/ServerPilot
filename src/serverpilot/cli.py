@@ -15,7 +15,6 @@ from typing import Annotated, Any
 
 import typer
 import uvicorn
-import yaml
 
 from serverpilot import __version__
 from serverpilot.agent_contract import (
@@ -24,6 +23,7 @@ from serverpilot.agent_contract import (
     policy_destination,
     render_agent_policy,
     render_policy_block,
+    source_checkout_root,
 )
 from serverpilot.api import create_app
 from serverpilot.client import BrokerClient, BrokerClientError
@@ -46,10 +46,6 @@ from serverpilot.mcp_entry import (
     mcp_registration,
     mcp_server_entry,
     resolve_mcp_command,
-)
-from serverpilot.schemas import (
-    RequestCreate,
-    RequestCreateFlat,
 )
 from serverpilot.service import BrokerError, BrokerService
 
@@ -76,7 +72,6 @@ def _root(
 
 endpoint_app = typer.Typer(no_args_is_help=True)
 gpu_app = typer.Typer(no_args_is_help=True)
-request_app = typer.Typer(no_args_is_help=True)
 lease_app = typer.Typer(
     no_args_is_help=True,
     help="Update cooperative lease state; never start or stop workloads.",
@@ -88,7 +83,6 @@ daemon_app = typer.Typer(
 )
 app.add_typer(endpoint_app, name="endpoint")
 app.add_typer(gpu_app, name="gpu")
-app.add_typer(request_app, name="request")
 app.add_typer(lease_app, name="lease")
 plugin_app = typer.Typer(no_args_is_help=True, help="Discover and install local server plugins.")
 keepalive_app = typer.Typer(
@@ -400,53 +394,6 @@ def who(
 ) -> None:
     response = _call(lambda: _client(url, actor).leases(project_id=project))
     _print(response, as_json)
-
-
-def _request_from_file(path: Path) -> RequestCreate:
-    raw = yaml.safe_load(path.read_text(encoding="utf-8"))
-    if not isinstance(raw, dict):
-        raise typer.BadParameter("request YAML must be a mapping")
-    return RequestCreate.model_validate(raw) if "constraints" in raw else RequestCreateFlat.model_validate(raw).canonical()
-
-
-@request_app.command("create")
-def request_create(
-    file: Annotated[Path, typer.Option("--file", exists=True, readable=True)],
-    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
-    as_json: Annotated[bool, typer.Option("--json")]=False,
-    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None,
-    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None,
-) -> None:
-    request_data = _request_from_file(file)
-    response = _call(
-        lambda: _client(url, actor).post(
-            "/api/v1/requests",
-            request_data.model_dump(mode="json"),
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-    )
-    _print(response, as_json)
-
-
-@request_app.command("queue")
-def request_queue(
-    as_json: Annotated[bool, typer.Option("--json")]=False,
-    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None,
-    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None,
-) -> None:
-    response = _call(lambda: _client(url, actor).requests(queued_only=True))
-    _print(response, as_json)
-
-
-@request_app.command("cancel")
-def request_cancel(
-    request_id: str,
-    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
-    as_json: Annotated[bool, typer.Option("--json")]=False,
-    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None,
-    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None,
-) -> None:
-    _print(_call(lambda: _client(url, actor).post(f"/api/v1/requests/{request_id}/cancel", {}, idempotency_key=_idempotency_key(idempotency_key))), as_json)
 
 
 @lease_app.command("activate")
@@ -825,8 +772,16 @@ def mcp_policy(
         typer.echo("give exactly one of --print, --install, --check", err=True)
         raise typer.Exit(code=2)
     if check:
+        checkout = source_checkout_root()
+        if checkout is None:
+            typer.echo(
+                "no source checkout here; --check compares the tracked generated "
+                "files against the contract and only applies in one",
+                err=True,
+            )
+            raise typer.Exit(code=2)
         stale = 0
-        for path, expected in generated_agent_files().items():
+        for path, expected in generated_agent_files(checkout).items():
             if not path.is_file():
                 typer.echo(f"missing: {path}", err=True)
                 stale += 1

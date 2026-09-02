@@ -23,8 +23,6 @@
           "labels": {
             "fixture": "true"
           },
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -57,7 +55,6 @@
             "fixture": "true"
           },
           "health": "ATTENTION",
-          "enabled": true,
           "state": "CONFLICT",
           "telemetry": {
             "memory_used_mib": 51200,
@@ -88,7 +85,6 @@
             "fixture": "true"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -116,7 +112,6 @@
           }
         }
       ],
-      "requests": [],
       "data_age_seconds": 3,
       "reservations": [],
       "freshness_seconds": 30,

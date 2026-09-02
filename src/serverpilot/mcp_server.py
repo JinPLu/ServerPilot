@@ -5,7 +5,6 @@ from __future__ import annotations
 import hashlib
 import inspect
 import math
-import os
 import re
 import secrets
 from collections.abc import AsyncIterator
@@ -29,6 +28,7 @@ from serverpilot.client import (
     parse_broker_response,
     request_was_never_sent,
 )
+from serverpilot.config import control_plane_url
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
 # The agent surface reports the GPU state code, not the control plane's
@@ -49,8 +49,6 @@ ROUTINE_GPU_STATUS = {
     "HELD": "held_idle",
     "LEASED_IDLE": "held_idle",
     "MAINTENANCE": "maintenance",
-    "DRAINING": "draining",
-    "DISABLED": "disabled",
     "UNHEALTHY": "unhealthy",
     "UNKNOWN_STALE": "unreachable",
     "UNKNOWN_RECOVERING": "observing",
@@ -73,7 +71,7 @@ _http_client: httpx.AsyncClient | None = None
 
 
 def _broker_url() -> str:
-    url = os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787")
+    url = control_plane_url()
     if not url.startswith(("http://", "https://")):
         raise BrokerClientError("SERVERPILOT_URL must start with http:// or https://")
     return url.rstrip("/")
@@ -224,15 +222,19 @@ def _routine_no_capacity(
 ) -> dict[str, Any]:
     """Report a documented outcome as data rather than as a tool failure."""
 
-    return {
-        "no_capacity": {
-            "reason": "no_single_server_satisfies_the_request",
-            "message": str(exc).split(": ", 2)[-1],
-            "gpu_count": gpu_count,
-            "server_id": server_id,
-            "server_group_id": server_group_id,
-        }
+    payload: dict[str, Any] = {
+        "reason": "no_single_server_satisfies_the_request",
+        "message": str(exc).split(": ", 2)[-1],
+        "gpu_count": gpu_count,
+        "server_id": server_id,
+        "server_group_id": server_group_id,
     }
+    # Counts per exclusion reason, straight from the allocator that turned the
+    # cards down, so the caller sees what stood in the way rather than prose.
+    excluded = exc.details.get("excluded")
+    if isinstance(excluded, dict) and excluded:
+        payload["excluded"] = excluded
+    return {"no_capacity": payload}
 
 
 async def _routine_attach_open_leases(documented: dict[str, Any], client: Any) -> None:

@@ -534,8 +534,6 @@ public final class BrokerStore: ObservableObject {
                 return
             }
             let lease = payload?["lease"] as? [String: Any]
-            let request = payload?["request"] as? [String: Any]
-            let requestID = request?.string("id") ?? "未知请求"
             let leaseID = lease?.string("id")
             let allocated = lease != nil
             let message: String
@@ -543,7 +541,7 @@ public final class BrokerStore: ObservableObject {
                 let gpuIDs = lease?["gpu_ids"] as? [String] ?? []
                 message = "已申领，待使用：\(max(gpuIDs.count, draft.gpuCount)) 个 GPU，租约 \(leaseID) 已生效。这里只分配资源，不会启动任务。"
             } else {
-                message = "当前无可用容量（no_capacity），请求 \(requestID) 本次未排队。未获得租约，请勿启动任务。"
+                message = "当前无可用容量（no_capacity），本次申请未排队。未获得租约，请勿启动任务。"
             }
             self.notice = message
             self.errorMessage = nil

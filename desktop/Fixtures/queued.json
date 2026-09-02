@@ -28,8 +28,6 @@
           "expected_gpu_count": 1,
           "expected_gpu_total_vram_mib": 81920,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -63,7 +61,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "RESERVED",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -75,21 +72,6 @@
         }
       ],
       "leases": [],
-      "requests": [
-        {
-          "id": "request-fixture-queued",
-          "actor_id": "fixture",
-          "project_id": "fixture-project",
-          "task_ref": "queued",
-          "purpose": "fixture",
-          "state": "QUEUED",
-          "constraints": {
-            "gpu_count": 2
-          },
-          "blocked_reason": "reservation reservation-fixture-queued is active",
-          "created_at": "2026-08-01T00:30:00Z"
-        }
-      ],
       "reservations": [
         {
           "id": "reservation-fixture-queued",

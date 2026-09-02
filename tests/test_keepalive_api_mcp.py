@@ -353,7 +353,6 @@ class WorkloadConflictCollector(FakeTargetedCollector):
                     }
                 ),
                 idempotency_key="keepalive-batch-second-gpu-conflict",
-                activate_if_allocated=True,
             )
             self.conflict_created = True
         return await super().collect_selected(service, endpoints)
@@ -820,7 +819,6 @@ def test_keepalive_api_starts_sibling_when_one_gpu_has_workload_conflict(
             }
         ),
         idempotency_key="conflict-before-keepalive-claim",
-        activate_if_allocated=True,
     )
     lease_id = claimed["lease"]["id"]
     started_at = datetime.now(UTC)
@@ -1444,7 +1442,6 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
             service.local_actor("agent-a"),
             RequestCreate.model_validate(claim_payload),
             idempotency_key="claim-one-keeper-direct-bypass",
-            activate_if_allocated=True,
         )
     assert bypassed.value.code == "no_capacity"
     assert adapter.calls == [("endpoint-a", True, (GPU_UUIDS[0],))]

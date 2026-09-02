@@ -15,9 +15,26 @@ import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 
-# The generated files live in the source checkout; an installed copy of the
-# package has neither, and `--check` says so rather than inventing paths.
-REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+# The generated files are tracked in the source checkout. An installed copy of
+# the package has no checkout around it, and `parents[2]` there is a directory
+# inside the tool's virtualenv -- so this is only a repository root when it
+# actually looks like one. `source_checkout_root()` is what callers should ask.
+_PACKAGE_PARENT = Path(__file__).resolve().parents[2]
+REPOSITORY_ROOT = _PACKAGE_PARENT
+
+
+def source_checkout_root(root: Path = _PACKAGE_PARENT) -> Path | None:
+    """The checkout this package was imported from, or None if there is none.
+
+    Drift between the contract and the files generated from it is a question
+    only a checkout can answer. Asked from an installed copy it used to name
+    two paths inside the virtualenv and report them missing, which reads as a
+    broken installation rather than as a question that does not apply.
+    """
+
+    if (root / "pyproject.toml").is_file() and (root / "src" / "serverpilot").is_dir():
+        return root
+    return None
 
 
 @dataclass(frozen=True)

@@ -191,8 +191,7 @@ func pressureColor(_ fraction: Double?) -> Color {
 
 
 func endpointNeedsAttention(_ endpoint: EndpointRecord) -> Bool {
-    ["ERROR", "STALE", "DISABLED", "DRAINING"].contains(endpoint.monitorStatus)
-        || !endpoint.enabled
+    ["ERROR", "STALE"].contains(endpoint.monitorStatus)
 }
 
 
@@ -204,8 +203,6 @@ func gpuNeedsAttention(_ gpu: GPURecord) -> Bool {
         "UNHEALTHY",
         "CONFLICT",
         "ORPHANED_BUSY",
-        "DISABLED",
-        "DRAINING",
         "MAINTENANCE"
     ].contains(gpu.state)
 }
@@ -247,7 +244,7 @@ private func gpuStateColor(_ state: String) -> Color {
     // Held is real state but not a warning, and a user-chosen accent could sit
     // anywhere on the luminance scale — a neutral keeps the graphical floor.
     case "HELD", "LEASED_IDLE", "KEEPALIVE": return DesignTokens.hold
-    case "RUNNING_MANAGED", "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED", "DRAINING", "MAINTENANCE": return DesignTokens.warning
+    case "RUNNING_MANAGED", "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED", "MAINTENANCE": return DesignTokens.warning
     default: return DesignTokens.danger
     }
 }
@@ -264,8 +261,7 @@ private func gpuStateLabel(_ state: String) -> String {
     case "UNKNOWN_STALE": return "采集延迟"
     case "UNHEALTHY": return "GPU 故障"
     case "CONFLICT": return "归属待确认"
-    case "DISABLED": return "已停用"
-    case "MAINTENANCE", "DRAINING": return "不可分配"
+    case "MAINTENANCE": return "不可分配"
     default: return "不可分配"
     }
 }
@@ -314,32 +310,26 @@ func endpointStateIcon(_ state: String) -> String {
     case "PENDING": return "hourglass"
     case "STALE": return "clock.badge.exclamationmark"
     case "ERROR": return "exclamationmark.triangle.fill"
-    case "DISABLED": return "pause.circle.fill"
-    case "DRAINING": return "arrow.down.forward.and.arrow.up.backward"
     default: return "questionmark.diamond.fill"
     }
 }
 
-/// DISABLED/DRAINING are a human's own setting, not a connection failure;
-/// painting them danger-red would say the opposite of what happened. Shared
-/// by every non-ONLINE status color so the mapping lives in one table.
+/// Only a failed probe is red. Waiting for a first answer, or working from a
+/// reading that has aged out, is not the same news and is shared by every
+/// remaining non-ONLINE status so the mapping lives in one table.
 
 func endpointMonitorStatusColor(_ state: String) -> Color {
     switch state {
     case "ERROR": return DesignTokens.danger
-    case "DISABLED", "DRAINING": return DesignTokens.mutedInk
     default: return DesignTokens.warning
     }
 }
 
-/// The footer says why the sheet is not offering a claim.  A server a person
-/// stopped is not a server that went quiet, so the two get different sentences.
+/// The footer says why the sheet is not offering a claim.
 
 func endpointFooterMessage(_ endpoint: EndpointRecord) -> String {
     switch endpoint.monitorStatus {
     case "ONLINE": return "状态按设定周期自动更新"
-    case "DISABLED": return "这台服务器已停用，暂不可申请 GPU"
-    case "DRAINING": return "这台服务器正在排空，暂不接收新申请"
     case "PENDING": return "正在进行首次连接，暂不可申请 GPU"
     default: return "当前数据已过期，暂不可申请 GPU"
     }
@@ -352,9 +342,6 @@ func localizedStateReason(_ reason: String) -> String {
     }
     if reason == "GPU absent from latest complete endpoint observation" {
         return "本次更新未检测到这块 GPU"
-    }
-    if reason == "endpoint or GPU is disabled" {
-        return "服务器或 GPU 已停用"
     }
     if reason == "lease/process attribution conflict" {
         return "此前观测到的任务进程与租约绑定不匹配；请由所属任务确认当前观测，或在任务结束后释放租约"

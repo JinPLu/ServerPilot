@@ -33,7 +33,6 @@ private struct ResourceUsageBucket {
     var actorIDs: Set<String> = []
     var taskReferences: Set<String> = []
     var leases: [LeaseRecord] = []
-    var requests: [AllocationRequestRecord] = []
     var reservations: [ReservationRecord] = []
 }
 
@@ -45,12 +44,7 @@ private struct ResourceUsageGroup: Identifiable {
     let actorIDs: [String]
     let taskReferences: [String]
     let leases: [LeaseRecord]
-    let requests: [AllocationRequestRecord]
     let reservations: [ReservationRecord]
-
-    var visibleLegacyRequests: [AllocationRequestRecord] {
-        requests
-    }
 
     var assignedLegacyLeases: [LeaseRecord] {
         leases.filter { $0.runtimeState != "RUNNING" }
@@ -72,12 +66,6 @@ private struct ResourceUsageGroup: Identifiable {
         )
     }
 
-    var requestedQuantities: ResourceQuantityRecord {
-        ResourceQuantityRecord(
-            gpuCount: visibleLegacyRequests.reduce(0) { $0 + $1.gpuCount }
-        )
-    }
-
     var subtitle: String {
         switch scope {
         case .project:
@@ -90,7 +78,7 @@ private struct ResourceUsageGroup: Identifiable {
     }
 
     var activityCount: Int {
-        leases.count + visibleLegacyRequests.count + reservations.count
+        leases.count + reservations.count
     }
 
     var visibleActivityCount: Int {
@@ -105,7 +93,6 @@ private struct ResourceUsageProjection {
     let activeTaskCount: Int
     let assignedQuantities: ResourceQuantityRecord
     let runningQuantities: ResourceQuantityRecord
-    let requestedQuantities: ResourceQuantityRecord
     let groupsByScope: [ResourceUsageScope: [ResourceUsageGroup]]
 
     static let empty = ResourceUsageProjection(
@@ -115,7 +102,6 @@ private struct ResourceUsageProjection {
         activeTaskCount: 0,
         assignedQuantities: ResourceQuantityRecord(),
         runningQuantities: ResourceQuantityRecord(),
-        requestedQuantities: ResourceQuantityRecord(),
         groupsByScope: [:]
     )
 
@@ -126,7 +112,6 @@ private struct ResourceUsageProjection {
         taskCount = Set(identities.map { "\($0.projectID)\u{1F}\($0.taskReference)" }).count
         activeTaskCount = resourceUsageActiveTaskCount(snapshot: snapshot)
 
-        let pendingRequests = snapshot.requests.filter(resourceUsageRequestIsPending)
         assignedQuantities = ResourceQuantityRecord(
             gpuCount: snapshot.leases
                 .filter { $0.runtimeState != "RUNNING" }
@@ -137,10 +122,6 @@ private struct ResourceUsageProjection {
                 .filter { $0.runtimeState == "RUNNING" }
                 .reduce(0) { $0 + $1.gpuIDs.count }
         )
-        requestedQuantities = ResourceQuantityRecord(
-            gpuCount: pendingRequests.reduce(0) { $0 + $1.gpuCount }
-        )
-
         groupsByScope = [scope: makeResourceUsageGroups(snapshot: snapshot, scope: scope)]
     }
 
@@ -151,7 +132,6 @@ private struct ResourceUsageProjection {
         activeTaskCount: Int,
         assignedQuantities: ResourceQuantityRecord,
         runningQuantities: ResourceQuantityRecord,
-        requestedQuantities: ResourceQuantityRecord,
         groupsByScope: [ResourceUsageScope: [ResourceUsageGroup]]
     ) {
         self.projectCount = projectCount
@@ -160,7 +140,6 @@ private struct ResourceUsageProjection {
         self.activeTaskCount = activeTaskCount
         self.assignedQuantities = assignedQuantities
         self.runningQuantities = runningQuantities
-        self.requestedQuantities = requestedQuantities
         self.groupsByScope = groupsByScope
     }
 
@@ -436,15 +415,13 @@ private struct ResourceUsageGroupDetail: View {
                 // The header carried only a name and a task count, so a project
                 // holding four tasks and a GPU read as emptier than it is.
                 if group.assignedQuantities.hasResources
-                    || group.runningQuantities.hasResources
-                    || group.requestedQuantities.hasResources {
+                    || group.runningQuantities.hasResources {
                     HomeCard(padding: 16) {
                         VStack(alignment: .leading, spacing: 10) {
                             CardSectionLabel(text: "资源合计")
                             ResourceStateSummary(
                                 assigned: group.assignedQuantities,
-                                running: group.runningQuantities,
-                                requested: group.requestedQuantities
+                                running: group.runningQuantities
                             )
                         }
                     }
@@ -483,24 +460,19 @@ private struct ResourceUsageGroupDetail: View {
 private struct ResourceStateSummary: View {
     let assigned: ResourceQuantityRecord
     let running: ResourceQuantityRecord
-    let requested: ResourceQuantityRecord
 
     var body: some View {
         HStack(spacing: 0) {
             if assigned.hasResources {
                 ResourceStateSummaryItem(title: "已分配", quantities: assigned, icon: "checkmark.circle.fill")
             }
-            if assigned.hasResources && (running.hasResources || requested.hasResources) {
+            if assigned.hasResources && running.hasResources {
                 Divider().padding(.vertical, 9)
             }
             if running.hasResources {
                 ResourceStateSummaryItem(title: "运行", quantities: running, icon: "play.circle.fill")
             }
-            if running.hasResources && requested.hasResources {
-                Divider().padding(.vertical, 9)
-            }
-            if requested.hasResources { EmptyView() }
-            if !assigned.hasResources && !running.hasResources && !requested.hasResources {
+            if !assigned.hasResources && !running.hasResources {
                 Text("暂无资源")
                     .font(Typography.metricLabel)
                     .foregroundStyle(DesignTokens.mutedInk)
@@ -865,10 +837,6 @@ private func resourceUsageStatusHelp(_ title: String) -> String {
     }
 }
 
-private func resourceUsageRequestIsPending(_ request: AllocationRequestRecord) -> Bool {
-    ["BLOCKED", "QUEUED", "PENDING_APPROVAL", "REQUESTED"].contains(request.state.uppercased())
-}
-
 private func resourceUsageReservationIsPending(_ reservation: ReservationRecord) -> Bool {
     reservation.state.uppercased() == "PENDING"
 }
@@ -892,13 +860,6 @@ private func resourceUsageIdentities(snapshot: BrokerSnapshot) -> [ResourceUsage
             projectID: $0.projectID,
             actorID: $0.actorID,
             taskReference: normalizedTask($0.taskReference, purpose: $0.purpose)
-        )
-    })
-    identities.append(contentsOf: snapshot.requests.map {
-        ResourceUsageIdentity(
-            projectID: $0.projectID,
-            actorID: $0.actorID,
-            taskReference: normalizedTask($0.taskReference)
         )
     })
     identities.append(contentsOf: snapshot.reservations.map {
@@ -948,13 +909,6 @@ private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUs
             taskReference: normalizedTask(lease.taskReference, purpose: lease.purpose)
         ) { $0.leases.append(lease) }
     }
-    for request in snapshot.requests {
-        add(
-            projectID: request.projectID,
-            actorID: request.actorID,
-            taskReference: normalizedTask(request.taskReference)
-        ) { $0.requests.append(request) }
-    }
     for reservation in snapshot.reservations {
         add(
             projectID: reservation.projectID ?? "未标注项目",
@@ -972,7 +926,6 @@ private func makeResourceUsageGroups(snapshot: BrokerSnapshot, scope: ResourceUs
             actorIDs: bucket.actorIDs.sorted(),
             taskReferences: bucket.taskReferences.sorted(),
             leases: bucket.leases.sorted { ($0.issuedAt ?? "") > ($1.issuedAt ?? "") },
-            requests: bucket.requests.sorted { ($0.createdAt ?? "") > ($1.createdAt ?? "") },
             reservations: bucket.reservations.sorted { ($0.startsAt ?? "") > ($1.startsAt ?? "") }
         )
     }

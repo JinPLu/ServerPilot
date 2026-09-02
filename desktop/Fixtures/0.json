@@ -16,7 +16,6 @@
       "endpoints": [],
       "gpus": [],
       "leases": [],
-      "requests": [],
       "data_age_seconds": 1,
       "reservations": [],
       "freshness_seconds": 30,

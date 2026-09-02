@@ -29,8 +29,6 @@
           "port": 22,
           "ssh_user": "compute",
           "workspace_path": "/srv/serverpilot-fixtures",
-          "enabled": true,
-          "lifecycle_state": "active",
           "labels": {
             "fixture": "true",
             "resource_kind": "cpu-only"
@@ -63,8 +61,6 @@
           "ssh_user": "gpu",
           "server_group_id": "training-lab",
           "workspace_path": "/srv/serverpilot-fixtures",
-          "enabled": true,
-          "lifecycle_state": "active",
           "labels": {
             "fixture": "true",
             "resource_kind": "gpu"
@@ -109,7 +105,6 @@
             "fixture": "true"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "processes": [],
           "telemetry": {
@@ -129,7 +124,6 @@
             "fixture": "true"
           },
           "health": "OK",
-          "enabled": true,
           "state": "BUSY_UNMANAGED",
           "state_reason": "检测到未纳管计算进程",
           "processes": [],
@@ -141,7 +135,6 @@
         }
       ],
       "leases": [],
-      "requests": [],
       "reservations": [],
       "data_age_seconds": 2,
       "freshness_seconds": 30,

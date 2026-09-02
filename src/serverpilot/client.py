@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import os
 import time
 from typing import Any
 
 import httpx
+
+from serverpilot.config import control_plane_actor, control_plane_url
 
 CONTROL_PLANE_READ_TIMEOUT_SECONDS = 20.0
 # A claim costs whatever the server it lands on costs, and nothing on the
@@ -155,11 +156,7 @@ class BrokerClient:
 
     @classmethod
     def from_env(cls, *, url: str | None = None, actor: str | None = None) -> BrokerClient:
-        configured_actor = actor or os.environ.get("SERVERPILOT_ACTOR")
-        return cls(
-            url or os.environ.get("SERVERPILOT_URL", "http://127.0.0.1:8787"),
-            configured_actor or "agent",
-        )
+        return cls(control_plane_url(url), control_plane_actor(actor))
 
     def request(
         self,
@@ -373,19 +370,3 @@ class BrokerClient:
         if project_id:
             leases = [lease for lease in leases if lease.get("project_id") == project_id]
         return {**payload, "data": leases}
-
-    def requests(self, *, request_id: str | None = None, queued_only: bool = False) -> dict[str, Any]:
-        payload = self.get("/api/v1/requests")
-        requests = payload.get("data")
-        if not isinstance(requests, list):
-            raise BrokerClientError("broker requests response is invalid")
-        if request_id:
-            requests = [request for request in requests if request.get("id") == request_id]
-        if queued_only:
-            requests = [
-                request
-                for request in requests
-                if request.get("state") in {"QUEUED", "PENDING_APPROVAL"}
-            ]
-        return {**payload, "data": requests}
-

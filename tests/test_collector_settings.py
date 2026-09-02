@@ -47,7 +47,7 @@ def test_collector_setting_is_persisted_and_restored(
     restarted = BrokerService(service.database, restarted_inventory)
     restarted.initialize()
     assert restarted.collector_interval_seconds() == 5
-    assert restarted.inventory.collector.stale_after_seconds == 35
+    assert restarted.collector.stale_after_seconds == 35
 
 
 def test_collector_setting_commit_failure_does_not_mutate_runtime(
@@ -68,7 +68,7 @@ def test_collector_setting_commit_failure_does_not_mutate_runtime(
             )
 
     assert service.collector_interval_seconds() == 10
-    assert service.inventory.collector.stale_after_seconds == 40
+    assert service.collector.stale_after_seconds == 40
     with service.database.session() as session:
         assert session.get(RuntimeSetting, "collector_interval_seconds") is None
 
@@ -119,12 +119,12 @@ def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: A
     rather than settable independently.
     """
 
-    from serverpilot.config import CollectorConfig
+    from serverpilot.config import CollectorConfig, CollectorSettings
 
     default = CollectorConfig()
     assert default.process_absence_grace_seconds == 60
 
-    widened = CollectorConfig(interval_seconds=10)
+    widened = CollectorSettings.resolved(CollectorConfig(interval_seconds=10))
     assert widened.stale_after_seconds == 40
     assert widened.process_absence_grace_seconds == 60
 
@@ -133,7 +133,7 @@ def test_the_absence_window_is_its_own_clock(service, admin) -> None:  # noqa: A
         CollectorSettingsUpdate(interval_seconds=30),
         idempotency_key="collector-interval-30-order",
     )
-    assert service.inventory.collector.stale_after_seconds == 60
-    assert service.inventory.collector.process_absence_grace_seconds == 60
+    assert service.collector.stale_after_seconds == 60
+    assert service.collector.process_absence_grace_seconds == 60
 
 

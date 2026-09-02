@@ -11,7 +11,6 @@ from serverpilot import API_CAPABILITIES
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig, ServerGroupConfig
 from serverpilot.database import Database
 from serverpilot.models import (
-    AllocationRequest,
     Endpoint,
     IdempotencyRecord,
     Lease,
@@ -140,28 +139,15 @@ def seed_keepalive(service: BrokerService, *, endpoint_id: str, gpu_id: str) -> 
     now = utcnow()
     with service.database.session() as session:
         session.add(
-            AllocationRequest(
-                id="ka-req",
+            Lease(
+                id="ka-lease",
                 actor_id=SYSTEM_ACTOR_ID,
                 project_id=SYSTEM_PROJECT_ID,
-                auto_activate=False,
+                kind="keepalive",
                 task_ref="keepalive",
                 purpose="keepalive",
                 constraints_json="{}",
                 duration_seconds=3600,
-                state="ALLOCATED",
-                priority_class="normal",
-                created_at=now,
-                updated_at=now,
-            )
-        )
-        session.add(
-            Lease(
-                id="ka-lease",
-                request_id="ka-req",
-                actor_id=SYSTEM_ACTOR_ID,
-                project_id=SYSTEM_PROJECT_ID,
-                kind="keepalive",
                 state="ACTIVE",
                 issued_at=now,
                 last_heartbeat_at=now,
@@ -313,21 +299,39 @@ def test_server_group_crud_and_delete_protection(tmp_path: Path, service, admin)
     assert all(event["resource_type"] != "cluster" for event in events if "server_group" in event["action"])
 
 
-def test_stale_inventory_does_not_clear_rest_membership(tmp_path: Path, service, admin) -> None:
+def test_inventory_never_re_applies_over_an_existing_endpoint(tmp_path: Path, service, admin) -> None:
+    """inventory.yaml seeds an empty endpoint table and is not consulted again.
+
+    Both halves of the old behaviour are gone: a file that says nothing about a
+    group no longer clears membership set in the app, and a file that names one
+    explicitly no longer imposes it. A restart reads the file, finds endpoints
+    already there, and leaves every one of them alone.
+    """
+
     service.create_server_group(
         admin,
         ServerGroupCreate(id="rest-bound", display_name="Bound", workspace_path="/data/bound"),
         idempotency_key="rest-bound",
     )
+    service.create_server_group(
+        admin,
+        ServerGroupCreate(id="file-bound", display_name="From file", workspace_path="/data/file"),
+        idempotency_key="file-bound",
+    )
     service.update_endpoint(
         admin,
         "endpoint-a",
-        EndpointUpdate(server_group_id="rest-bound"),
+        EndpointUpdate(server_group_id="rest-bound", workspace_path="/srv/chosen-in-app"),
         idempotency_key="bind-a",
     )
     stale = InventoryConfig(
         schema_version=1,
         projects=[ProjectConfig(id="project-a", display_name="Project A", weight=1)],
+        server_groups=[
+            ServerGroupConfig(
+                id="file-bound", display_name="From file", workspace_path="/data/file"
+            )
+        ],
         endpoints=[
             EndpointConfig(
                 id="endpoint-a",
@@ -335,6 +339,7 @@ def test_stale_inventory_does_not_clear_rest_membership(tmp_path: Path, service,
                 port=2201,
                 ssh_user="gpu",
                 workspace_path="/srv/project-a",
+                server_group_id="file-bound",
             ),
             EndpointConfig(
                 id="endpoint-b",
@@ -346,37 +351,13 @@ def test_stale_inventory_does_not_clear_rest_membership(tmp_path: Path, service,
         ],
     )
     service.inventory = stale
-    service.initialize(sync_inventory=True)
+    service.initialize()
     with service.database.session() as session:
         endpoint = session.get(Endpoint, "endpoint-a")
         assert endpoint is not None
         assert endpoint.server_group_id == "rest-bound"
+        assert endpoint.workspace_path == "/srv/chosen-in-app"
         assert session.get(ServerGroup, "rest-bound") is not None
-
-
-def test_explicit_inventory_group_assignment_updates_membership(tmp_path: Path) -> None:
-    service, admin = grouped_service(tmp_path)
-    updated = InventoryConfig(
-        schema_version=1,
-        projects=[ProjectConfig(id="project-a", display_name="Project A", weight=1)],
-        server_groups=list(grouped_inventory().server_groups),
-        endpoints=[
-            EndpointConfig(
-                id="legacy-a",
-                host="127.0.0.1",
-                port=2204,
-                ssh_user="gpu",
-                workspace_path="/legacy/path",
-                server_group_id="group-large",
-            ),
-            *grouped_inventory().endpoints[:-1],
-        ],
-    )
-    service.inventory = updated
-    service.initialize(sync_inventory=True)
-    snapshot = {item["id"]: item for item in service.snapshot(admin)["data"]["endpoints"]}
-    assert snapshot["legacy-a"]["server_group_id"] == "group-large"
-    assert snapshot["legacy-a"]["workspace_path"] == "/legacy/path"
 
 
 def test_group_selection_required_and_does_not_create_request(tmp_path: Path) -> None:
@@ -404,7 +385,6 @@ def test_group_selection_required_and_does_not_create_request(tmp_path: Path) ->
         server for server in details["ungrouped_servers"] if server["server_id"] == "legacy-a"
     )
     assert "gpus" in ungrouped
-    assert service.list_requests(admin)["data"] == []
     assert service.list_leases(admin)["data"] == []
     with service.database.session() as session:
         assert session.scalars(select(IdempotencyRecord)).all() == []
@@ -535,9 +515,7 @@ def test_ungrouped_and_non_routine_paths_remain_compatible(tmp_path: Path) -> No
             idempotency_key="advanced-pack",
         )
     assert error.value.code == "group_selection_required"
-    assert all(
-        item["task_ref"] != "advanced-pack" for item in service.list_requests(admin)["data"]
-    )
+    assert all(item["task_ref"] != "advanced-pack" for item in service.list_leases(admin)["data"])
 
 
 def test_group_workspace_change_blocked_while_inheriting_keepalive(tmp_path: Path) -> None:
@@ -724,13 +702,13 @@ def test_claims_map_group_and_ungrouped_pin(build_app) -> None:
     )
     assert grouped.status_code == 200, grouped.text
     actor = service.local_actor("test-agent")
-    grouped_request = next(
-        item for item in service.list_requests(actor)["data"] if item["task_ref"] == "grouped-claim"
+    grouped_lease = next(
+        item for item in service.list_leases(actor)["data"] if item["task_ref"] == "grouped-claim"
     )
-    assert grouped_request["constraints"]["server_group_ids"] == ["group-small"]
-    assert grouped_request["constraints"]["endpoint_ids"] == []
-    assert grouped_request["constraints"]["same_host"] is True
-    assert grouped_request["state"] == "LEASED"
+    assert grouped_lease["constraints"]["server_group_ids"] == ["group-small"]
+    assert grouped_lease["constraints"]["endpoint_ids"] == []
+    assert grouped_lease["constraints"]["same_host"] is True
+    assert grouped_lease["state"] == "HELD"
 
     ungrouped = client.post(
         "/api/v1/claims",
@@ -748,18 +726,13 @@ def test_claims_map_group_and_ungrouped_pin(build_app) -> None:
         headers={**headers, "Idempotency-Key": "ungrouped-claim"},
     )
     assert ungrouped.status_code == 200, ungrouped.text
-    ungrouped_request = next(
-        item
-        for item in service.list_requests(actor)["data"]
-        if item["task_ref"] == "ungrouped-claim"
-    )
-    assert ungrouped_request["constraints"]["server_group_ids"] == []
-    assert ungrouped_request["constraints"]["endpoint_ids"] == ["legacy-a"]
-    assert ungrouped_request["constraints"]["same_host"] is True
-    assert ungrouped_request["state"] == "LEASED"
     ungrouped_lease = next(
-        item for item in service.list_leases(actor)["data"] if item["request_id"] == ungrouped_request["id"]
+        item for item in service.list_leases(actor)["data"] if item["task_ref"] == "ungrouped-claim"
     )
+    assert ungrouped_lease["constraints"]["server_group_ids"] == []
+    assert ungrouped_lease["constraints"]["endpoint_ids"] == ["legacy-a"]
+    assert ungrouped_lease["constraints"]["same_host"] is True
+    assert ungrouped_lease["state"] == "HELD"
     assert ungrouped_lease["resources"][0]["endpoint"]["id"] == "legacy-a"
 
 
@@ -877,7 +850,6 @@ def test_unknown_server_group_id_fails_before_persistence(build_app) -> None:
     )
     assert refused.status_code == 404, refused.text
     assert refused.json()["error"]["code"] == "server_group_not_found"
-    assert service.list_requests(actor)["data"] == []
     assert service.list_leases(actor)["data"] == []
     _no_idempotency(service)
 
@@ -906,7 +878,7 @@ def test_routine_claims_canonicalize_omitted_and_false_same_host(build_app) -> N
         )
         assert claimed.status_code == 200, claimed.text
         body = claimed.json()
-        assert body["request"]["constraints"]["same_host"] is True
+        assert body["lease"]["constraints"]["same_host"] is True
         hosts = {resource["endpoint"]["id"] for resource in body["lease"]["resources"]}
         assert hosts == {"endpoint-a"}
 
@@ -936,7 +908,7 @@ def test_routine_claims_grouped_omitted_same_host_requires_group(build_app) -> N
         )
         assert refused.status_code == 409, refused.text
         assert refused.json()["error"]["code"] == "group_selection_required"
-        assert service.list_requests(actor)["data"] == []
+        assert service.list_leases(actor)["data"] == []
         _no_idempotency(service)
 
 
@@ -962,7 +934,7 @@ def test_generic_claims_same_host_false_spans_inside_one_group_or_ungrouped_flee
     assert refused.status_code == 409, refused.text
     assert refused.json()["error"]["code"] == "group_selection_required"
     actor = grouped.state.service.local_actor("test-agent")
-    assert grouped.state.service.list_requests(actor)["data"] == []
+    assert grouped.state.service.list_leases(actor)["data"] == []
     _no_idempotency(grouped.state.service)
     intra = client.post(
         "/api/v1/claims",
@@ -1045,7 +1017,7 @@ def test_routine_nodes_greater_than_one_is_validation_error(build_app) -> None:
     assert refused.status_code == 422, refused.text
     assert refused.json()["error"]["code"] == "validation_error"
     actor = app.state.service.local_actor("test-agent")
-    assert app.state.service.list_requests(actor)["data"] == []
+    assert app.state.service.list_leases(actor)["data"] == []
     _no_idempotency(app.state.service)
 
 
@@ -1074,7 +1046,7 @@ def test_routine_exact_grouped_pin_requires_group(build_app) -> None:
     )
     assert refused.status_code == 409, refused.text
     assert refused.json()["error"]["code"] == "group_selection_required"
-    assert service.list_requests(actor)["data"] == []
+    assert service.list_leases(actor)["data"] == []
     _no_idempotency(service)
 
 

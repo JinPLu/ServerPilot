@@ -28,8 +28,6 @@
           "expected_gpu_count": 8,
           "expected_gpu_total_vram_mib": 655360,
           "owner_project_id": null,
-          "lifecycle_state": "active",
-          "enabled": true,
           "monitor": {
             "status": "ONLINE"
           },
@@ -63,7 +61,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -84,7 +81,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -105,7 +101,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -126,7 +121,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -147,7 +141,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -168,7 +161,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "AVAILABLE",
           "telemetry": {
             "memory_used_mib": 1024,
@@ -189,7 +181,6 @@
             "surface": "desktop-ui"
           },
           "health": "ATTENTION",
-          "enabled": true,
           "state": "BUSY_UNMANAGED",
           "telemetry": {
             "memory_used_mib": 49152,
@@ -217,7 +208,6 @@
             "surface": "desktop-ui"
           },
           "health": "OK",
-          "enabled": true,
           "state": "HELD",
           "telemetry": {
             "memory_used_mib": 4096,
@@ -250,7 +240,6 @@
           }
         }
       ],
-      "requests": [],
       "reservations": [
         {
           "id": "reservation-fixture-8",

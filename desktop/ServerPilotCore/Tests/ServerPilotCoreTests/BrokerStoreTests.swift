@@ -579,7 +579,6 @@ import Testing
                     "endpoints": [],
                     "gpus": [],
                     "leases": [],
-                    "requests": [],
                     "reservations": [],
                     "data_age_seconds": 2,
                     "freshness_seconds": 30,
@@ -1230,7 +1229,6 @@ import Testing
 
         #expect(snapshot.stableEndpointSelection(currentID: "missing") == "fixture-queued")
         #expect(snapshot.stableEndpointSelection(currentID: "fixture-queued") == "fixture-queued")
-        #expect(snapshot.stableRequestSelection(currentID: "missing") == "request-fixture-queued")
         #expect(BrokerSnapshot.empty.stableEndpointSelection(currentID: "missing") == "")
     }
 

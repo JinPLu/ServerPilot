@@ -47,7 +47,7 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 
 daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgent；daemon 不兼容或未就绪时，调用会明确失败，不会创建备用数据库，也不会改走 SSH。
 
-`serverpilot-mcp` 暴露的工具、参数和行为约束由 `src/serverpilot/agent_contract.py` 一处定义，运行时以 MCP server instructions 和工具 schema 的形式发给 Agent。默认配置不需要 `enabled_tools` 白名单。
+`serverpilot-mcp` 的行为约束（instructions 与随包安装的规则文本）由 `src/serverpilot/agent_contract.py` 一处渲染；每个工具的参数及其说明写在 `src/serverpilot/mcp_server.py` 的工具 schema 里，改参数说明去那里。两者由 `tests/test_agent_policy.py` 交叉校验，确保契约里提到的参数确实存在。默认配置不需要 `enabled_tools` 白名单。
 
 ## 日常 GPU 路径
 
@@ -70,5 +70,4 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
 ```bash
 serverpilot daemon status --json
 serverpilot --help
-serverpilot mcp policy --check
 ```

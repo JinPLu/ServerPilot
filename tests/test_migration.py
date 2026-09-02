@@ -42,14 +42,9 @@ def test_migration_upgrade_and_downgrade(tmp_path: Path) -> None:
     assert "server_group_id" in endpoint_columns
     assert "server_groups" in inspect(database.engine).get_table_names()
     assert "kind" in lease_columns
-    request_columns = {
-        column["name"] for column in inspect(database.engine).get_columns("allocation_requests")
-    }
-    assert "profile_id" not in request_columns
-    request_indexes = {
-        index["name"] for index in inspect(database.engine).get_indexes("allocation_requests")
-    }
-    assert "ix_allocation_requests_profile_id" not in request_indexes
+    assert {"task_ref", "purpose", "constraints_json", "duration_seconds"}.issubset(lease_columns)
+    assert "request_id" not in lease_columns
+    assert "allocation_requests" not in inspect(database.engine).get_table_names()
     expires_at = next(
         column for column in inspect(database.engine).get_columns("leases")
         if column["name"] == "expires_at"
@@ -153,10 +148,12 @@ def test_migration_upgrades_existing_schema_to_endpoint_telemetry(tmp_path: Path
     endpoint_columns = {
         column["name"] for column in inspect(database.engine).get_columns("endpoints")
     }
-    assert {"owner_project_id", "lifecycle_state"}.issubset(endpoint_columns)
+    assert "owner_project_id" in endpoint_columns
     assert "workspace_path" in endpoint_columns
+    assert not {"lifecycle_state", "enabled"} & endpoint_columns
     gpu_columns = {column["name"] for column in inspect(database.engine).get_columns("gpu_devices")}
     assert {"present", "absent_at", "cuda_ordinal"}.issubset(gpu_columns)
+    assert "enabled" not in gpu_columns
     assert "lease_endpoint_commitments" in inspect(database.engine).get_table_names()
     with database.engine.connect() as connection:
         assert connection.execute(
@@ -319,12 +316,9 @@ def test_keepalive_persistence_migration_changes_only_active_ownership(
         migrated_cuda_ordinal = connection.execute(
             text("SELECT cuda_ordinal FROM gpu_devices WHERE id = 'gpu-a'")
         ).scalar_one()
-        request_columns = {
-            column["name"] for column in inspect(database.engine).get_columns("allocation_requests")
-        }
-        request_count = connection.execute(
-            text("SELECT COUNT(*) FROM allocation_requests")
-        ).scalar_one()
+        folded = dict(
+            connection.execute(text("SELECT id, task_ref FROM leases")).all()
+        )
 
     assert expiries["active-keeper"] is None
     assert expiries["released-keeper"] is not None
@@ -333,8 +327,12 @@ def test_keepalive_persistence_migration_changes_only_active_ownership(
         current_columns
     )
     assert migrated_cuda_ordinal is None
-    assert "profile_id" not in request_columns
-    assert request_count == 3
+    # The request row each lease was issued from moved onto the lease itself.
+    assert folded == {
+        "active-keeper": "active-request",
+        "released-keeper": "released-request",
+        "active-workload": "workload-request",
+    }
 
 
 def test_scheduler_transport_migration_scrubs_legacy_argv_and_disables_target(

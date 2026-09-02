@@ -38,8 +38,6 @@
               }
             ]
           },
-          "enabled": true,
-          "lifecycle_state": "active",
           "monitor": {
             "status": "ONLINE",
             "last_success_at": "2026-08-13T11:59:58Z"
@@ -69,7 +67,6 @@
           "gpu_index": 0,
           "name": "NVIDIA A100-SXM4-80GB",
           "total_vram_mib": 81920,
-          "enabled": true,
           "state": "CONFLICT",
           "state_reason": "lease/process attribution conflict",
           "publicly_available": false,
@@ -104,7 +101,6 @@
           "gpu_index": 1,
           "name": "NVIDIA A100-SXM4-80GB",
           "total_vram_mib": 81920,
-          "enabled": true,
           "state": "AVAILABLE",
           "publicly_available": true,
           "public_status": "可用 · 占卡未运行",
@@ -124,7 +120,6 @@
         }
       ],
       "leases": [],
-      "requests": [],
       "reservations": [],
       "data_age_seconds": 2,
       "freshness_seconds": 30,

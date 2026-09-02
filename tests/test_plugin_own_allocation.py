@@ -131,7 +131,7 @@ def test_allocating_a_lease_never_asks_the_plugin_for_more(
     )
 
     assert result["lease"] is not None
-    constraints = result["request"]["constraints"]
+    constraints = result["lease"]["constraints"]
     if overlay is None:
         assert "plugin_allocation" not in constraints
     else:
