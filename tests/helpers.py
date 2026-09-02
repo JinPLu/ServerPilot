@@ -164,3 +164,16 @@ class _SyncTools:
 
 
 tools = _SyncTools()
+
+
+def keepalive_start_candidates(service, endpoint_id: str) -> list[str]:
+    """GPU ids the service would start occupancy on right now.
+
+    Reads the live transition plan and keeps the starts. The service used to
+    expose this filter as a method of its own, but nothing in production called
+    it -- only tests -- so the filter moved here and the assertions go on
+    reading the same live rule through `list_keepalive_transitions`.
+    """
+
+    plan = service.list_keepalive_transitions(endpoint_id)
+    return [item["gpu_id"] for item in plan["transitions"] if item["action"] == "start"]

@@ -222,43 +222,6 @@ class LeaseGPUAssignment(StrictModel):
         return values
 
 
-class ReservationCreate(StrictModel):
-    project_id: str = Field(min_length=1, max_length=64)
-    gpu_ids: list[str] = Field(default_factory=list)
-    start_at: datetime
-    end_at: datetime
-    reason: str = Field(min_length=1, max_length=1000)
-    constraints: ResourceConstraints | None = None
-
-    @model_validator(mode="after")
-    def validate_window(self) -> ReservationCreate:
-        if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
-            raise ValueError("reservation times must include a timezone")
-        if self.end_at <= self.start_at:
-            raise ValueError("reservation end_at must be after start_at")
-        if not self.gpu_ids and self.constraints is None:
-            raise ValueError("reservation requires gpu_ids or constraints")
-        if self.constraints is not None and self.constraints.gpu_count == 0:
-            raise ValueError("reservations require constraints.gpu_count >= 1")
-        return self
-
-
-class MaintenanceCreate(StrictModel):
-    endpoint_id: str | None = None
-    gpu_id: str | None = None
-    start_at: datetime
-    end_at: datetime
-    reason: str = Field(min_length=1, max_length=1000)
-
-    @model_validator(mode="after")
-    def validate_target_and_window(self) -> MaintenanceCreate:
-        if (self.endpoint_id is None) == (self.gpu_id is None):
-            raise ValueError("maintenance must target exactly one endpoint_id or gpu_id")
-        if self.start_at.tzinfo is None or self.end_at.tzinfo is None:
-            raise ValueError("maintenance times must include a timezone")
-        if self.end_at <= self.start_at:
-            raise ValueError("maintenance end_at must be after start_at")
-        return self
 
 
 class ServerGroupCreate(StrictModel):
@@ -433,15 +396,6 @@ class EndpointUpdate(StrictModel):
         return self
 
 
-class EndpointUpsert(EndpointCreate):
-    """Deprecated in-process compatibility model for the legacy GUI importer.
-
-    Public REST clients use EndpointCreate (POST) and EndpointUpdate (PATCH).
-    """
-
-    lifecycle_state: Literal["active", "draining"] | None = None
-    enabled: bool | None = None
-
 
 class EndpointKeepaliveRequest(StrictModel):
     """The endpoint control accepts one explicit boolean, never a GPU target."""
@@ -547,5 +501,3 @@ class EndpointObservation(StrictModel):
         return self
 
 
-class RetentionPrune(StrictModel):
-    older_than_seconds: int = Field(ge=60, le=60 * 60 * 24 * 3650)

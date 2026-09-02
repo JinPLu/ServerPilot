@@ -107,12 +107,11 @@ RAW_SSH_COMBINED_QUERY = (
     f"printf '{HOST_RESOURCES_SECTION}\\n'; {HOST_RESOURCES_QUERY}"
 )
 
-# The one sealed observation profile.  There is no table: a second entry that
-# differed from this one by a shell string ("linux-host") was a distinction the
-# probe already makes for itself, because the combined query reports
-# GPU_CPU_ONLY when nvidia-smi is absent.  A plugin's `observe` is the only
-# extension point.
-BUILTIN_OBSERVATION_PROFILE: ObservationProfile = "linux"
+# There is no profile table here any more. A second built-in that differed from
+# this one only by a shell string was a distinction the probe already makes for
+# itself, because the combined query reports GPU_CPU_ONLY when nvidia-smi is
+# absent. The surviving profile's id is named once, in `plugins`, which is what
+# answers whether a profile exists at all.
 
 
 class AdapterRegistryError(KeyError):
@@ -270,25 +269,6 @@ def clear_control_sockets(control_dir: Path) -> None:
     for socket_path in control_dir.iterdir():
         with contextlib.suppress(OSError):
             socket_path.unlink()
-
-
-async def close_control_socket(endpoint: EndpointConfig, control_dir: Path) -> None:
-    """Ask a multiplexed master to exit, for an endpoint we stop observing."""
-
-    path = control_socket_path(endpoint, control_dir)
-    if not path.exists():
-        return
-    with contextlib.suppress(OSError):
-        process = await asyncio.create_subprocess_exec(
-            "ssh",
-            "-O", "exit",
-            "-o", f'ControlPath="{path}"',
-            f"{endpoint.ssh_user}@{endpoint.host}",
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
-        with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(process.wait(), timeout=5)
 
 
 class RawSSHObservationAdapter:

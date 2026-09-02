@@ -73,7 +73,6 @@ lease_app = typer.Typer(
     no_args_is_help=True,
     help="Update cooperative lease state; never start or stop workloads.",
 )
-reservation_app = typer.Typer(no_args_is_help=True)
 collect_app = typer.Typer(no_args_is_help=True)
 daemon_app = typer.Typer(
     no_args_is_help=True,
@@ -83,7 +82,6 @@ app.add_typer(endpoint_app, name="endpoint")
 app.add_typer(gpu_app, name="gpu")
 app.add_typer(request_app, name="request")
 app.add_typer(lease_app, name="lease")
-app.add_typer(reservation_app, name="reservation")
 plugin_app = typer.Typer(no_args_is_help=True, help="Discover and install local server plugins.")
 keepalive_app = typer.Typer(
     no_args_is_help=True,
@@ -466,11 +464,6 @@ def lease_bind(lease_id: str, run_id: Annotated[str, typer.Option("--run-id")], 
 @lease_app.command("bind-observed")
 def lease_bind_observed(lease_id: str, run_id: Annotated[str | None, typer.Option("--run-id")] = None, idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None, as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None, actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None) -> None:
     _print(_call(lambda: _client(url, actor).post(f"/api/v1/leases/{lease_id}/bind-observed-workload", {"run_id": run_id} if run_id is not None else {}, idempotency_key=_idempotency_key(idempotency_key))), as_json)
-
-
-@reservation_app.command("list")
-def reservation_list(as_json: Annotated[bool, typer.Option("--json")]=False, url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")]=None, actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None) -> None:
-    _print(_call(lambda: _client(url, actor).reservations()), as_json)
 
 
 @app.command("history")

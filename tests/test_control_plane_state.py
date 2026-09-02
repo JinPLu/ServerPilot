@@ -24,7 +24,6 @@ def test_control_plane_state_route_groups_current_and_history(build_app) -> None
     actor = service.local_actor("state-agent")
     service.ingest_observation(observation(count=1))
     service.create_request(actor, _request("state-lease"), idempotency_key="state-lease")
-    service.pause_endpoint(actor, "endpoint-b", idempotency_key="endpoint-b-pause")
 
     response = TestClient(app).get(
         "/api/v1/state",
@@ -48,8 +47,6 @@ def test_control_plane_state_route_groups_current_and_history(build_app) -> None
         "absent_gpu_ids",
         "leases",
         "requests",
-        "reservations",
-        "maintenance",
         "alerts",
         "host_capacity",
         "admission_boundary",

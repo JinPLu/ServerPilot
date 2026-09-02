@@ -43,7 +43,7 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 }
 ```
 
-两条安装路径给出的 `command` 不同。源码 / `uv tool install` 安装后 `serverpilot-mcp` 在 PATH 上，直接写命令名即可；Windows 桌面压缩包不修改 PATH，要填解压目录里 `serverpilot-mcp.exe` 的绝对路径。`serverpilot mcp config` 会自动解析出当前安装实际可用的那一个。桌面 App 的设置页也展示同一份解析结果：绝对路径和可粘贴的 `mcpServers` 配置；找不到入口时会显示「未找到」和安装提示，而不会编造路径。
+源码 / `uv tool install` 安装后 `serverpilot-mcp` 在 PATH 上（包括 Windows 上的 CLI 安装），直接写命令名即可。`serverpilot mcp config` 会自动解析出当前安装实际可用的那一个。桌面 App（仅 macOS）的设置页也展示同一份解析结果：绝对路径和可粘贴的 `mcpServers` 配置；找不到入口时会显示「未找到」和安装提示，而不会编造路径。
 
 daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgent；daemon 不兼容或未就绪时，调用会明确失败，不会创建备用数据库，也不会改走 SSH。
 

@@ -195,22 +195,16 @@ def test_ci_still_reinstalls_the_package_and_refuses_an_unpublished_seal() -> No
     assert "fetch-depth: 0" in workflow
 
 
-def test_a_version_tag_creates_the_github_release_and_not_the_windows_zip() -> None:
+def test_a_version_tag_creates_the_github_release_and_not_a_pypi_upload() -> None:
     workflow = (ROOT / ".github" / "workflows" / "release.yml").read_text(
         encoding="utf-8"
     )
-    windows = (
-        ROOT / ".github" / "workflows" / "windows-desktop-release.yml"
-    ).read_text(encoding="utf-8")
 
     assert "scripts/release_metadata.py check-tag" in workflow
     assert "scripts/release_metadata.py notes" in workflow
     assert "gh release create" in workflow
-    assert "build-windows-app" not in workflow
     assert "Compress-Archive" not in workflow
     assert "pypi" not in workflow.lower()
-    assert "scripts/release_metadata.py check-tag" in windows
-    assert "__version__ = " not in windows
 
 
 def test_check_tag_and_notes_cli_use_the_shared_rules(tmp_path: Path) -> None:
@@ -230,5 +224,5 @@ def test_check_tag_and_notes_cli_use_the_shared_rules(tmp_path: Path) -> None:
 
 
 def test_release_workflows_are_valid_yaml() -> None:
-    for name in ("release.yml", "ci.yml", "windows-desktop-release.yml"):
+    for name in ("release.yml", "ci.yml"):
         yaml.safe_load((ROOT / ".github" / "workflows" / name).read_text(encoding="utf-8"))

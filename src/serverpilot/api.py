@@ -916,9 +916,19 @@ def create_app(
             PluginError,
             apply_plugin,
             get_plugin,
-            is_plugin_profile,
             release_plugin,
         )
+
+        async def plugin_for(profile: str):  # type: ignore[no-untyped-def]
+            """Resolve a profile to its plugin without blocking the event loop.
+
+            Resolution is discovery, and discovery forks each candidate's `info`
+            with a multi-second timeout. Called straight from this coroutine it
+            stopped every other request and every endpoint's probe for as long
+            as the slowest candidate took to answer.
+            """
+
+            return await asyncio.to_thread(get_plugin, profile)
 
         endpoint_ids = request_data.constraints.endpoint_ids
         group_ids = request_data.constraints.server_group_ids
@@ -933,9 +943,7 @@ def create_app(
             for item in await service.in_domain(service.collector_endpoints):
                 if item.server_group_id != group_ids[0]:
                     continue
-                if not is_plugin_profile(item.observation_profile):
-                    continue
-                candidate = get_plugin(item.observation_profile)
+                candidate = await plugin_for(item.observation_profile)
                 if candidate is not None and "apply" in candidate.capabilities:
                     matches.append(item)
             if len(matches) != 1:
@@ -943,9 +951,9 @@ def create_app(
             endpoint = matches[0]
         else:
             return None
-        if endpoint is None or not is_plugin_profile(endpoint.observation_profile):
+        if endpoint is None:
             return None
-        plugin = get_plugin(endpoint.observation_profile)
+        plugin = await plugin_for(endpoint.observation_profile)
         if plugin is None or "apply" not in plugin.capabilities:
             return None
         try:
@@ -1329,9 +1337,6 @@ def create_app(
     def leases(actor: ApiActor) -> dict[str, Any]:
         return service.list_leases(actor)
 
-    @app.get("/api/v1/reservations")
-    def reservations(actor: ApiActor) -> dict[str, Any]:
-        return service.list_reservations(actor)
 
     @app.get("/api/v1/events")
     def events(actor: ApiActor, after_id: int = 0, limit: int = 200) -> dict[str, Any]:

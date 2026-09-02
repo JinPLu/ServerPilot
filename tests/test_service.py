@@ -16,7 +16,6 @@ from serverpilot.models import (
     Alert,
     AllocationRequest,
     AuditEvent,
-    EndpointTelemetryCurrent,
     EndpointTelemetrySnapshot,
     GPUDevice,
     Lease,
@@ -33,8 +32,6 @@ from serverpilot.schemas import (
     LeaseObservedBind,
     ProcessInput,
     RequestCreate,
-    ReservationCreate,
-    RetentionPrune,
 )
 from serverpilot.service import ACTIVE_LEASE_STATES, ActorContext, BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
@@ -282,32 +279,6 @@ def test_stale_observation_is_ignored_without_mutating_latest_presence(service, 
     assert after["data"]["absent_gpu_ids"] == []
 
 
-def test_explicit_reservation_rejects_absent_gpu_until_reappears(service, admin) -> None:
-    service.ingest_observation(observation(gpu_uuids=["GPU-old", "GPU-new"]))
-    service.ingest_observation(observation(gpu_uuids=["GPU-new"]))
-    start_at = utcnow() + timedelta(hours=1)
-    reservation = ReservationCreate(
-        project_id="project-a",
-        gpu_ids=["endpoint-a:GPU-old"],
-        start_at=start_at,
-        end_at=start_at + timedelta(hours=1),
-        reason="future use of returning GPU",
-    )
-
-    with pytest.raises(BrokerError) as error:
-        service.create_reservation(admin, reservation, idempotency_key="absent-reservation")
-    assert error.value.code == "gpu_absent"
-
-    service.ingest_observation(observation(gpu_uuids=["GPU-old", "GPU-new"]))
-    created = service.create_reservation(
-        admin,
-        reservation,
-        idempotency_key="present-reservation",
-    )
-
-    assert created["reservation"]["gpu_ids"] == ["endpoint-a:GPU-old"]
-
-
 def test_routine_claim_fails_immediately_and_can_be_retried_when_capacity_arrives(
     service, admin
 ) -> None:
@@ -328,63 +299,6 @@ def test_routine_claim_fails_immediately_and_can_be_retried_when_capacity_arrive
     )
     assert claimed["request"]["state"] == "LEASED"
     assert claimed["lease"]["state"] == "HELD"
-
-
-def test_renewal_cannot_cross_a_future_reservation(service, admin) -> None:
-    service.ingest_observation(observation(count=1))
-    gpu_id = service.list_gpus(admin)["data"][0]["id"]
-    start_at = utcnow() + timedelta(minutes=65)
-    service.create_reservation(
-        admin,
-        ReservationCreate(
-            project_id="project-a",
-            gpu_ids=[gpu_id],
-            start_at=start_at,
-            end_at=start_at + timedelta(hours=1),
-            reason="next approved workload",
-        ),
-        idempotency_key="future-reservation",
-    )
-    claimed = service.create_request(
-        admin, request_data("renewal-window"), idempotency_key="renewal-window"
-    )
-    assert claimed["lease"] is not None
-
-    with pytest.raises(BrokerError) as error:
-        service.renew_lease(admin, claimed["lease"]["id"], idempotency_key="renewal-conflict")
-    assert error.value.code == "lease_renewal_conflicts_with_reservation"
-
-
-def test_reservation_cancellation_is_limited_to_creating_actor(service) -> None:
-    service.ingest_observation(observation(count=1))
-    owner = service.local_actor("reservation-owner")
-    other = service.local_actor("reservation-other")
-    gpu_id = service.list_gpus(owner)["data"][0]["id"]
-    start_at = utcnow() + timedelta(minutes=5)
-    created = service.create_reservation(
-        owner,
-        ReservationCreate(
-            project_id="project-a",
-            gpu_ids=[gpu_id],
-            start_at=start_at,
-            end_at=start_at + timedelta(hours=1),
-            reason="owner-only future reservation",
-        ),
-        idempotency_key="owner-reservation",
-    )
-    with pytest.raises(BrokerError) as error:
-        service.cancel_reservation(
-            other,
-            created["reservation"]["id"],
-            idempotency_key="cross-actor-cancel",
-        )
-    assert error.value.code == "reservation_forbidden"
-    cancelled = service.cancel_reservation(
-        owner,
-        created["reservation"]["id"],
-        idempotency_key="owner-cancel",
-    )
-    assert cancelled["reservation"]["state"] == "CANCELLED"
 
 
 def test_gang_all_or_nothing_and_no_partial_write(service, admin) -> None:
@@ -491,11 +405,6 @@ def test_endpoint_identity_is_enforced(service, admin) -> None:
     )
     assert updated["endpoint"]["ssh_user"] == "gpu-updated"
     assert updated["endpoint"]["workspace_path"] == "/srv/project-new-updated"
-    paused = service.pause_endpoint(admin, "endpoint-new", idempotency_key="endpoint-pause")
-    assert paused["endpoint"]["lifecycle_state"] == "draining"
-    assert "endpoint-new" in {endpoint.id for endpoint in service.collector_endpoints()}
-    resumed = service.resume_endpoint(admin, "endpoint-new", idempotency_key="endpoint-resume")
-    assert resumed["endpoint"]["lifecycle_state"] == "active"
     with pytest.raises(ValidationError, match="Extra inputs are not permitted"):
         EndpointUpdate.model_validate({"host": "127.0.0.1"})
     with pytest.raises(BrokerError) as error:
@@ -1418,54 +1327,6 @@ def test_initialize_resolves_stale_alerts_for_terminal_lease(service, admin) -> 
     )
 
 
-def test_reconcile_resolves_alerts_for_lease_without_active_resources(service, admin) -> None:
-    service.ingest_observation(observation(count=1))
-    claimed = service.create_request(
-        admin,
-        request_data("resource-alert-repair"),
-        idempotency_key="resource-alert-repair-claim",
-        activate_if_allocated=True,
-    )
-    lease_id = claimed["lease"]["id"]
-
-    def orphan_alerts_from_resources(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
-        resources = session.scalars(
-            select(LeaseResource).where(LeaseResource.lease_id == lease_id)
-        ).all()
-        assert resources
-        for resource in resources:
-            resource.active = False
-            resource.released_at = now
-        for alert_type in ("lease_process_conflict", "orphaned_busy"):
-            session.add(
-                Alert(
-                    id=f"reconcile-{alert_type}",
-                    alert_type=alert_type,
-                    severity="critical",
-                    resource_type="lease",
-                    resource_id=lease_id,
-                    message="stale test alert",
-                    active=True,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    acknowledged_at=None,
-                    acknowledged_by=None,
-                )
-            )
-
-    service._write(orphan_alerts_from_resources)
-    assert {
-        alert["type"]
-        for alert in service.snapshot(admin)["data"]["alerts"]
-        if alert["resource_id"] == lease_id
-    } == {"lease_process_conflict", "orphaned_busy"}
-    service.reconcile(admin)
-    assert not any(
-        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
-    )
-
-
 def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin) -> None:
     service.ingest_observation(observation(count=1))
     claimed = service.create_request(
@@ -2001,33 +1862,6 @@ def test_endpoint_history_excludes_current_outside_requested_window(service, adm
     assert history["data"]["point_count"] == 0
 
 
-def test_telemetry_prune_deletes_gpu_and_endpoint_history_but_not_current(
-    service,
-    admin,
-) -> None:
-    service.ingest_observation(observation(count=1, observed_at=utcnow() - timedelta(minutes=10)))
-    service.ingest_observation(observation(count=1))
-
-    result = service.prune_telemetry(
-        admin,
-        RetentionPrune(older_than_seconds=60),
-        idempotency_key="prune-endpoint-history",
-    )
-
-    def counts(session):  # type: ignore[no-untyped-def]
-        return (
-            len(session.scalars(select(TelemetryCurrent)).all()),
-            len(session.scalars(select(EndpointTelemetryCurrent)).all()),
-            len(session.scalars(select(TelemetrySnapshot)).all()),
-            len(session.scalars(select(EndpointTelemetrySnapshot)).all()),
-        )
-
-    assert result["deleted_count"] == 2
-    assert result["gpu_deleted_count"] == 1
-    assert result["endpoint_deleted_count"] == 1
-    assert service._read(counts) == (1, 1, 1, 1)
-
-
 def test_endpoint_history_is_downsampled_to_requested_cap(service, admin) -> None:
     service.ingest_observation(observation(count=1))
 
@@ -2223,36 +2057,6 @@ def test_cooperative_actor_labels_are_not_admin_and_lease_ownership_is_exact(ser
     assert override_forbidden.value.code == "operator_role_required"
     assert service.list_leases(other)["data"] == []
     assert service.list_requests(other)["data"] == []
-
-
-def test_paused_endpoint_blocks_claims_and_can_resume(service, admin) -> None:
-    service.ingest_observation(observation(endpoint_id="endpoint-a", count=1))
-    drained = service.pause_endpoint(admin, "endpoint-a", idempotency_key="drain-a")
-    assert drained["endpoint"]["lifecycle_state"] == "draining"
-    assert {endpoint.id for endpoint in service.collector_endpoints()} == {
-        "endpoint-a",
-        "endpoint-b",
-    }
-    with pytest.raises(BrokerError) as error:
-        service.create_request(
-            admin,
-            RequestCreate.model_validate(
-                {
-                    "project_id": "project-a",
-                    "task_ref": "must-not-use-draining",
-                    "purpose": "lifecycle admission test",
-                    "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-a"]},
-                }
-            ),
-            idempotency_key="draining-claim",
-        )
-    assert error.value.code == "no_capacity"
-    resumed = service.resume_endpoint(admin, "endpoint-a", idempotency_key="resume-a")
-    assert resumed["endpoint"]["lifecycle_state"] == "active"
-    assert {endpoint.id for endpoint in service.collector_endpoints()} == {
-        "endpoint-a",
-        "endpoint-b",
-    }
 
 
 def test_direct_lease_returns_executable_resources_and_accounts_endpoint_commitments(
@@ -2598,39 +2402,6 @@ def test_gpu_public_status_separates_an_idle_claim_from_a_running_task() -> None
     assert project("CONFLICT", lease={"id": "lease-a"}) == "归属冲突"
 
 
-def test_stale_telemetry_resets_the_idle_clock_instead_of_reclaiming(service, admin) -> None:
-    """A collector outage is not evidence of an idle workload.
-
-    Without this reset a long outage would accumulate into a reclaim and take
-    GPUs away from a job the broker simply could not see.
-    """
-
-    service.ingest_observation(observation(count=1))
-    allocated = service.create_request(admin, request_data("unseen"), idempotency_key="unseen")
-    lease_id = allocated["lease"]["id"]
-    _make_persistent(service, lease_id)
-    service.ingest_observation(observation(count=1))
-    assert _lease_idle_since(service, lease_id) is not None
-    _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
-
-    # Age every telemetry row past the stale threshold, then reconcile without
-    # a fresh observation.
-    stale_cutoff = utcnow() - timedelta(
-        seconds=service.inventory.collector.stale_after_seconds * 10
-    )
-
-    def age_telemetry(session):  # type: ignore[no-untyped-def]
-        for row in session.scalars(select(TelemetryCurrent)).all():
-            row.observed_at = stale_cutoff
-
-    service._write(age_telemetry)
-    service.reconcile(admin)
-
-    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
-    assert lease["state"] != "EXPIRED_EMPTY"
-    assert _lease_idle_since(service, lease_id) is None
-
-
 def test_a_declared_duration_no_longer_exempts_a_silent_claim(service, admin) -> None:
     """Being evidenced alive replaced the declared-duration exemption.
 
@@ -2775,33 +2546,6 @@ def test_a_status_read_of_a_lease_that_is_gone_answers_without_recording(service
         "lease_id": lease_id,
         "recorded": False,
     }
-
-
-def test_legacy_conflict_repair_does_not_forge_a_holder_heartbeat(service, admin) -> None:
-    """Normalising a stored state observed nothing about who holds the cards.
-
-    The repair runs on every reconcile, so writing a heartbeat there would have
-    kept a lease looking alive forever without anybody being there.
-    """
-
-    service.ingest_observation(observation(count=1))
-    allocated = service.create_request(admin, request_data("legacy"), idempotency_key="legacy")
-    lease_id = allocated["lease"]["id"]
-
-    def seed_conflict(session) -> None:  # type: ignore[no-untyped-def]
-        lease = session.get(Lease, lease_id)
-        assert lease is not None
-        lease.state = "CONFLICT"
-        lease.last_heartbeat_at = utcnow() - timedelta(hours=6)
-
-    service._write(seed_conflict)
-    stored = _lease_heartbeat_at(service, lease_id)
-
-    service.reconcile(admin)
-
-    lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
-    assert lease["state"] == "ACTIVE"
-    assert _lease_heartbeat_at(service, lease_id) == stored
 
 
 def test_idle_reclaim_returns_only_the_unused_gpus_of_a_working_claim(service, admin) -> None:

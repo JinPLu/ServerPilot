@@ -338,9 +338,12 @@ def test_control_plane_state_api_exposes_current_and_history_contract(
         "gpus",
         "leases",
         "requests",
-        "reservations",
         "host_capacity",
     }.issubset(current)
+    # Reservations and maintenance windows are gone: nothing could create one,
+    # so the keys only ever carried an empty list.
+    assert "reservations" not in current
+    assert "maintenance" not in current
     assert history == {}
     assert "resource_providers" not in current
     assert "workload_profiles" not in current
@@ -1530,10 +1533,10 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
             observed_at=datetime.now(UTC),
         )
     )
-    service.activate_keepalive(
+    service.activate_keepalives(
         actor,
         "endpoint-a",
-        "endpoint-a:GPU-endpoint-a-0",
+        ["endpoint-a:GPU-endpoint-a-0"],
         observation_not_before=observation_not_before,
         idempotency_key="mcp-keepalive-begin",
     )

@@ -389,5 +389,3 @@ class BrokerClient:
             ]
         return {**payload, "data": requests}
 
-    def reservations(self) -> dict[str, Any]:
-        return self.get("/api/v1/reservations")

@@ -981,12 +981,18 @@ class SSHCollector:
 
     async def observe_endpoint(self, endpoint: EndpointConfig) -> EndpointObservation:
         observed_at = utcnow()
-        from serverpilot.plugins import is_plugin_profile, observe_plugin
+        from serverpilot.plugins import BUILTIN_OBSERVATION_PROFILE, observe_plugin
 
-        if is_plugin_profile(endpoint.observation_profile):
+        # A name comparison, not a lookup. Asking whether a profile is a plugin
+        # meant discovering plugins, which forks each candidate's `info` with a
+        # multi-second timeout -- on the event loop, while every other endpoint's
+        # probe was counting down its own deadline. With one built-in profile the
+        # question needs no discovery: anything that is not it names a plugin,
+        # and a name that names nothing fails in the plugin arm where it belongs.
+        if endpoint.observation_profile != BUILTIN_OBSERVATION_PROFILE:
             # A plugin is a subprocess with its own multi-second budget. Running
             # it inline would stop every other request and every other endpoint
-            # in this cycle for as long as the cluster takes to answer.
+            # for as long as the cluster takes to answer.
             return parse_server_script_snapshot(
                 await asyncio.to_thread(observe_plugin, endpoint.observation_profile),
                 endpoint_id=endpoint.id,

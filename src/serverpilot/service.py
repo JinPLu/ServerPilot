@@ -46,11 +46,9 @@ from serverpilot.models import (
     Lease,
     LeaseEndpointCommitment,
     LeaseResource,
-    MaintenanceWindow,
     ProcessObservation,
     Project,
     ProviderState,
-    Reservation,
     Revision,
     RuntimeSetting,
     ServerGroup,
@@ -63,14 +61,10 @@ from serverpilot.schemas import (
     EndpointCreate,
     EndpointObservation,
     EndpointUpdate,
-    EndpointUpsert,
     LeaseBind,
     LeaseObservedBind,
-    MaintenanceCreate,
     RequestCreate,
-    ReservationCreate,
     ResourceConstraints,
-    RetentionPrune,
     ServerGroupCreate,
     ServerGroupUpdate,
 )
@@ -1994,35 +1988,6 @@ class BrokerService:
             "acknowledged_by": alert.acknowledged_by,
         }
 
-    @staticmethod
-    def _reservation_dict(reservation: Reservation) -> dict[str, Any]:
-        return {
-            "id": reservation.id,
-            "actor_id": reservation.actor_id,
-            "project_id": reservation.project_id,
-            "gpu_ids": json_load(reservation.gpu_ids_json),
-            "constraints": json_load(reservation.constraints_json),
-            "start_at": _iso(reservation.start_at),
-            "end_at": _iso(reservation.end_at),
-            "reason": reservation.reason,
-            "state": reservation.state,
-            "created_at": _iso(reservation.created_at),
-        }
-
-    @staticmethod
-    def _maintenance_dict(window: MaintenanceWindow) -> dict[str, Any]:
-        return {
-            "id": window.id,
-            "endpoint_id": window.endpoint_id,
-            "gpu_id": window.gpu_id,
-            "actor_id": window.actor_id,
-            "start_at": _iso(window.start_at),
-            "end_at": _iso(window.end_at),
-            "reason": window.reason,
-            "state": window.state,
-            "created_at": _iso(window.created_at),
-        }
-
     # ---- read models and derived GPU state ------------------------------------
 
     def _latest_telemetry(
@@ -2335,15 +2300,6 @@ class BrokerService:
         """
 
         return max(60, self.inventory.collector.stale_after_seconds * 3)
-
-    @staticmethod
-    def _keepalive_summary(lease: Lease, endpoint_id: str) -> dict[str, Any]:
-        return {
-            "endpoint_id": endpoint_id,
-            "enabled": lease.state == "ACTIVE",
-            "lease_id": lease.id,
-            "state": lease.state,
-        }
 
     def _validate_keepalive_observation(
         self,
@@ -3168,20 +3124,6 @@ class BrokerService:
 
         return self._read(operation)
 
-    def keepalive_transition_plan(self, endpoint_id: str | None = None) -> dict[str, Any]:
-        """Compatibility alias for the daemon/API reconciliation hook."""
-
-        return self.list_keepalive_transitions(endpoint_id)
-
-    def desired_keepalive_candidates(self, endpoint_id: str | None = None) -> dict[str, Any]:
-        """Return only currently eligible idle GPU start candidates."""
-
-        plan = self.list_keepalive_transitions(endpoint_id)
-        return {
-            "snapshot_revision": plan["snapshot_revision"],
-            "candidates": [item for item in plan["transitions"] if item["action"] == "start"],
-        }
-
     def get_endpoint_keepalive_summary(self, endpoint_id: str) -> dict[str, Any]:
         """Return the public no-actor aggregate after a transition batch."""
 
@@ -3218,176 +3160,6 @@ class BrokerService:
                     )
 
         self._write(operation)
-
-    def activate_keepalive(
-        self,
-        actor: ActorContext,
-        endpoint_id: str,
-        gpu_id: str,
-        *,
-        observation_not_before: datetime,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Record one keepalive only after its process is freshly observed."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="keepalive.activate_gpu", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            endpoint = session.get(Endpoint, endpoint_id)
-            if endpoint is None:
-                raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
-            self._require_endpoint_manager(actor, endpoint)
-            if endpoint.keepalive_policy != "idle_keepalive":
-                raise BrokerError(
-                    "keepalive_policy_disabled",
-                    "per-GPU keepalive may start only under idle_keepalive policy",
-                    status_code=409,
-                )
-            if endpoint.keepalive_adapter_id is None:
-                raise BrokerError(
-                    "keepalive_not_configured",
-                    "endpoint has no sealed keepalive adapter configured",
-                    status_code=409,
-                )
-            if endpoint.lifecycle_state != "active" or not endpoint.enabled:
-                raise BrokerError(
-                    "endpoint_not_active",
-                    "keepalive requires an active, enabled endpoint",
-                    status_code=409,
-                )
-            gpu = session.get(GPUDevice, gpu_id)
-            if gpu is None or gpu.endpoint_id != endpoint.id:
-                raise BrokerError(
-                    "keepalive_gpu_mismatch",
-                    "GPU does not belong to the endpoint",
-                    status_code=409,
-                )
-            existing_lease = self._active_lease_for_gpu(session, gpu.id)
-            if existing_lease is not None and existing_lease.kind != "keepalive":
-                raise BrokerError(
-                    "keepalive_gpu_ineligible",
-                    "a workload already owns the target GPU",
-                    status_code=409,
-                    details={"gpu_id": gpu.id},
-                )
-            processes = self._validate_keepalive_observation(
-                session,
-                endpoint_id=endpoint_id,
-                gpu_ids=[gpu.id],
-                observation_not_before=observation_not_before,
-            )
-            if not processes:
-                raise BrokerError(
-                    "keepalive_process_missing",
-                    "fresh collection did not find the occupancy process",
-                    status_code=409,
-                )
-            if len(processes) != 1:
-                raise BrokerError(
-                    "keepalive_process_conflict",
-                    "fresh collection found additional processes on the occupancy GPU",
-                    status_code=409,
-                )
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            if existing_lease is None:
-                request = AllocationRequest(
-                    id=secrets.token_hex(16),
-                    actor_id=SYSTEM_ACTOR_ID,
-                    project_id=SYSTEM_PROJECT_ID,
-                    auto_activate=False,
-                    task_ref=f"keepalive:{endpoint.id}:{gpu.id}",
-                    purpose="ServerPilot idle GPU keepalive",
-                    constraints_json=json_dump(
-                        {"gpu_count": 1, "endpoint_ids": [endpoint.id], "gpu_ids": [gpu.id]}
-                    ),
-                    duration_seconds=self._keepalive_ttl_seconds(),
-                    expected_duration_seconds=None,
-                    start_after=None,
-                    deadline=None,
-                    approval_ref=None,
-                    state="ACTIVE",
-                    priority_class="keepalive",
-                    blocked_reason=None,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(request)
-                lease = Lease(
-                    id=secrets.token_hex(16),
-                    request_id=request.id,
-                    actor_id=SYSTEM_ACTOR_ID,
-                    project_id=SYSTEM_PROJECT_ID,
-                    kind="keepalive",
-                    state="ACTIVE",
-                    issued_at=now,
-                    expires_at=None,
-                    last_heartbeat_at=now,
-                    activated_at=now,
-                    released_at=None,
-                    release_reason=None,
-                    issued_revision=revision,
-                )
-                session.add(lease)
-                session.flush()
-                session.add(
-                    LeaseResource(lease_id=lease.id, gpu_id=gpu.id, active=True, released_at=None)
-                )
-            else:
-                lease = existing_lease
-                resources = self._keepalive_resources(session, lease.id)
-                if len(resources) != 1 or resources[0].gpu_id != gpu.id:
-                    raise BrokerError(
-                        "keepalive_gpu_invalid",
-                        "per-GPU keepalive record does not match the target GPU",
-                        status_code=409,
-                    )
-                lease.state = "ACTIVE"
-                lease.activated_at = lease.activated_at or now
-                lease.last_heartbeat_at = now
-                lease.expires_at = None
-                request = session.get(AllocationRequest, lease.request_id)
-                if request is not None:
-                    request.state = "ACTIVE"
-                    request.updated_at = now
-            self._set_keepalive_current(
-                session,
-                gpu.id,
-                "ON",
-                expected_process=processes[0],
-                now=now,
-            )
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="keepalive.gpu_activated",
-                resource_type="gpu",
-                resource_id=gpu.id,
-                result="success",
-                summary={"lease_id": lease.id, "endpoint_id": endpoint.id},
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "keepalive": self._keepalive_lease_summary(lease, endpoint.id, gpu.id),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="keepalive.activate_gpu",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
 
     def activate_keepalives(
         self,
@@ -3825,36 +3597,6 @@ class BrokerService:
             .limit(1)
         )
 
-    def _maintenance_for_gpu(
-        self, session: Session, gpu: GPUDevice, now: datetime
-    ) -> MaintenanceWindow | None:
-        return session.scalar(
-            select(MaintenanceWindow)
-            .where(
-                MaintenanceWindow.state == "ACTIVE",
-                MaintenanceWindow.start_at <= now,
-                MaintenanceWindow.end_at > now,
-                or_(
-                    MaintenanceWindow.gpu_id == gpu.id,
-                    MaintenanceWindow.endpoint_id == gpu.endpoint_id,
-                ),
-            )
-            .order_by(MaintenanceWindow.start_at.desc())
-            .limit(1)
-        )
-
-    def _current_reservation_for_gpu(
-        self, session: Session, gpu_id: str, now: datetime
-    ) -> Reservation | None:
-        reservations = session.scalars(
-            select(Reservation).where(
-                Reservation.state == "ACTIVE",
-                Reservation.start_at <= now,
-                Reservation.end_at > now,
-            )
-        ).all()
-        return next((item for item in reservations if gpu_id in json_load(item.gpu_ids_json)), None)
-
     def _gpu_state(self, session: Session, gpu: GPUDevice, now: datetime) -> tuple[str, str | None]:
         endpoint = session.get(Endpoint, gpu.endpoint_id)
         if endpoint is None or not gpu.enabled:
@@ -3865,9 +3607,6 @@ class BrokerService:
             return "DRAINING", "endpoint is draining and blocks new claims"
         if not endpoint.enabled:
             return "DISABLED", "endpoint is disabled"
-        maintenance = self._maintenance_for_gpu(session, gpu, now)
-        if maintenance is not None:
-            return "MAINTENANCE", maintenance.reason
         telemetry = self._latest_telemetry(session, gpu.id)
         if telemetry is None:
             return "UNKNOWN_RECOVERING", "no fresh telemetry after service start"
@@ -3898,9 +3637,6 @@ class BrokerService:
             return "BUSY_UNMANAGED", "compute process observed; admission blocked"
         if lease is not None:
             return ("HELD" if lease.state == "HELD" else "LEASED_IDLE"), "exclusive lease active"
-        reservation = self._current_reservation_for_gpu(session, gpu.id, now)
-        if reservation is not None:
-            return "RESERVED", f"reservation {reservation.id} is active"
         return "AVAILABLE", None
 
     @staticmethod
@@ -3922,55 +3658,6 @@ class BrokerService:
             "observations": process.observations,
             "first_seen_at": _iso(process.first_seen_at),
             "last_seen_at": _iso(process.last_seen_at),
-        }
-
-    def _gpu_dict(self, session: Session, gpu: GPUDevice, now: datetime) -> dict[str, Any]:
-        telemetry = self._latest_telemetry(session, gpu.id)
-        processes = self._current_processes(session, gpu.id, now)
-        lease = self._active_lease_for_gpu(session, gpu.id)
-        state, reason = self._gpu_state(session, gpu, now)
-        endpoint = session.get(Endpoint, gpu.endpoint_id)
-        assert endpoint is not None
-        keepalive_state, keepalive_reason = self._keepalive_gpu_status(session, gpu, lease, now)
-        keepalive_state, keepalive_reason = self._policy_keepalive_status(
-            endpoint,
-            state,
-            keepalive_state,
-            keepalive_reason,
-        )
-        return {
-            "id": gpu.id,
-            "endpoint_id": gpu.endpoint_id,
-            "gpu_uuid": gpu.gpu_uuid,
-            "gpu_index": gpu.gpu_index,
-            "cuda_ordinal": gpu.cuda_ordinal,
-            "name": gpu.name,
-            "total_vram_mib": gpu.total_vram_mib,
-            "labels": json_load(gpu.labels_json),
-            "health": gpu.health,
-            "enabled": gpu.enabled,
-            "present": gpu.present,
-            "state": state,
-            "state_reason": reason,
-            "first_seen_at": _iso(gpu.first_seen_at),
-            "last_seen_at": _iso(gpu.last_seen_at),
-            "absent_at": _iso(gpu.absent_at),
-            "telemetry": self._telemetry_dict(telemetry),
-            "processes": [self._process_dict(process) for process in processes],
-            "lease": (
-                self._lease_dict(session, lease)
-                if lease is not None and lease.kind != "keepalive"
-                else None
-            ),
-            "keepalive": {
-                "configured": endpoint.keepalive_adapter_id is not None,
-                "policy": endpoint.keepalive_policy,
-                "desired": "ON" if endpoint.keepalive_policy == "idle_keepalive" else "OFF",
-                "actual": keepalive_state,
-                "state": keepalive_state,
-                "reason": keepalive_reason,
-                "lease_id": lease.id if lease is not None and lease.kind == "keepalive" else None,
-            },
         }
 
     def envelope(self, session: Session, data: Any) -> dict[str, Any]:
@@ -4180,9 +3867,6 @@ class BrokerService:
                 )
                 for lease in all_leases
             }
-            maintenance_by_gpu: dict[str, MaintenanceWindow] = {}
-            maintenance_by_endpoint: dict[str, MaintenanceWindow] = {}
-            current_reservation_by_gpu: dict[str, Reservation] = {}
             endpoint_payloads: list[dict[str, Any]] = []
             plugin_capacity_values = {
                 item.key: item.value
@@ -4273,11 +3957,6 @@ class BrokerService:
                     return "DRAINING", "endpoint is draining and blocks new claims"
                 if not endpoint.enabled:
                     return "DISABLED", "endpoint is disabled"
-                maintenance = maintenance_by_gpu.get(gpu.id) or maintenance_by_endpoint.get(
-                    gpu.endpoint_id
-                )
-                if maintenance is not None:
-                    return "MAINTENANCE", maintenance.reason
                 telemetry = telemetry_by_gpu.get(gpu.id)
                 if telemetry is None:
                     return "UNKNOWN_RECOVERING", "no fresh telemetry after service start"
@@ -4312,9 +3991,6 @@ class BrokerService:
                     return (
                         "HELD" if lease.state == "HELD" else "LEASED_IDLE"
                     ), "exclusive lease active"
-                reservation = current_reservation_by_gpu.get(gpu.id)
-                if reservation is not None:
-                    return "RESERVED", f"reservation {reservation.id} is active"
                 return "AVAILABLE", None
 
             gpu_payloads: list[dict[str, Any]] = []
@@ -4853,8 +4529,6 @@ class BrokerService:
                 "absent_gpu_ids": absent_gpu_ids,
                 "leases": visible_lease_payloads,
                 "requests": [],
-                "reservations": [],
-                "maintenance": [],
                 "alerts": alert_payloads,
                 "host_capacity": host_capacity_payloads,
                 "resource_usage_revision": resource_usage_revision,
@@ -4882,8 +4556,6 @@ class BrokerService:
             "absent_gpu_ids",
             "leases",
             "requests",
-            "reservations",
-            "maintenance",
             "alerts",
             "host_capacity",
             "admission_boundary",
@@ -4901,11 +4573,6 @@ class BrokerService:
             ]
             current["requests"] = [
                 request for request in current["requests"] if visible_project_item(request)
-            ]
-            current["reservations"] = [
-                reservation
-                for reservation in current["reservations"]
-                if visible_project_item(reservation)
             ]
             visible_lease_ids = {lease["id"] for lease in current["leases"]}
             current["gpus"] = [
@@ -6135,36 +5802,6 @@ class BrokerService:
             )
         return usage
 
-    @staticmethod
-    def _reserved_gpu_ids(
-        session: Session,
-        *,
-        start: datetime,
-        end: datetime,
-    ) -> set[str]:
-        """Every GPU an active reservation covers in this window, in one query."""
-
-        reserved: set[str] = set()
-        for reservation in session.scalars(
-            select(Reservation).where(
-                Reservation.state == "ACTIVE",
-                Reservation.start_at < end,
-                Reservation.end_at > start,
-            )
-        ).all():
-            reserved.update(json_load(reservation.gpu_ids_json))
-        return reserved
-
-    def _reservation_blocks_gpu(
-        self,
-        session: Session,
-        gpu_id: str,
-        *,
-        start: datetime,
-        end: datetime,
-    ) -> bool:
-        return gpu_id in self._reserved_gpu_ids(session, start=start, end=end)
-
     def _eligible_gpus(
         self,
         session: Session,
@@ -6174,7 +5811,6 @@ class BrokerService:
         include_reclaimable_keepalive: bool = False,
     ) -> tuple[list[GPUDevice], dict[str, int]]:
         constraints = self._request_resource_constraints(request)
-        lease_end = now + timedelta(seconds=request.duration_seconds)
         excluded: dict[str, int] = defaultdict(int)
         values: list[GPUDevice] = []
         direct_commitment_usage = self._endpoint_commitment_usage(session)
@@ -6187,9 +5823,6 @@ class BrokerService:
         # forwarded port can leave a second row for that card, and leasing both
         # rows would hand the same card to two callers. Ownership convergence
         # prevents the duplicate; this keeps the allocator itself fail-closed.
-        # Scanning the reservation table once per card made the allocator's cost
-        # quadratic in a fleet's size; the window is the same for every card.
-        reserved_gpu_ids = self._reserved_gpu_ids(session, start=now, end=lease_end)
         leased_gpu_ids_by_uuid: dict[str, set[str]] = defaultdict(set)
         for gpu_uuid, gpu_id in session.execute(
             select(GPUDevice.gpu_uuid, GPUDevice.id)
@@ -6331,9 +5964,6 @@ class BrokerService:
                 and not reclaimable_keepalive
             ):
                 excluded["free_vram"] += 1
-                continue
-            if gpu.id in reserved_gpu_ids:
-                excluded["future_reservation"] += 1
                 continue
             values.append(gpu)
         return values, dict(excluded)
@@ -7152,25 +6782,6 @@ class BrokerService:
             expires_at = _as_utc(lease.expires_at) or now
             duration = max(60, int((expires_at - issued_at).total_seconds()))
             renewed_expiry = max(expires_at, now) + timedelta(seconds=duration)
-            reserved_gpu_ids = [
-                resource.gpu_id
-                for resource in session.scalars(
-                    select(LeaseResource).where(
-                        LeaseResource.lease_id == lease.id,
-                        LeaseResource.active.is_(True),
-                    )
-                ).all()
-                if self._reservation_blocks_gpu(
-                    session, resource.gpu_id, start=now, end=renewed_expiry
-                )
-            ]
-            if reserved_gpu_ids:
-                raise BrokerError(
-                    "lease_renewal_conflicts_with_reservation",
-                    "lease renewal would overlap a future GPU reservation",
-                    status_code=409,
-                    details={"gpu_ids": reserved_gpu_ids},
-                )
             lease.expires_at = renewed_expiry
             lease.last_heartbeat_at = now
             event = self._audit(
@@ -8455,436 +8066,6 @@ class BrokerService:
             self._allocate_queued(session, now, self._revision(session))
         return plugin_releases
 
-    def reconcile(self, actor: ActorContext) -> dict[str, Any]:
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            plugin_releases = self._reconcile_leases(session, now, actor_id=actor.id)
-            self._allocate_queued(session, now, revision)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="reconciliation.run",
-                resource_type="cluster",
-                resource_id="global",
-                result="success",
-                summary={"revision": revision},
-                now=now,
-            )
-            return {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "_plugin_releases": plugin_releases,
-            }
-
-        result = self._write(operation)
-        self._release_plugin_allocations(result.pop("_plugin_releases", []))
-        return result
-
-    # ---- reservation, maintenance, alert and administration -------------------
-
-    def _reservation_candidate_gpus(
-        self,
-        session: Session,
-        *,
-        constraints: ResourceConstraints,
-        start_at: datetime,
-        end_at: datetime,
-    ) -> list[str] | None:
-        """Resolve a constraint reservation to stable GPU identities at creation time."""
-
-        candidates: list[GPUDevice] = []
-        selected_group_ids = set(constraints.server_group_ids)
-        for gpu in session.scalars(
-            select(GPUDevice).order_by(GPUDevice.endpoint_id, GPUDevice.gpu_index)
-        ).all():
-            if not gpu.present:
-                continue
-            endpoint = session.get(Endpoint, gpu.endpoint_id)
-            if endpoint is None or not endpoint.enabled or not gpu.enabled:
-                continue
-            if selected_group_ids and endpoint.server_group_id not in selected_group_ids:
-                continue
-            if constraints.endpoint_ids and endpoint.id not in constraints.endpoint_ids:
-                continue
-            if endpoint.id in constraints.deny_endpoint_ids:
-                continue
-            host_telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
-            host_capacity = (
-                self._host_capacity(host_telemetry) if host_telemetry is not None else None
-            )
-            if constraints.min_available_cpu_cores is not None:
-                if host_capacity is None:
-                    continue
-                available_cpu_cores = host_capacity["cpu_available_cores"]
-                if (
-                    available_cpu_cores is None
-                    or available_cpu_cores < constraints.min_available_cpu_cores
-                ):
-                    continue
-            if constraints.min_available_memory_mib is not None and (
-                host_capacity is None
-                or host_capacity["memory_available_mib"] < constraints.min_available_memory_mib
-            ):
-                continue
-            if constraints.gpu_ids and gpu.id not in constraints.gpu_ids:
-                continue
-            if gpu.id in constraints.deny_gpu_ids:
-                continue
-            if (
-                constraints.min_total_vram_mib
-                and gpu.total_vram_mib < constraints.min_total_vram_mib
-            ):
-                continue
-            if not set(constraints.endpoint_labels).issubset(set(json_load(endpoint.labels_json))):
-                continue
-            if not set(constraints.gpu_labels).issubset(set(json_load(gpu.labels_json))):
-                continue
-            if self._reservation_blocks_gpu(session, gpu.id, start=start_at, end=end_at):
-                continue
-            candidates.append(gpu)
-        selected = self._select_resources_in_group_partitions(session, candidates, constraints)
-        return [gpu.id for gpu in selected] if selected else None
-
-    def create_reservation(
-        self,
-        actor: ActorContext,
-        reservation_data: ReservationCreate,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, OPERATOR_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="reservation.create", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            project = self._ensure_claim_project(session, reservation_data.project_id, now)
-            start_at = ensure_utc(reservation_data.start_at)
-            end_at = ensure_utc(reservation_data.end_at)
-            gpu_ids = list(reservation_data.gpu_ids)
-            if not gpu_ids:
-                assert reservation_data.constraints is not None
-                selected = self._reservation_candidate_gpus(
-                    session,
-                    constraints=reservation_data.constraints,
-                    start_at=start_at,
-                    end_at=end_at,
-                )
-                if selected is None:
-                    raise BrokerError(
-                        "reservation_capacity_unavailable",
-                        "no complete stable GPU set satisfies the future reservation constraints",
-                        status_code=409,
-                    )
-                gpu_ids = selected
-            for gpu_id in gpu_ids:
-                gpu = session.get(GPUDevice, gpu_id)
-                if gpu is None:
-                    raise BrokerError(
-                        "gpu_not_found", f"GPU {gpu_id} does not exist", status_code=404
-                    )
-                if not gpu.present:
-                    raise BrokerError(
-                        "gpu_absent",
-                        f"GPU {gpu_id} is absent from the latest complete endpoint observation",
-                        status_code=409,
-                    )
-                if self._reservation_blocks_gpu(session, gpu_id, start=start_at, end=end_at):
-                    raise BrokerError(
-                        "reservation_conflict",
-                        f"GPU {gpu_id} overlaps an existing reservation",
-                        status_code=409,
-                    )
-                leases = session.scalars(
-                    select(Lease)
-                    .join(LeaseResource, LeaseResource.lease_id == Lease.id)
-                    .where(
-                        LeaseResource.gpu_id == gpu_id,
-                        LeaseResource.active.is_(True),
-                        Lease.state.in_(ACTIVE_LEASE_STATES),
-                    )
-                ).all()
-                if any(
-                    (expires_at := _as_utc(lease.expires_at)) is None or expires_at > start_at
-                    for lease in leases
-                ):
-                    raise BrokerError(
-                        "reservation_active_lease_conflict",
-                        f"GPU {gpu_id} has an active lease that overlaps the reservation start",
-                        status_code=409,
-                    )
-            revision = self._bump_revision(session, now)
-            reservation = Reservation(
-                id=secrets.token_hex(16),
-                actor_id=actor.id,
-                project_id=project.id,
-                gpu_ids_json=json_dump(gpu_ids),
-                constraints_json=json_dump(
-                    reservation_data.constraints.model_dump(mode="json")
-                    if reservation_data.constraints
-                    else {}
-                ),
-                start_at=start_at,
-                end_at=end_at,
-                reason=reservation_data.reason,
-                state="ACTIVE",
-                created_at=now,
-            )
-            session.add(reservation)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="reservation.created",
-                resource_type="reservation",
-                resource_id=reservation.id,
-                result="success",
-                after=self._reservation_dict(reservation),
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "reservation": self._reservation_dict(reservation),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="reservation.create",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def cancel_reservation(
-        self, actor: ActorContext, reservation_id: str, *, idempotency_key: str
-    ) -> dict[str, Any]:
-        self._require_role(actor, OPERATOR_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="reservation.cancel", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            reservation = session.get(Reservation, reservation_id)
-            if reservation is None:
-                raise BrokerError(
-                    "reservation_not_found", "reservation does not exist", status_code=404
-                )
-            if reservation.actor_id != actor.id:
-                raise BrokerError(
-                    "reservation_forbidden",
-                    "cannot cancel another actor's reservation",
-                    status_code=403,
-                )
-            if reservation.state != "ACTIVE":
-                raise BrokerError(
-                    "reservation_not_cancellable", "reservation is not active", status_code=409
-                )
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            before = self._reservation_dict(reservation)
-            reservation.state = "CANCELLED"
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="reservation.cancelled",
-                resource_type="reservation",
-                resource_id=reservation.id,
-                result="success",
-                before=before,
-                after=self._reservation_dict(reservation),
-                now=now,
-            )
-            self._allocate_queued(session, now, revision)
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "reservation": self._reservation_dict(reservation),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="reservation.cancel",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def create_maintenance(
-        self,
-        actor: ActorContext,
-        maintenance: MaintenanceCreate,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        self._require_role(actor, OPERATOR_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="maintenance.create", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            endpoint_id = maintenance.endpoint_id
-            gpu_id = maintenance.gpu_id
-            if endpoint_id:
-                endpoint = session.get(Endpoint, endpoint_id)
-                if endpoint is None:
-                    raise BrokerError(
-                        "endpoint_not_found", "maintenance endpoint does not exist", status_code=404
-                    )
-                self._require_endpoint_manager(actor, endpoint)
-            if gpu_id:
-                gpu = session.get(GPUDevice, gpu_id)
-                if gpu is None:
-                    raise BrokerError(
-                        "gpu_not_found", "maintenance GPU does not exist", status_code=404
-                    )
-                endpoint = session.get(Endpoint, gpu.endpoint_id)
-                if endpoint is None:
-                    raise BrokerError(
-                        "endpoint_not_found", "GPU endpoint does not exist", status_code=404
-                    )
-                self._require_endpoint_manager(actor, endpoint)
-                endpoint_id = None
-            revision = self._bump_revision(session, now)
-            window = MaintenanceWindow(
-                id=secrets.token_hex(16),
-                endpoint_id=endpoint_id,
-                gpu_id=gpu_id,
-                actor_id=actor.id,
-                start_at=ensure_utc(maintenance.start_at),
-                end_at=ensure_utc(maintenance.end_at),
-                reason=maintenance.reason,
-                state="ACTIVE",
-                created_at=now,
-            )
-            session.add(window)
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="maintenance.created",
-                resource_type="maintenance",
-                resource_id=window.id,
-                result="success",
-                after=self._maintenance_dict(window),
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "maintenance": self._maintenance_dict(window),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="maintenance.create",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def prune_telemetry(
-        self,
-        actor: ActorContext,
-        retention: RetentionPrune,
-        *,
-        idempotency_key: str,
-    ) -> dict[str, Any]:
-        """Explicit retention action; current telemetry, audit and leases are never deleted."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="telemetry.prune", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            cutoff = now - timedelta(seconds=retention.older_than_seconds)
-            revision = self._bump_revision(session, now)
-            gpu_deleted = (
-                session.execute(
-                    delete(TelemetrySnapshot).where(TelemetrySnapshot.observed_at < cutoff)
-                ).rowcount
-                or 0
-            )
-            endpoint_deleted = (
-                session.execute(
-                    delete(EndpointTelemetrySnapshot).where(
-                        EndpointTelemetrySnapshot.observed_at < cutoff
-                    )
-                ).rowcount
-                or 0
-            )
-            deleted = gpu_deleted + endpoint_deleted
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="telemetry.pruned",
-                resource_type="telemetry",
-                resource_id="history",
-                result="success",
-                after={
-                    "deleted_count": deleted,
-                    "gpu_deleted_count": gpu_deleted,
-                    "endpoint_deleted_count": endpoint_deleted,
-                    "cutoff": _iso(cutoff),
-                },
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "deleted_count": deleted,
-                "gpu_deleted_count": gpu_deleted,
-                "endpoint_deleted_count": endpoint_deleted,
-                "cutoff": _iso(cutoff),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="telemetry.prune",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    @staticmethod
-    def _constraints_reference_endpoint(
-        constraints_json: str,
-        *,
-        endpoint_id: str,
-        gpu_ids: set[str],
-    ) -> bool:
-        constraints = json_load(constraints_json)
-        if not isinstance(constraints, dict):
-            return False
-        endpoint_ids = constraints.get("endpoint_ids") or []
-        allowed_gpu_ids = constraints.get("gpu_ids") or []
-        return endpoint_id in endpoint_ids or bool(gpu_ids.intersection(allowed_gpu_ids))
-
     def create_endpoint(
         self, actor: ActorContext, endpoint_data: EndpointCreate, *, idempotency_key: str
     ) -> dict[str, Any]:
@@ -9137,137 +8318,6 @@ class BrokerService:
 
         return self._write(operation)
 
-    def pause_endpoint(
-        self,
-        actor: ActorContext,
-        endpoint_id: str,
-        *,
-        idempotency_key: str,
-        _idempotency_action: str = "endpoint.pause",
-    ) -> dict[str, Any]:
-        """Move active -> draining without changing collection or existing leases."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action=_idempotency_action, key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            endpoint = session.get(Endpoint, endpoint_id)
-            if endpoint is None:
-                raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
-            self._require_endpoint_manager(actor, endpoint)
-            now = utcnow()
-            before = self._project_endpoint(session, endpoint)
-            changed = endpoint.lifecycle_state == "active"
-            if changed:
-                endpoint.lifecycle_state = "draining"
-                endpoint.enabled = False
-                endpoint.updated_at = now
-                revision = self._bump_revision(session, now)
-                session.flush()
-                payload = self._project_endpoint(session, endpoint)
-                event = self._audit(
-                    session,
-                    actor_id=actor.id,
-                    action="endpoint.paused",
-                    resource_type="endpoint",
-                    resource_id=endpoint.id,
-                    result="success",
-                    before=before,
-                    after=payload,
-                    summary={"collection_continues": True, "history_retained": True},
-                    now=now,
-                )
-                event_id: int | None = event.id
-            else:
-                revision = self._revision(session)
-                payload = before
-                event_id = None
-            result = {
-                "event_id": event_id,
-                "snapshot_revision": revision,
-                "endpoint": payload,
-                "endpoint_id": endpoint.id,
-                "changed": changed,
-                "history_retained": True,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action=_idempotency_action,
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def resume_endpoint(
-        self, actor: ActorContext, endpoint_id: str, *, idempotency_key: str
-    ) -> dict[str, Any]:
-        """Move draining -> active."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="endpoint.resume", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            endpoint = session.get(Endpoint, endpoint_id)
-            if endpoint is None:
-                raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
-            self._require_endpoint_manager(actor, endpoint)
-            now = utcnow()
-            before = self._project_endpoint(session, endpoint)
-            changed = endpoint.lifecycle_state == "draining"
-            if changed:
-                endpoint.lifecycle_state = "active"
-                endpoint.enabled = True
-                endpoint.updated_at = now
-                revision = self._bump_revision(session, now)
-                session.flush()
-                payload = self._project_endpoint(session, endpoint)
-                event = self._audit(
-                    session,
-                    actor_id=actor.id,
-                    action="endpoint.resumed",
-                    resource_type="endpoint",
-                    resource_id=endpoint.id,
-                    result="success",
-                    before=before,
-                    after=payload,
-                    now=now,
-                )
-                event_id: int | None = event.id
-            else:
-                revision = self._revision(session)
-                payload = before
-                event_id = None
-            result = {
-                "event_id": event_id,
-                "snapshot_revision": revision,
-                "endpoint": payload,
-                "endpoint_id": endpoint.id,
-                "changed": changed,
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="endpoint.resume",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
     def delete_endpoint(
         self, actor: ActorContext, endpoint_id: str, *, idempotency_key: str
     ) -> dict[str, Any]:
@@ -9351,199 +8401,6 @@ class BrokerService:
                 session,
                 actor=actor,
                 action="endpoint.delete",
-                key=idempotency_key,
-                response=result,
-                now=now,
-            )
-            return result
-
-        return self._write(operation)
-
-    def upsert_endpoint(
-        self, actor: ActorContext, endpoint_data: EndpointUpsert, *, idempotency_key: str
-    ) -> dict[str, Any]:
-        """Create/update inventory metadata while keeping endpoint id and host:port immutable."""
-
-        self._require_role(actor, MUTATING_ROLES)
-
-        def operation(session: Session) -> dict[str, Any]:
-            existing = self._idempotent(
-                session, actor=actor, action="endpoint.upsert", key=idempotency_key
-            )
-            if existing is not None:
-                return existing
-            now = utcnow()
-            revision = self._bump_revision(session, now)
-            endpoint = session.get(Endpoint, endpoint_data.id)
-            before = self._project_endpoint(session, endpoint) if endpoint else None
-            same_address = session.scalar(
-                select(Endpoint).where(
-                    Endpoint.host == endpoint_data.host,
-                    Endpoint.port == endpoint_data.port,
-                )
-            )
-            if same_address is not None and same_address.id != endpoint_data.id:
-                raise BrokerError(
-                    "endpoint_address_exists",
-                    "an immutable endpoint already owns this host:port",
-                    status_code=409,
-                )
-            if endpoint is None:
-                lifecycle_state = endpoint_data.lifecycle_state or "active"
-                if lifecycle_state != "active":
-                    raise BrokerError(
-                        "endpoint_lifecycle_invalid_transition",
-                        "a new endpoint must begin active",
-                        status_code=409,
-                    )
-                group = None
-                if endpoint_data.server_group_id is not None:
-                    group = session.get(ServerGroup, endpoint_data.server_group_id)
-                    if group is None:
-                        raise BrokerError(
-                            "server_group_not_found",
-                            "server group does not exist",
-                            status_code=404,
-                        )
-                stored_override = endpoint_data.stored_workspace_override()
-                self._require_effective_workspace(
-                    override=stored_override,
-                    group=group,
-                )
-                endpoint = Endpoint(
-                    id=endpoint_data.id,
-                    host=endpoint_data.host,
-                    port=endpoint_data.port,
-                    ssh_user=endpoint_data.ssh_user,
-                    ssh_alias=endpoint_data.ssh_alias,
-                    workspace_path=stored_override,
-                    observation_profile=endpoint_data.observation_profile,
-                    keepalive_adapter_id=endpoint_data.keepalive_adapter_id,
-                    keepalive_policy=endpoint_data.keepalive_policy,
-                    labels_json=json_dump(endpoint_data.labels),
-                    storage_group=endpoint_data.storage_group,
-                    server_group_id=endpoint_data.server_group_id,
-                    expected_gpu_count=endpoint_data.expected_gpu_count,
-                    expected_gpu_total_vram_mib=endpoint_data.expected_gpu_total_vram_mib,
-                    owner_project_id=endpoint_data.owner_project_id,
-                    lifecycle_state=lifecycle_state,
-                    enabled=True,
-                    created_at=now,
-                    updated_at=now,
-                )
-                session.add(endpoint)
-            else:
-                self._require_endpoint_manager(actor, endpoint)
-                if (endpoint.host, endpoint.port) != (endpoint_data.host, endpoint_data.port):
-                    raise BrokerError(
-                        "endpoint_identity_immutable",
-                        "existing endpoint id cannot change host:port; create a new endpoint id",
-                        status_code=409,
-                    )
-                next_group_id = (
-                    endpoint_data.server_group_id
-                    if "server_group_id" in endpoint_data.model_fields_set
-                    else endpoint.server_group_id
-                )
-                next_group = (
-                    session.get(ServerGroup, next_group_id) if next_group_id is not None else None
-                )
-                if next_group_id is not None and next_group is None:
-                    raise BrokerError(
-                        "server_group_not_found",
-                        "server group does not exist",
-                        status_code=404,
-                    )
-                stored_override = endpoint_data.stored_workspace_override()
-                effective_after = self._require_effective_workspace(
-                    override=stored_override,
-                    group=next_group,
-                )
-                effective_before = self._endpoint_effective_workspace(session, endpoint)
-                protected_values = {
-                    "ssh_user": endpoint_data.ssh_user,
-                    "ssh_alias": endpoint_data.ssh_alias,
-                    "workspace_path": effective_after,
-                    "observation_profile": endpoint_data.observation_profile,
-                    "keepalive_adapter_id": endpoint_data.keepalive_adapter_id,
-                }
-                current_protected = {
-                    "ssh_user": endpoint.ssh_user,
-                    "ssh_alias": endpoint.ssh_alias,
-                    "workspace_path": effective_before,
-                    "observation_profile": endpoint.observation_profile,
-                    "keepalive_adapter_id": endpoint.keepalive_adapter_id,
-                }
-                changed_protected_fields = sorted(
-                    field
-                    for field, value in protected_values.items()
-                    if value != current_protected[field]
-                )
-                if (
-                    changed_protected_fields
-                    and self._active_keepalive_for_endpoint(session, endpoint.id) is not None
-                ):
-                    raise BrokerError(
-                        "keepalive_endpoint_connection_in_use",
-                        "stop the active endpoint keepalive before changing its connection or verification settings",
-                        status_code=409,
-                        details={"fields": changed_protected_fields},
-                    )
-                if endpoint_data.owner_project_id is not None:
-                    endpoint.owner_project_id = endpoint_data.owner_project_id
-                endpoint.workspace_path = stored_override
-                requested_lifecycle = endpoint_data.lifecycle_state
-                if requested_lifecycle is None and endpoint_data.enabled is False:
-                    requested_lifecycle = "draining"
-                if (
-                    requested_lifecycle is not None
-                    and requested_lifecycle != endpoint.lifecycle_state
-                ):
-                    allowed_transitions = {
-                        "active": {"draining"},
-                        "draining": set(),
-                    }
-                    if requested_lifecycle not in allowed_transitions[endpoint.lifecycle_state]:
-                        raise BrokerError(
-                            "endpoint_lifecycle_invalid_transition",
-                            "endpoint lifecycle can transition only from active to draining",
-                            status_code=409,
-                        )
-                    endpoint.lifecycle_state = requested_lifecycle
-                endpoint.ssh_user = endpoint_data.ssh_user
-                endpoint.ssh_alias = endpoint_data.ssh_alias
-                endpoint.observation_profile = endpoint_data.observation_profile
-                endpoint.keepalive_adapter_id = endpoint_data.keepalive_adapter_id
-                endpoint.keepalive_policy = endpoint_data.keepalive_policy
-                endpoint.labels_json = json_dump(endpoint_data.labels)
-                endpoint.storage_group = endpoint_data.storage_group
-                if "server_group_id" in endpoint_data.model_fields_set:
-                    endpoint.server_group_id = endpoint_data.server_group_id
-                endpoint.expected_gpu_count = endpoint_data.expected_gpu_count
-                endpoint.expected_gpu_total_vram_mib = endpoint_data.expected_gpu_total_vram_mib
-                endpoint.enabled = endpoint.lifecycle_state == "active"
-                endpoint.updated_at = now
-            session.flush()
-            event = self._audit(
-                session,
-                actor_id=actor.id,
-                action="endpoint.upserted",
-                resource_type="endpoint",
-                resource_id=endpoint.id,
-                result="success",
-                before=before,
-                after=self._project_endpoint(session, endpoint),
-                now=now,
-            )
-            result = {
-                "event_id": event.id,
-                "snapshot_revision": revision,
-                "endpoint": self._project_endpoint(session, endpoint),
-            }
-            self._remember_idempotency(
-                session,
-                actor=actor,
-                action="endpoint.upsert",
                 key=idempotency_key,
                 response=result,
                 now=now,
@@ -9765,18 +8622,6 @@ class BrokerService:
                 self._lease_dict(session, lease) for lease in leases if lease.actor_id == actor.id
             ]
             return self.envelope(session, visible)
-
-        return self._read(operation)
-
-    def list_reservations(self, actor: ActorContext) -> dict[str, Any]:
-        def operation(session: Session) -> dict[str, Any]:
-            values = [
-                self._reservation_dict(reservation)
-                for reservation in session.scalars(
-                    select(Reservation).order_by(Reservation.start_at, Reservation.id)
-                ).all()
-            ]
-            return self.envelope(session, values)
 
         return self._read(operation)
 

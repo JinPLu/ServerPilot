@@ -912,14 +912,14 @@ def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
             observed_at=datetime.now(UTC),
         )
     )
-    begun = service.activate_keepalive(
+    begun = service.activate_keepalives(
         actor,
         "endpoint-a",
-        "endpoint-a:GPU-00000000-0000-0000-0000-000000000001",
+        ["endpoint-a:GPU-00000000-0000-0000-0000-000000000001"],
         observation_not_before=observation_not_before,
         idempotency_key="cleanup-activate",
     )
-    lease_id = str(begun["keepalive"]["lease_id"])
+    lease_id = str(begun["keepalives"][0]["lease_id"])
     adapter.active_pids.clear()
     # The worker is gone, and this recovery path still wants the card to show
     # no process: one listing without it is not that proof, its last sighting

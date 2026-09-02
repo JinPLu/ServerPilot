@@ -13,6 +13,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 - **One way to observe a server, instead of three.** `linux-nvidia`, `linux-host` and `server-script-v1` are replaced by `linux`. The probe already worked out for itself whether a machine has NVIDIA cards, so the choice only gave people a way to register a server that connects but reports no GPUs. Registered servers migrate automatically, and plugins for shared clusters are unaffected.
 - **The log can be read.** The daemon log now carries a UTC timestamp, the process id and the server it is about, and rotates. It used to be one ever-growing file with no timestamps at all.
 - **Only one daemon can run on a machine.** Two installations could claim the same port and restart each other indefinitely, and a retired startup item was only unloaded rather than removed, so it came back at the next login to claim the port again.
+- **The Windows desktop app is gone.** It lagged the macOS app (no reassignment, no clearing an idle hold) and never managed the daemon's lifecycle; the CLI and MCP keep working on Windows.
 
 ## 2.4.0 - 2026-08-31
 

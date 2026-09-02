@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Agents take their own GPUs. You watch the whole fleet.</strong><br>
-  MCP for agents · Native desktop apps · Open source
+  MCP for agents · Native desktop app · Open source
 </p>
 
 <p align="center">
@@ -21,7 +21,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2563EB?logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
-  <img src="https://img.shields.io/badge/Windows-native%20App-147AF3?logo=windows&logoColor=white" alt="Native Windows App">
   <img src="https://img.shields.io/badge/MCP-5%20routine%20tools-7C3AED" alt="Five routine MCP tools">
   <a href="https://github.com/JinPLu/ServerPilot/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
@@ -36,8 +35,8 @@
 > them GPUs one card at a time?
 
 To an agent, ServerPilot is an MCP server: look at cards, take some, give them
-back, and register or update a host. To you, it is a macOS or Windows app
-showing what is free, what is busy, whose job is where, and what is failing
+back, and register or update a host. To you, it is a macOS app showing what
+is free, what is busy, whose job is where, and what is failing
 across every server you registered. There is no browser UI.
 
 One local user, several servers, several agents. Resource state, requests, and
@@ -138,9 +137,8 @@ install, and is macOS-only. After a later upgrade, confirm the process on
 [upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
 (Chinese).
 
-**Windows**: download the desktop app under [The desktop app](#-the-desktop-app)
-below. It carries its own Python and starts the control plane itself, so there
-is nothing to install first. To run from source instead, use
+**Windows**: the desktop app is macOS-only, but the CLI and MCP entry points
+work on Windows. From source, use
 `serverpilot serve --db <path> --inventory <path>` and keep that process
 running; there is no supervised install on Windows yet.
 
@@ -209,11 +207,9 @@ registration without writing anything. The standard block is:
 }
 ```
 
-With the Windows desktop app, `serverpilot-mcp` is not on PATH, so use the
-absolute path to `serverpilot-mcp.exe` from the archive. The desktop app
-Settings page shows that resolved path and a pasteable `mcpServers` block —
-copy them rather than reconstructing the command. Full per-client notes
-are in the [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md).
+The CLI and MCP entry points work the same way on Windows; the desktop app is
+macOS-only. Full per-client notes are in the
+[Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md).
 
 ## 🤖 How an agent uses it
 
@@ -254,30 +250,11 @@ gpu_status → gpu_apply(server_group_id=<group>, gpu_count=<launch config>, tas
 
 ## 🖥️ The desktop app
 
-The Settings page shows this installation's MCP entry as an absolute path and
-the pasteable `mcpServers` JSON. Copy either into Codex, Claude Code, or
+The desktop app is macOS-only; the CLI and MCP entry points work on Windows
+too. The Settings page shows this installation's MCP entry as an absolute path
+and the pasteable `mcpServers` JSON. Copy either into Codex, Claude Code, or
 Cursor. If the executable is missing, the same panel says so and repeats the
 install hint instead of inventing a path.
-
-### Windows
-
-Download `ServerPilot-*-windows-x64.zip` from
-[GitHub Releases](https://github.com/JinPLu/ServerPilot/releases/latest), unpack
-it, and run `ServerPilot.exe`. The `serverpilot-mcp.exe` next to it is the MCP
-entry point for agents: put its absolute path in the `mcpServers` block above.
-No separate Python installation is needed. The app keeps its inventory and
-control-plane state in `%LOCALAPPDATA%\ServerPilot`.
-
-Windows 10 and 11 need the Microsoft Edge WebView2 Runtime, which most systems
-already have. If it is missing the app says so rather than falling back to a
-browser window. Closing the window stops only a control plane this app started;
-one that was already running is left alone.
-
-To build from source on Windows, in PowerShell:
-
-```powershell
-.\desktop\build-windows-app.ps1
-```
 
 ### macOS
 

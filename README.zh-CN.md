@@ -6,7 +6,7 @@
 
 <p align="center">
   <strong>Agent 自己拿卡，人类实时监控。</strong><br>
-  给 Agent 的 MCP · 原生桌面 App · 开源
+  给 Agent 的 MCP · 原生桌面 App（macOS）· 开源
 </p>
 
 <p align="center">
@@ -21,7 +21,6 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2563EB?logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
-  <img src="https://img.shields.io/badge/Windows-native%20App-147AF3?logo=windows&logoColor=white" alt="Native Windows App">
   <img src="https://img.shields.io/badge/MCP-5%20routine%20tools-7C3AED" alt="Five routine MCP tools">
   <a href="LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
@@ -34,7 +33,7 @@
 
 > 🤖 Agent 会写代码、跑实验了，GPU 还需要一张张指定吗？
 
-对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还，以及登记或更新主机。对人，它是一个 macOS 或 Windows App：看多台服务器的空闲、占用、任务和异常。没有浏览器界面。
+对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还，以及登记或更新主机。对人，它是一个 macOS App：看多台服务器的空闲、占用、任务和异常。CLI 和 MCP 在 Windows 上同样可用，桌面 App 仅 macOS。没有浏览器界面。
 
 一个本机用户，管理多台服务器与协作 Agent；资源状态、申请和人工纠错始终围绕同一份本机控制面快照。
 
@@ -87,7 +86,7 @@ serverpilot daemon reclaim                             # 端口被非 launchd �
 
 ## 🚀 快速开始
 
-从源码启动需要 [Python 3.12+](https://www.python.org/)、[uv](https://docs.astral.sh/uv/) 和 macOS 或 Windows。Windows 用户也可以直接下载下方的桌面 App，无需预先安装 Python 或 uv。
+从源码启动需要 [Python 3.12+](https://www.python.org/)、[uv](https://docs.astral.sh/uv/) 和 macOS 或 Windows。桌面 App 仅 macOS；Windows 上使用 CLI 和 MCP。
 
 ### 1. 🧰 启动本机控制面
 
@@ -105,7 +104,7 @@ serverpilot daemon status
 
 `daemon install` 注册用户 LaunchAgent，由它拉起这份 `uv tool` 安装，且只在 macOS 上可用。以后升级包装后，还要确认 `http://127.0.0.1:8787/health/live` 里的进程版本确实换了，见[升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)。
 
-**Windows**：下载下方[桌面 App](#-打开桌面-app)。它自带 Python 并自己拉起控制面，没有需要先装的 CLI。若从源码跑，使用 `serverpilot serve --db <path> --inventory <path>` 并保持该进程在线；Windows 上还没有受监管的 daemon 安装。
+**Windows**：桌面 App 仅 macOS，但 CLI 和 MCP 入口在 Windows 上同样可用。从源码跑，使用 `serverpilot serve --db <path> --inventory <path>` 并保持该进程在线；Windows 上还没有受监管的 daemon 安装。
 
 无论哪边，服务都监听 `http://127.0.0.1:8787`。
 
@@ -143,7 +142,7 @@ python3 scripts/install_agent_policy.py codex --install
 }
 ```
 
-用 Windows 桌面 App 的话，`serverpilot-mcp` 不在 PATH 上，要填压缩包里 `serverpilot-mcp.exe` 的绝对路径。App 的设置页会显示解析出的路径和可粘贴的 `mcpServers` 配置，直接复制即可，不必自己拼。三个客户端的完整说明见 [Agent / MCP 指南](docs/AGENT_MCP_zh.md)。
+CLI 和 MCP 入口在 Windows 上用法相同；桌面 App 仅 macOS。三个客户端的完整说明见 [Agent / MCP 指南](docs/AGENT_MCP_zh.md)。
 
 ## 🤖 Agent 用法
 
@@ -162,19 +161,7 @@ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, tas
 
 ## 🖥️ 打开桌面 App
 
-设置页会显示本机 MCP 入口的绝对路径和可直接粘贴的 `mcpServers` JSON。复制后即可交给 Codex、Claude Code 或 Cursor。找不到可执行文件时，同一处会说明原因并给出安装提示，而不会编造路径。
-
-### Windows
-
-从 [GitHub Releases](https://github.com/JinPLu/ServerPilot/releases/latest) 下载 `ServerPilot-*-windows-x64.zip`，解压后运行其中的 `ServerPilot.exe`。同一目录下的 `serverpilot-mcp.exe` 是给 Agent 的 MCP 入口：把它的绝对路径填进上面的 `mcpServers` 配置即可，不需要另外安装 Python。App 会在 `%LOCALAPPDATA%\ServerPilot` 保存本机服务器清单与控制面状态，启动后直接打开与 macOS 版相同的页面结构：服务器总览、服务器详情、逐 GPU 显存环图和 2×2 资源历史。
-
-Windows 10/11 需要 Microsoft Edge WebView2 Runtime（多数系统已自带）；缺失时 App 会给出明确提示，不会降级为外部浏览器页面。关闭窗口只停止本次由 App 启动的控制面；已经在运行的控制面不受影响。
-
-如需从 Windows 源码构建，可在 PowerShell 中运行：
-
-```powershell
-.\desktop\build-windows-app.ps1
-```
+桌面 App 仅 macOS；CLI 和 MCP 入口在 Windows 上同样可用。设置页会显示本机 MCP 入口的绝对路径和可直接粘贴的 `mcpServers` JSON。复制后即可交给 Codex、Claude Code 或 Cursor。找不到可执行文件时，同一处会说明原因并给出安装提示，而不会编造路径。
 
 ### macOS
 

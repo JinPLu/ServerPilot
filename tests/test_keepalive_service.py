@@ -19,6 +19,7 @@ from serverpilot.timeutil import utcnow
 from tests.helpers import (
     age_out_lease_holder,
     age_out_processes,
+    keepalive_start_candidates,
     observation,
     process_for_gpu,
 )
@@ -47,13 +48,19 @@ def _begin(service, admin, index: int = 0) -> dict[str, object]:  # noqa: ANN001
             processes=[process_for_gpu(f"GPU-endpoint-a-{index}", pid=4321 + index)],
         )
     )
-    return service.activate_keepalive(
+    # The live batch entry, given one card. A single-GPU wrapper existed beside
+    # it that only tests ever called, so the tests use the batch path the
+    # product actually takes.
+    result = service.activate_keepalives(
         admin,
         "endpoint-a",
-        f"endpoint-a:GPU-endpoint-a-{index}",
+        [f"endpoint-a:GPU-endpoint-a-{index}"],
         observation_not_before=started,
         idempotency_key=f"activate-{index}",
     )
+    # The batch entry answers with a list. These tests start one card at a
+    # time, so name that one result the way the assertions below read it.
+    return {**result, "keepalive": result["keepalives"][0]}
 
 
 def _confirm(service, admin, begun: dict[str, object], index: int = 0) -> dict[str, object]:  # noqa: ANN001
@@ -77,8 +84,7 @@ def _gpus(snapshot: dict[str, object]) -> dict[str, dict[str, object]]:
 def test_policy_is_persisted_and_candidates_are_independent_per_gpu(service, admin) -> None:
     _configure_idle_policy(service, admin)
 
-    initial = service.desired_keepalive_candidates("endpoint-a")
-    assert {item["gpu_id"] for item in initial["candidates"]} == {
+    assert set(keepalive_start_candidates(service, "endpoint-a")) == {
         "endpoint-a:GPU-endpoint-a-0",
         "endpoint-a:GPU-endpoint-a-1",
     }
@@ -96,8 +102,7 @@ def test_policy_is_persisted_and_candidates_are_independent_per_gpu(service, adm
             )
         ] == ["endpoint-a:GPU-endpoint-a-0"]
 
-    after = service.desired_keepalive_candidates("endpoint-a")
-    assert [item["gpu_id"] for item in after["candidates"]] == [
+    assert keepalive_start_candidates(service, "endpoint-a") == [
         "endpoint-a:GPU-endpoint-a-1",
     ]
     summary = service.get_endpoint_keepalive_summary("endpoint-a")["keepalive"]
@@ -138,9 +143,7 @@ def test_one_gpu_keepalive_does_not_block_sibling_gpu_or_hide_public_state(servi
         "reasons": [],
     }
     assert all(item["kind"] != "keepalive" for item in snapshot["data"]["leases"])
-    assert [
-        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
-    ] == ["endpoint-a:GPU-endpoint-a-1"]
+    assert keepalive_start_candidates(service, "endpoint-a") == ["endpoint-a:GPU-endpoint-a-1"]
 
 
 def test_public_gpu_status_reports_connection_failure_from_canonical_monitor_state() -> None:
@@ -199,9 +202,7 @@ def test_workload_turnover_on_one_gpu_does_not_block_sibling_keepalive_candidate
     gpus = _gpus(service.snapshot(admin))
     assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "RUNNING_MANAGED"
     assert gpus["endpoint-a:GPU-endpoint-a-1"]["state"] == "AVAILABLE"
-    assert [
-        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
-    ] == ["endpoint-a:GPU-endpoint-a-1"]
+    assert keepalive_start_candidates(service, "endpoint-a") == ["endpoint-a:GPU-endpoint-a-1"]
 
 
 def test_confirm_rejects_additional_process_on_keepalive_gpu(service, admin) -> None:
@@ -217,10 +218,10 @@ def test_confirm_rejects_additional_process_on_keepalive_gpu(service, admin) -> 
         )
     )
     with pytest.raises(BrokerError) as conflicted:
-        service.activate_keepalive(
+        service.activate_keepalives(
             admin,
             "endpoint-a",
-            "endpoint-a:GPU-endpoint-a-0",
+            ["endpoint-a:GPU-endpoint-a-0"],
             observation_not_before=barrier,
             idempotency_key="activate-current-process",
         )
@@ -728,15 +729,15 @@ def test_probe_failure_after_a_complete_observation_still_activates_keepalive(
     )
     service.record_provider_failure("endpoint-a", "TimeoutError: SSH observation timed out")
 
-    begun = service.activate_keepalive(
+    begun = service.activate_keepalives(
         admin,
         "endpoint-a",
-        "endpoint-a:GPU-endpoint-a-0",
+        ["endpoint-a:GPU-endpoint-a-0"],
         observation_not_before=started,
         idempotency_key="activate-after-probe-failure",
     )
 
-    keepalive = begun["keepalive"]
+    keepalive = begun["keepalives"][0]
     assert isinstance(keepalive, dict)
     assert keepalive["state"] == "ACTIVE"
     gpus = _gpus(service.snapshot(admin))
@@ -1040,15 +1041,11 @@ def test_keepalive_does_not_start_on_a_card_that_ran_a_process_within_the_grace(
     service.ingest_observation(observation(count=1, processes=[]))
 
     gpu_id = "endpoint-a:GPU-endpoint-a-0"
-    assert gpu_id not in {
-        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
-    }
+    assert gpu_id not in set(keepalive_start_candidates(service, "endpoint-a"))
 
     age_out_processes(service)
     service.ingest_observation(observation(count=1, processes=[]))
-    assert gpu_id in {
-        item["gpu_id"] for item in service.desired_keepalive_candidates("endpoint-a")["candidates"]
-    }
+    assert gpu_id in set(keepalive_start_candidates(service, "endpoint-a"))
 
 
 def test_stop_refuses_while_a_foreign_process_is_still_within_the_absence_grace(

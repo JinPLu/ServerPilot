@@ -46,5 +46,3 @@ def test_claim_is_immediate_and_a_second_claim_does_not_queue(service, admin) ->
 
     current = service.control_plane_state(admin)["data"]["current"]
     assert current["requests"] == []
-    assert current["reservations"] == []
-    assert current["maintenance"] == []

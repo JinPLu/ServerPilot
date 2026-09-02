@@ -136,16 +136,6 @@ class EndpointDeletion(Base):
     deleted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class EndpointProject(Base):
-    __tablename__ = "endpoint_projects"
-
-    endpoint_id: Mapped[str] = mapped_column(
-        ForeignKey("endpoints.id", ondelete="CASCADE"), primary_key=True
-    )
-    project_id: Mapped[str] = mapped_column(
-        ForeignKey("projects.id", ondelete="CASCADE"), primary_key=True
-    )
-
 
 class EndpointTelemetryCurrent(Base):
     """Latest host-wide CPU and memory observation for one endpoint."""
@@ -473,35 +463,6 @@ class WorkloadBinding(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class Reservation(Base):
-    __tablename__ = "reservations"
-    __table_args__ = (Index("ix_reservation_window", "state", "start_at", "end_at"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False)
-    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
-    gpu_ids_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
-    constraints_json: Mapped[str] = mapped_column(Text, nullable=False, default="{}")
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    reason: Mapped[str] = mapped_column(String(1000), nullable=False)
-    state: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class MaintenanceWindow(Base):
-    __tablename__ = "maintenance_windows"
-    __table_args__ = (Index("ix_maintenance_window", "start_at", "end_at"),)
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    endpoint_id: Mapped[str | None] = mapped_column(ForeignKey("endpoints.id", ondelete="CASCADE"))
-    gpu_id: Mapped[str | None] = mapped_column(ForeignKey("gpu_devices.id", ondelete="CASCADE"))
-    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False)
-    start_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    end_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    reason: Mapped[str] = mapped_column(String(1000), nullable=False)
-    state: Mapped[str] = mapped_column(String(32), nullable=False, default="ACTIVE")
-    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class AuditEvent(Base):
