@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 3.0.0 - 2026-09-03
 
 - **Installing the agent rules is now `serverpilot mcp policy`** instead of a script in the repository. The rule text is rendered from one source inside the package rather than hand-copied into six places. `--check` only means something inside a source checkout, and says so plainly when run from an installed copy.
 - **Nothing needs to be installed on a GPU server any more.** The published `serverpilot-collect` command is gone. Observation had already become one fixed read-only SSH probe, and no configuration could make ServerPilot invoke a collector on the remote host, so the command shipped but could never be called. Hosts that already have it can uninstall it, and upgrading the control plane no longer means matching versions on every server.

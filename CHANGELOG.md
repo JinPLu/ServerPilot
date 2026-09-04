@@ -4,7 +4,7 @@
 
 这里只记录用户能感受到的变化；实现细节见 Git 提交。
 
-## Unreleased
+## 3.0.0 - 2026-09-03
 
 - **安装 Agent 规则的命令换成了 `serverpilot mcp policy`**（原 `scripts/install_agent_policy.py`），规则文本现在由包内单一来源渲染，不再靠手工同步六份副本。`--check` 只在源码检出里有意义，从安装版调用会直接说明这一点。
 - **GPU 服务器上不再需要安装任何东西。** 随包发布的 `serverpilot-collect` 命令已删除：观测早已改为一条固定的只读 SSH 探测，没有任何配置能让 ServerPilot 去调用远端的采集脚本。已经装过它的主机可以直接卸载，升级控制面也不再需要挨台对齐版本。
