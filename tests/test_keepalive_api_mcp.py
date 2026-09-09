@@ -1956,7 +1956,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     )
     assert "busy_gpus" not in recovered_status
 
-    allocation_on = tools.gpu_apply(
+    allocation_on = tools.gpu_apply(duration_seconds=3600,
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡开启申请验收"
     )
     assert len(allocation_on["gpus"]) == 1
@@ -2004,7 +2004,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert "busy_gpus" not in status_off
     assert "no_capacity" not in status_off
 
-    allocation_off = tools.gpu_apply(
+    allocation_off = tools.gpu_apply(duration_seconds=3600,
         server_id="endpoint-a", gpu_count=1, task="Agent 占卡关闭申请验收"
     )
     assert len(allocation_off["gpus"]) == 1

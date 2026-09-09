@@ -453,3 +453,59 @@ def test_server_group_migration_leaves_legacy_storage_group_untouched(
     assert row.storage_group == "old-nfs-tag"
     assert row.server_group_id is None
     assert group_count == 0
+
+
+def test_provider_migration_preserves_old_release_handle(service, admin, monkeypatch):
+    from serverpilot.models import Endpoint
+    from serverpilot.plugins import PluginInfo
+    from tests.test_provider_allocations import allocation_fact, claim, request
+
+    plugin = PluginInfo(plugin_id="migration-provider", display_name="Migration provider", schema_version=5,
+                        capabilities=("observe", "apply", "release"), path=Path("/not-executed"), source="local",
+                        release_granularity="allocation", entry_kind="allocation",
+                        limits={"lease_ends": "hard_kill_at_time_limit", "max_lease_seconds": 86400,
+                                "apply_max_seconds": 40, "queues": False})
+    monkeypatch.setattr("serverpilot.plugins.get_plugin", lambda name, **_: plugin if name == plugin.plugin_id else None)
+    service._write(lambda session: setattr(session.get(Endpoint, "endpoint-a"), "observation_profile", plugin.plugin_id))
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", lambda *args, **kwargs: allocation_fact(kwargs["request_id"]))
+    lease_id = claim(service, admin, data=request())["lease"]["id"]
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "src/serverpilot/migrations"))
+    config.set_main_option("sqlalchemy.url", service.database.url)
+    command.downgrade(config, "20260903_0038")
+    with service.database.engine.connect() as connection:
+        legacy = json.loads(connection.execute(text("SELECT constraints_json FROM leases WHERE id=:id"), {"id": lease_id}).scalar_one())
+        assert legacy["plugin_allocation"]["allocation_ref"] == "901"
+    command.upgrade(config, "head")
+    with service.database.engine.connect() as connection:
+        saved = connection.execute(text("SELECT * FROM resource_allocations WHERE lease_id=:id"), {"id": lease_id}).mappings().one()
+        assert saved["allocation_ref"] == "901"
+        assert saved["provider_id"] == "migration-provider"
+        assert saved["state"] == "unconfirmed"
+        assert json.loads(saved["locations_json"]) == []
+    calls = []
+    monkeypatch.setattr("serverpilot.plugins.release_plugin", lambda *args, **kwargs: calls.append(kwargs) or {"state": "released"})
+    service.release_lease(admin, lease_id, reason="migration test", idempotency_key="release-migrated")
+    assert calls == [{"allocation_ref": "901"}]
+
+
+def test_node_migration_preserves_gpu_and_lease_identity(service, admin):
+    from tests.helpers import observation
+    from tests.test_service import request_data
+
+    service.ingest_observation(observation(count=1))
+    claimed = service.create_request(admin, request_data("node-migration"), idempotency_key="node-migration")
+    gpu_ids = claimed["lease"]["gpu_ids"]
+    lease_id = claimed["lease"]["id"]
+    root = Path(__file__).resolve().parents[1]
+    config = Config(str(root / "alembic.ini"))
+    config.set_main_option("script_location", str(root / "src/serverpilot/migrations"))
+    config.set_main_option("sqlalchemy.url", service.database.url)
+    command.downgrade(config, "20260908_0039")
+    command.upgrade(config, "head")
+    with service.database.engine.connect() as connection:
+        devices = connection.execute(text("SELECT id,node_id FROM gpu_devices")).all()
+        retained = connection.execute(text("SELECT gpu_id FROM lease_resources WHERE lease_id=:id"), {"id": lease_id}).scalars().all()
+    assert devices == [(gpu_ids[0], "self")]
+    assert retained == gpu_ids

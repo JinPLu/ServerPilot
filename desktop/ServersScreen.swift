@@ -112,11 +112,12 @@ struct ResourcesDashboard: View {
                 case .available:
                     store.freshness == .fresh
                         && endpoint.monitorStatus == "ONLINE"
-                        && store.snapshot.gpus(for: endpoint).contains(where: \.isPubliclyAvailable)
+                        && (store.snapshot.gpus(for: endpoint).contains(where: \.isPubliclyAvailable)
+                            || (endpoint.schedulerCapacity?.freeGPUCount ?? 0) > 0)
                 case .taskOccupied:
                     store.snapshot.gpus(for: endpoint).contains {
                         ["BUSY_UNMANAGED", "ORPHANED_BUSY", "CONFLICT"].contains($0.state)
-                    }
+                    } || endpoint.nodes.contains { $0.allocatedGPUs > 0 }
                 case .keepalive:
                     endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning
                 case .connectionFailed:
@@ -129,6 +130,7 @@ struct ResourcesDashboard: View {
                 return endpoint.id.lowercased().contains(query)
                     || endpoint.displayName.lowercased().contains(query)
                     || endpoint.host.lowercased().contains(query)
+                    || endpoint.nodes.contains { $0.name.lowercased().contains(query) }
                     || endpoint.sshCommand.lowercased().contains(query)
                     || (endpoint.workspacePath?.lowercased().contains(query) ?? false)
                     || (store.snapshot.serverGroup(for: endpoint)?.displayName.lowercased().contains(query) ?? false)
@@ -139,7 +141,6 @@ struct ResourcesDashboard: View {
                             || ($0.purpose ?? "").lowercased().contains(query)
                     }
             }
-            .sorted(by: endpointSort)
     }
 
     private var tableSections: [EndpointOverviewSection] {
@@ -170,6 +171,16 @@ struct ResourcesDashboard: View {
     var body: some View {
         VStack(spacing: 0) {
             resourceSummary
+            ForEach(store.snapshot.pendingAllocations) { allocation in
+                HStack {
+                    Text("\(allocation.taskReference ?? "任务") · \(allocation.stateLabel)")
+                        .font(Typography.annotation).foregroundStyle(DesignTokens.warning)
+                    Spacer()
+                    if let endpoint = store.snapshot.endpoint(id: allocation.endpointID) {
+                        Button("查看申请") { openEndpoint(endpoint) }.buttonStyle(.plain)
+                    }
+                }.padding(.horizontal, 20).padding(.vertical, 6)
+            }
             Divider().opacity(DesignTokens.Alpha.strong)
             endpointTable
                 .background(DesignTokens.surface)
@@ -252,11 +263,11 @@ struct ResourcesDashboard: View {
                 .frame(maxWidth: 430)
                 .accessibilityLabel("端点过滤")
 
-                Label("资源指标：近 10 分钟均值", systemImage: "clock")
+                Label("资源指标：节点当前值", systemImage: "clock")
                     .font(Typography.metricLabel)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .lineLimit(1)
-                    .help("GPU、显存、CPU 负载和内存占用率按最近 10 分钟的观测均值展示。点开服务器可查看当前观测。")
+                    .help("所有节点使用相同的实时采样与统计口径；点开可查看逐卡值、采样时间和采集错误。")
 
                 Spacer(minLength: 0)
 
@@ -289,7 +300,7 @@ struct ResourcesDashboard: View {
             GeometryReader { proxy in
                 // Columns fold from the right as the window narrows; the SSH
                 // lane and all four pressure bars survive every tier.
-                let tier = EndpointTableLayout.tier(width: proxy.size.width)
+                let tier = EndpointTableLayout.tier(width: proxy.size.width - EndpointTableLayout.scrollbarWidth * 2)
                 VStack(alignment: .leading, spacing: 0) {
                     EndpointTableHeader(
                         tier: tier,
@@ -297,6 +308,7 @@ struct ResourcesDashboard: View {
                         direction: sortDirection,
                         selectSort: selectSort
                     )
+                    .padding(.trailing, EndpointTableLayout.scrollbarWidth * 2)
                     EndpointTableDivider()
                     if filteredEndpoints.isEmpty {
                         VStack(spacing: 8) {
@@ -322,21 +334,29 @@ struct ResourcesDashboard: View {
                                     } else if sectionIndex > 0 {
                                         EndpointTableDivider()
                                     }
-                                    ForEach(Array(section.endpoints.enumerated()), id: \.element.id) { index, endpoint in
-                                        if index > 0 { EndpointTableDivider() }
-                                        EndpointTableRow(
-                                            endpoint: endpoint,
-                                            gpus: store.snapshot.gpus(for: endpoint),
-                                            leases: leases(for: endpoint),
-                                            group: store.snapshot.serverGroup(for: endpoint),
-                                            isSnapshotFresh: store.freshness == .fresh,
-                                            tier: tier
-                                        ) {
-                                            openEndpoint(endpoint)
+                                    ScrollView(.vertical, showsIndicators: true) {
+                                        LazyVStack(spacing: 0) {
+                                            ForEach(sectionRows(section)) { row in
+                                                switch row {
+                                                case .endpoint(let endpoint):
+                                                    endpointRow(endpoint, tier: tier)
+                                                case .node(let endpoint, let node):
+                                                    nodeRow(endpoint, node: node, tier: tier)
+                                                }
+                                                EndpointTableDivider()
+                                            }
                                         }
+                                        .frame(width: proxy.size.width - EndpointTableLayout.scrollbarWidth * 2)
+                                        .frame(maxWidth: .infinity, alignment: .leading)
+                                        .background(TableScrollStyle(hideWhenUnused: true))
                                     }
+                                    .scrollIndicators(.visible)
+                                    .frame(height: min(CGFloat(sectionRowCount(section)), 4) * (EndpointTableLayout.rowHeight + 1))
+                                    .accessibilityIdentifier("group-scroll-\(section.id)")
+                                    .id("\(section.id)-\(sort.rawValue)-\(sortDirection == .ascending)")
                                 }
                             }
+                            .background(TableScrollStyle())
                         }
                     }
                 }
@@ -369,6 +389,59 @@ struct ResourcesDashboard: View {
         }
     }
 
+    private func sectionRowCount(_ section: EndpointOverviewSection) -> Int {
+        sectionRows(section).count
+    }
+
+    private func sectionRows(_ section: EndpointOverviewSection) -> [EndpointOverviewRow] {
+        section.endpoints.flatMap { endpoint -> [EndpointOverviewRow] in
+            if !endpoint.nodes.isEmpty {
+                return visibleNodes(endpoint).map { .node(endpoint, $0) }
+            }
+            return [.endpoint(endpoint)]
+        }.sorted { left, right in
+            ResourceTableOrder.precedes(
+                sortValue(left), sortValue(right),
+                leftAddress: left.address, rightAddress: right.address,
+                ascending: sortDirection == .ascending
+            )
+        }
+    }
+
+    private func visibleNodes(_ endpoint: EndpointRecord) -> [SchedulerNodeRecord] {
+        let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        let nodes = endpoint.nodes
+        let matchingNode = !query.isEmpty && nodes.contains { $0.name.lowercased().contains(query) }
+        return nodes.filter { node in
+            (!matchingNode || node.name.lowercased().contains(query))
+                && (filter != .available || (endpoint.monitorStatus == "ONLINE" && node.schedulable && node.freeGPUs > 0))
+                && (filter != .taskOccupied || node.allocatedGPUs > 0)
+        }
+    }
+
+    private func endpointRow(_ endpoint: EndpointRecord, tier: EndpointTableLayout.Tier) -> EndpointTableRow {
+        EndpointTableRow(
+            endpoint: endpoint, gpus: store.snapshot.gpus(for: endpoint),
+            leases: leases(for: endpoint), group: store.snapshot.serverGroup(for: endpoint),
+            isSnapshotFresh: store.freshness == .fresh, tier: tier
+        ) { openEndpoint(endpoint) }
+    }
+
+    private func nodeRow(_ endpoint: EndpointRecord, node: SchedulerNodeRecord, tier: EndpointTableLayout.Tier) -> SchedulerNodeTableRow {
+        SchedulerNodeTableRow(
+            endpoint: endpoint, node: node, gpuName: node.gpuName ?? "—",
+            tier: tier, isSnapshotFresh: store.freshness == .fresh && endpoint.monitorStatus == "ONLINE" && endpoint.schedulerCapacity != nil,
+            leases: leases(for: endpoint), store: store
+        )
+    }
+
+    private func sortValue(_ row: EndpointOverviewRow) -> ResourceTableSortValue? {
+        switch row {
+        case .endpoint(let endpoint): return endpointRow(endpoint, tier: .compact).sortValue(for: sort)
+        case .node(let endpoint, let node): return nodeRow(endpoint, node: node, tier: .compact).sortValue(for: sort)
+        }
+    }
+
     private func selectSort(_ newSort: EndpointSort) {
         if sort == newSort {
             sortDirection = sortDirection == .ascending ? .descending : .ascending
@@ -384,14 +457,18 @@ struct ResourcesDashboard: View {
         case .group(let group):
             EndpointGroupSectionHeader(
                 title: group.displayName,
-                summary: endpointGroupCapacitySummary(section.endpoints, group: group, store: store)
+                summary: endpointGroupCapacitySummary(section.endpoints, group: group, store: store),
+                connections: section.endpoints.filter { $0.connection.supported },
+                setConnection: { store.setConnection($0, enabled: $1) }
             )
         case .ungrouped:
             EndpointGroupSectionHeader(
                 title: "未分组的服务器",
                 summary: endpointGroupCapacitySummary(section.endpoints, group: nil, store: store),
                 actionTitle: "管理服务器组",
-                action: manageGroups
+                action: manageGroups,
+                connections: section.endpoints.filter { $0.connection.supported },
+                setConnection: { store.setConnection($0, enabled: $1) }
             )
         case .flat:
             EmptyView()
@@ -400,81 +477,10 @@ struct ResourcesDashboard: View {
 
     private func leases(for endpoint: EndpointRecord) -> [LeaseRecord] {
         let gpuIDs = Set(store.snapshot.gpus(for: endpoint).map(\.id))
-        guard !gpuIDs.isEmpty else { return [] }
         return store.snapshot.leases.filter { lease in
-            !gpuIDs.isDisjoint(with: lease.gpuIDs)
+            !gpuIDs.isDisjoint(with: lease.gpuIDs) || lease.allocations.contains { $0.endpointID == endpoint.id }
                 && !["RELEASED", "EXPIRED", "CANCELLED"].contains(lease.state)
         }
-    }
-
-    private func endpointSort(_ lhs: EndpointRecord, _ rhs: EndpointRecord) -> Bool {
-        let comparison: ComparisonResult
-        switch sort {
-        case .attention:
-            comparison = compare(endpointAttentionRank(lhs), endpointAttentionRank(rhs))
-        case .id:
-            comparison = lhs.sshCommand.localizedStandardCompare(rhs.sshCommand)
-        case .assignment:
-            comparison = assignmentSortLabel(lhs).localizedStandardCompare(assignmentSortLabel(rhs))
-        case .availableGPU:
-            comparison = compare(availableGPUCount(lhs), availableGPUCount(rhs))
-        case .gpuModel:
-            let left = endpointGPUModelSortLabel(lhs)
-            let right = endpointGPUModelSortLabel(rhs)
-            comparison = left.localizedStandardCompare(right)
-        case .gpuUtilization:
-            let left = endpointOverviewGPUUtilizationFraction(endpoint: lhs, gpus: store.snapshot.gpus(for: lhs)) ?? -1
-            let right = endpointOverviewGPUUtilizationFraction(endpoint: rhs, gpus: store.snapshot.gpus(for: rhs)) ?? -1
-            comparison = compare(left, right)
-        case .gpuMemory:
-            let left = endpointOverviewGPUMemoryFraction(endpoint: lhs, gpus: store.snapshot.gpus(for: lhs)) ?? -1
-            let right = endpointOverviewGPUMemoryFraction(endpoint: rhs, gpus: store.snapshot.gpus(for: rhs)) ?? -1
-            comparison = compare(left, right)
-        case .cpuLoad:
-            comparison = compare(endpointOverviewCPULoadFraction(endpoint: lhs) ?? -1, endpointOverviewCPULoadFraction(endpoint: rhs) ?? -1)
-        case .memory:
-            comparison = compare(endpointOverviewMemoryFraction(endpoint: lhs) ?? -1, endpointOverviewMemoryFraction(endpoint: rhs) ?? -1)
-        }
-        if comparison == .orderedSame {
-            return lhs.id.localizedStandardCompare(rhs.id) == .orderedAscending
-        }
-        return sortDirection == .ascending ? comparison == .orderedAscending : comparison == .orderedDescending
-    }
-
-    private func compare<T: Comparable>(_ lhs: T, _ rhs: T) -> ComparisonResult {
-        if lhs < rhs { return .orderedAscending }
-        if lhs > rhs { return .orderedDescending }
-        return .orderedSame
-    }
-
-    private func assignmentSortLabel(_ endpoint: EndpointRecord) -> String {
-        let endpointLeases = leases(for: endpoint)
-        guard let lease = endpointLeases.first(where: { $0.runtimeState == "RUNNING" }) ?? endpointLeases.first else {
-            return ""
-        }
-        return "\(lease.projectID) \(lease.taskReference ?? lease.purpose ?? "")"
-    }
-
-    private func endpointAttentionRank(_ endpoint: EndpointRecord) -> Int {
-        let endpointGPUs = store.snapshot.gpus(for: endpoint)
-        let gpuRank = endpointGPUs.contains { gpuNeedsAttention($0) } ? 2 : 0
-        let pressureRank = endpointHighPressure(endpoint: endpoint, gpus: endpointGPUs) ? 1 : 0
-        return (endpointNeedsAttention(endpoint) ? 3 : 0) + gpuRank + pressureRank
-    }
-
-    /// Sort key only.  Must not feed “N 张空闲” copy — pool `free_gpu_count`
-    /// is not one-apply capacity, and the page total uses `allocatableGPUCount`.
-    private func availableGPUCount(_ endpoint: EndpointRecord) -> Int {
-        guard store.freshness == .fresh, endpoint.monitorStatus == "ONLINE" else { return 0 }
-        let local = store.snapshot.gpus(for: endpoint).filter(\.isPubliclyAvailable).count
-        if local > 0 { return local }
-        return endpoint.schedulerCapacity?.freeGPUCount ?? 0
-    }
-
-    private func endpointGPUModelSortLabel(_ endpoint: EndpointRecord) -> String {
-        let gpus = store.snapshot.gpus(for: endpoint)
-        if !gpus.isEmpty { return endpointGPUModelSummary(gpus) }
-        return endpoint.schedulerCapacity?.gpuName ?? "无 GPU"
     }
 
     private var allocatableGPUSummary: String {
@@ -553,6 +559,7 @@ private struct ResourceInlineStat: View {
 /// fold away beneath it.  No tier drops a pressure bar.
 
 private enum EndpointTableLayout {
+    static let scrollbarWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     /// 46 characters at 11 pt SF Mono, the longest SSH command a fixture
     /// carries.  Below this the command truncates, which is the failure the
     /// card grid was built to escape.
@@ -628,6 +635,25 @@ private struct EndpointTableDivider: View {
 }
 
 
+private enum EndpointOverviewRow: Identifiable {
+    case endpoint(EndpointRecord)
+    case node(EndpointRecord, SchedulerNodeRecord)
+
+    var id: String {
+        switch self {
+        case .endpoint(let endpoint): return "endpoint:\(endpoint.id)"
+        case .node(let endpoint, let node): return "node:\(endpoint.id):\(node.name)"
+        }
+    }
+
+    var address: String {
+        switch self {
+        case .endpoint(let endpoint): return endpoint.connectionAddress
+        case .node(let endpoint, let node): return "\(endpoint.connectionAddress) / \(node.name)"
+        }
+    }
+}
+
 private struct EndpointOverviewSection: Identifiable {
     enum Kind {
         case flat
@@ -662,6 +688,9 @@ private struct EndpointGroupSectionHeader: View {
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
 
+    let connections: [EndpointRecord]
+    let setConnection: (EndpointRecord, Bool) -> Void
+
     var body: some View {
         HStack(spacing: 8) {
             Text(title)
@@ -672,6 +701,18 @@ private struct EndpointGroupSectionHeader: View {
             Text(summary)
                 .font(Typography.rowValue)
                 .foregroundStyle(DesignTokens.mutedInk)
+            ForEach(connections) { endpoint in
+                Menu(endpoint.connection.label) {
+                    if let message = endpoint.connection.message { Text(message) }
+                    Button("连接并自动维持") { setConnection(endpoint, true) }
+                    if endpoint.connection.enabled {
+                        Button("停止维持并断开连接") { setConnection(endpoint, false) }
+                    }
+                }
+                .font(Typography.annotation)
+                .fixedSize()
+                .accessibilityLabel("\(endpoint.connectionAddress) 连接管理")
+            }
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
                     .buttonStyle(.borderless)
@@ -689,7 +730,7 @@ private struct EndpointGroupSectionHeader: View {
         .modifier(EndpointGroupSectionHeaderAccessibility(
             title: title,
             summary: summary,
-            combined: action == nil
+            combined: action == nil && connections.isEmpty
         ))
         .accessibilityIdentifier(action == nil ? "server-group-header" : "ungrouped-server-header")
     }
@@ -815,6 +856,24 @@ private struct EndpointTableRow: View {
     let tier: EndpointTableLayout.Tier
     let select: () -> Void
 
+    func sortValue(for field: EndpointSort) -> ResourceTableSortValue? {
+        switch field {
+        case .id: return .text(endpoint.connectionAddress)
+        case .assignment: return assignmentLine == "—" ? nil : .text(assignmentLine)
+        case .gpuModel: return .text(gpuModelLine)
+        case .availableGPU: return claimableLabel == nil ? nil : .number(Double(availableGPUCount))
+        case .gpuUtilization: return gpuPressure.map(ResourceTableSortValue.number)
+        case .gpuMemory: return gpuMemoryPressure.map(ResourceTableSortValue.number)
+        case .cpuLoad: return cpuLoadPressure.map(ResourceTableSortValue.number)
+        case .memory: return memoryPressure.map(ResourceTableSortValue.number)
+        case .attention:
+            let rank = (endpointNeedsAttention(endpoint) ? 3 : 0)
+                + (gpus.contains { gpuNeedsAttention($0) } ? 2 : 0)
+                + (endpointHighPressure(endpoint: endpoint, gpus: gpus) ? 1 : 0)
+            return .number(Double(rank))
+        }
+    }
+
     var body: some View {
         Button(action: select) {
             HStack(spacing: tier.columnSpacing) {
@@ -854,14 +913,14 @@ private struct EndpointTableRow: View {
         .accessibilityValue(accessibilityValue)
     }
 
-    /// The row's identity: a status pip, the SSH command in full, and the one
+    /// The row's identity: a status pip, host:port, and the one
     /// word that answers "can I ask this machine for a GPU".
     private var serverCell: some View {
         HStack(spacing: 9) {
             Circle()
                 .fill(statusColor)
                 .frame(width: 8, height: 8)
-            Text(endpoint.sshCommand)
+            Text(endpoint.connectionAddress)
                 .font(Typography.command)
                 .foregroundStyle(DesignTokens.ink)
                 .lineLimit(1)
@@ -1062,7 +1121,7 @@ private struct EndpointTableRow: View {
         guard !leases.isEmpty else { return "\(assignmentTitle) · \(assignmentDetail)" }
         return leases.map { lease in
             let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
-            return "\(lease.projectID) · \(task) · \(lease.gpuIDs.count) GPU"
+            return "\(lease.projectID) · \(task) · \(lease.gpuCount) GPU"
         }.joined(separator: "\n")
     }
 
@@ -1072,19 +1131,19 @@ private struct EndpointTableRow: View {
     }
 
     private var gpuPressure: Double? {
-        endpointOverviewGPUUtilizationFraction(endpoint: endpoint, gpus: gpus)
+        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.gpuUtilizationFraction : nil
     }
 
     private var gpuMemoryPressure: Double? {
-        endpointOverviewGPUMemoryFraction(endpoint: endpoint, gpus: gpus)
+        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.gpuMemoryFraction : nil
     }
 
     private var cpuLoadPressure: Double? {
-        endpointOverviewCPULoadFraction(endpoint: endpoint)
+        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.cpuUtilizationFraction : nil
     }
 
     private var memoryPressure: Double? {
-        endpointOverviewMemoryFraction(endpoint: endpoint)
+        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.memoryFraction : nil
     }
 
     private var gpuCaption: String {
@@ -1186,7 +1245,7 @@ private struct EndpointTableRow: View {
     }
 
     private var accessibilityValue: String {
-        "\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为近 10 分钟均值：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
+        "\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为节点当前值：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
     }
 }
 
@@ -1218,3 +1277,120 @@ private struct PressureMeter: View {
     }
 }
 
+
+
+/// Slurm node facts share the existing table's columns; no SSH endpoint is invented.
+private struct SchedulerNodeTableRow: View {
+    let endpoint: EndpointRecord
+    let node: SchedulerNodeRecord
+    let gpuName: String
+    let tier: EndpointTableLayout.Tier
+    let isSnapshotFresh: Bool
+    let leases: [LeaseRecord]
+    @ObservedObject var store: BrokerStore
+    @State private var showDetails = false
+
+    private var assignment: String? {
+        let tasks = leases.filter { $0.allocations.contains { $0.locations.contains { $0.node == node.name } } }
+            .map { "\($0.projectID) · \($0.taskReference ?? "未标注任务")" }
+        if !tasks.isEmpty { return tasks.joined(separator: "；") }
+        let external = endpoint.externalAllocations.filter { $0.locations.contains { $0.node == node.name } }
+        return external.isEmpty ? nil : "外部作业 " + external.map(\.reference).joined(separator: "、")
+    }
+
+    private var usage: ResourceNodeRecord? {
+        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == node.name }) : nil
+    }
+
+    private var statusColor: Color {
+        if !isSnapshotFresh || !node.schedulable { return DesignTokens.warning }
+        return node.freeGPUs > 0 ? DesignTokens.success : DesignTokens.mutedInk
+    }
+
+    private var address: String { "\(endpoint.connectionAddress) / \(node.name)" }
+    private var modelLabel: String { "\(gpuName) × \(node.totalGPUs)" }
+
+    func sortValue(for field: EndpointSort) -> ResourceTableSortValue? {
+        switch field {
+        case .id: return .text(address)
+        case .gpuModel: return .text(modelLabel)
+        case .availableGPU:
+            return isSnapshotFresh && node.schedulable ? .number(Double(node.freeGPUs)) : nil
+        case .attention: return .number(!isSnapshotFresh ? 3 : node.schedulable ? 0 : 1)
+        case .assignment: return assignment.map(ResourceTableSortValue.text)
+        case .gpuUtilization: return usage?.gpuUtilizationFraction.map(ResourceTableSortValue.number)
+        case .gpuMemory: return usage?.gpuMemoryFraction.map(ResourceTableSortValue.number)
+        case .cpuLoad: return usage?.cpuUtilizationFraction.map(ResourceTableSortValue.number)
+        case .memory: return usage?.memoryFraction.map(ResourceTableSortValue.number)
+        }
+    }
+
+    var body: some View {
+        HStack(spacing: tier.columnSpacing) {
+            HStack(spacing: 9) {
+                Circle().fill(statusColor).frame(width: 8, height: 8)
+                Text(address).font(Typography.command).lineLimit(1).textSelection(.enabled)
+                Text(isSnapshotFresh ? node.state : "观测已过期")
+                    .font(Typography.annotation).foregroundStyle(statusColor)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .frame(minWidth: EndpointTableLayout.sshLane, maxWidth: .infinity, alignment: .leading)
+            if tier.showsAssignment {
+                Text(assignment ?? "—").lineLimit(1).foregroundStyle(DesignTokens.mutedInk)
+                    .frame(width: tier.assignmentWidth, alignment: .leading)
+            }
+            if tier.showsGPUModel {
+                Text(modelLabel)
+                    .font(Typography.identity).lineLimit(1)
+                    .frame(width: tier.gpuModelWidth, alignment: .leading)
+            }
+            Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)/\(node.totalGPUs)" : "—/\(node.totalGPUs)")
+                .font(Typography.rowValue).monospacedDigit()
+                .frame(width: tier.availabilityWidth, alignment: .trailing)
+            TablePressureCell(label: "GPU 利用率", fraction: usage?.gpuUtilizationFraction, width: tier.pressureWidth)
+            TablePressureCell(label: "显存占用率", fraction: usage?.gpuMemoryFraction, width: tier.pressureWidth)
+            TablePressureCell(label: "CPU 负载", fraction: usage?.cpuUtilizationFraction, width: tier.pressureWidth)
+            TablePressureCell(label: "内存占用率", fraction: usage?.memoryFraction, width: tier.pressureWidth)
+        }
+        .foregroundStyle(DesignTokens.ink)
+        .padding(.horizontal, EndpointTableLayout.cardPadding)
+        .frame(height: EndpointTableLayout.rowHeight)
+        .help("\(node.name) · \(node.state) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
+        .contentShape(Rectangle())
+        .onTapGesture { showDetails = true }
+        .accessibilityAction { showDetails = true }
+        .sheet(isPresented: $showDetails) { NodeAllocationSheet(store: store, endpoint: endpoint, node: node) }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("scheduler-node-\(node.name)")
+    }
+}
+
+
+/// Keep group scrollbars visible; the table header reserves the same two native gutters.
+private struct TableScrollStyle: NSViewRepresentable {
+    var hideWhenUnused = false
+
+    func makeNSView(context: Context) -> TableScrollAnchor { TableScrollAnchor() }
+    func updateNSView(_ view: TableScrollAnchor, context: Context) {
+        view.hideWhenUnused = hideWhenUnused
+        view.applyStyle()
+    }
+}
+
+private final class TableScrollAnchor: NSView {
+    var hideWhenUnused = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        applyStyle()
+    }
+
+    func applyStyle() {
+        DispatchQueue.main.async { [weak self] in
+            guard let scroll = self?.enclosingScrollView else { return }
+            scroll.scrollerStyle = .legacy
+            scroll.autohidesScrollers = self?.hideWhenUnused ?? false
+        }
+    }
+}

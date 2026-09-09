@@ -150,12 +150,12 @@ def test_observation_gpu_uuid_index_and_cuda_ordinal_must_be_unique() -> None:
         observation(gpu_uuids=["GPU-dup", "GPU-dup"])
 
     base = observation(gpu_uuids=["GPU-a", "GPU-b"]).model_dump()
-    base["gpus"][1]["gpu_index"] = base["gpus"][0]["gpu_index"]
+    base["nodes"][0]["gpus"][1]["gpu_index"] = base["nodes"][0]["gpus"][0]["gpu_index"]
     with pytest.raises(ValidationError, match="unique gpu_index"):
         EndpointObservation.model_validate(base)
 
     base = observation(gpu_uuids=["GPU-a", "GPU-b"]).model_dump()
-    base["gpus"][1]["cuda_ordinal"] = base["gpus"][0]["cuda_ordinal"]
+    base["nodes"][0]["gpus"][1]["cuda_ordinal"] = base["nodes"][0]["gpus"][0]["cuda_ordinal"]
     with pytest.raises(ValidationError, match="unique cuda_ordinal"):
         EndpointObservation.model_validate(base)
 
@@ -241,7 +241,7 @@ def test_incomplete_observation_preserves_unobserved_process_and_blocks_exact_cl
         service.create_request(admin, exact_old, idempotency_key="old-incomplete")
 
     assert result["observation_complete"] is False
-    assert gpus["endpoint-a:GPU-old"]["state"] == "BUSY_UNMANAGED"
+    assert gpus["endpoint-a:GPU-old"]["state"] == "UNKNOWN_STALE"
     assert len(gpus["endpoint-a:GPU-old"]["processes"]) == 1
     assert error.value.code == "no_capacity"
 
@@ -1021,7 +1021,7 @@ def test_incomplete_process_observation_does_not_change_task_assignment(service,
         )
     )
 
-    assert service.list_gpus(admin)["data"][0]["state"] == "RUNNING_MANAGED"
+    assert service.list_gpus(admin)["data"][0]["state"] == "UNKNOWN_STALE"
     assert (
         next(
             lease
@@ -1473,7 +1473,7 @@ def test_snapshot_includes_per_gpu_recent_telemetry_average(service, admin) -> N
                 }[memory_used_mib],
             },
         )
-        value.gpus[0] = value.gpus[0].model_copy(
+        value.nodes[0].gpus[0] = value.nodes[0].gpus[0].model_copy(
             update={
                 "memory_used_mib": memory_used_mib,
                 "memory_free_mib": 100_000 - memory_used_mib,
@@ -1545,8 +1545,8 @@ def test_cpu_only_observation_is_persisted_as_endpoint_resource_kind(service, ad
     service.ingest_observation(
         observation(
             count=0,
-            observation_complete=True,
-        ).model_copy(update={"gpu_probe_status": "cpu_only"})
+            observation_complete=True, gpu_probe_status="cpu_only",
+        )
     )
 
     endpoint = service.snapshot(admin)["data"]["endpoints"][0]
@@ -1830,7 +1830,7 @@ def test_host_memory_used_pct_falls_back_to_host_when_cgroup_unlimited(service, 
     assert host["recent_average"]["memory_used_pct"] == 10.45
 
 
-def test_endpoint_cpu_utilization_stays_null_without_cgroup(service, admin) -> None:
+def test_endpoint_cpu_utilization_uses_ticks_without_cgroup(service, admin) -> None:
     start = utcnow() - timedelta(minutes=10)
     service.ingest_observation(
         observation(
@@ -1858,13 +1858,13 @@ def test_endpoint_cpu_utilization_stays_null_without_cgroup(service, admin) -> N
     )
 
     current_host = service.snapshot(admin)["data"]["endpoints"][0]["host_telemetry"]
-    assert current_host["cpu_utilization_pct"] is None
+    assert current_host["cpu_utilization_pct"] == 45.0
     assert current_host["cpu_usage_usec"] is None
-    assert current_host["recent_average"]["cpu_utilization_pct"] is None
-    assert current_host["recent_average"]["cpu_load_fraction"] is None
+    assert current_host["recent_average"]["cpu_utilization_pct"] == 45.0
+    assert current_host["recent_average"]["cpu_load_fraction"] == 0.45
     history = service.endpoint_history(admin, "endpoint-a", window_seconds=3600, max_points=120)
     assert history["data"]["point_count"] == 2
-    assert [point["cpu_utilization_pct"] for point in history["data"]["points"]] == [None, None]
+    assert [point["cpu_utilization_pct"] for point in history["data"]["points"]] == [None, 45.0]
 
 
 def test_endpoint_history_validates_window_points_and_identity(service, admin) -> None:
@@ -2157,6 +2157,7 @@ def test_human_can_reassign_a_task_to_an_exact_gpu(service, admin) -> None:
     assert moved["restart_required"] is True
     assert moved["lease"]["gpu_ids"] == ["endpoint-a:GPU-endpoint-a-1"]
     assert moved["lease"]["resources"][0]["cuda_visible_devices"] == "1"
+    assert moved["lease"]["allocations"][0]["locations"][0]["devices"][0]["device_selector"] == "1"
     assert moved["lease"]["resources"][0]["cuda_device_order"] == "PCI_BUS_ID"
     gpus = {gpu["id"]: gpu for gpu in service.list_gpus(admin)["data"]}
     assert gpus["endpoint-a:GPU-endpoint-a-0"]["state"] == "AVAILABLE"

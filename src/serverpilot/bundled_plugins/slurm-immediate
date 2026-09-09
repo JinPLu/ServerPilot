@@ -1,71 +1,322 @@
 #!/usr/bin/env python3
-"""Slurm observer and immediate GPU apply. Never authenticates.
-
-Cluster identity comes from slurm-immediate.json next to this executable.
-Observe reports only this user's running GPU jobs. Apply uses
-``srun --immediate``; if the job is not running within the immediate
-window, it fails and does not queue. Release calls ``scancel`` on that
-job id. When an SSH target is configured, a live ControlMaster is
-required; this plugin does not open a new connection, prompt, or consume
-a TOTP code.
-"""
-
+"""Slurm provider v4. Authentication is exclusive to the explicit connect verb."""
 from __future__ import annotations
 
-import json
-import re
-import subprocess
-import sys
-from pathlib import Path
-
-SCHEMA_VERSION = 2
-PLUGIN_INFO_SCHEMA_VERSION = 3
-CONFIG_NAME = "slurm-immediate.json"
-APPLY_TIME_LIMIT = "01:00:00"
-APPLY_IMMEDIATE_SECONDS = 25
-MAX_LEASE_SECONDS = 3600
-APPLY_MAX_SECONDS = APPLY_IMMEDIATE_SECONDS + 8
-SSH_APPLY_TIMEOUT_SECONDS = 50
-NO_CAPACITY_EXIT_CODE = 3
-JOB_NAME_PATTERN = re.compile(r"^[A-Za-z0-9._-]{1,40}$")
-
-
-class RemoteFailure(RuntimeError):
-    """A remote verb failed. no_capacity separates "nothing free now" from a fault."""
-
-    def __init__(self, message: str, *, no_capacity: bool = False) -> None:
-        super().__init__(message)
-        self.no_capacity = no_capacity
-ALLOCATION_REF_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-REQUIRED_STR = ("ssh_host", "partition", "gpu_name")
-REQUIRED_INT = ("vram_mib", "gpus_per_node", "cpus_per_gpu", "mem_gib_per_gpu")
-UNSCHEDULABLE_TOKENS = frozenset(
-    {
-        "drain",
-        "drng",
-        "drained",
-        "down",
-        "fail",
-        "failing",
-        "unknown",
-        "unk",
-        "maint",
-        "maintenance",
-        "n/a",
-        "not_responding",
-    }
-)
-
-REMOTE_HELPER = r"""
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
+import signal
+import socket
+import struct
 import subprocess
 import sys
-import tempfile
 import time
 from pathlib import Path
 
+SCHEMA_VERSION = 3
+PLUGIN_INFO_SCHEMA_VERSION = 5
+APPLY_IMMEDIATE_SECONDS = 25
+APPLY_MAX_SECONDS = 40
+SSH_APPLY_TIMEOUT_SECONDS = 40
+NO_CAPACITY_EXIT_CODE = 3
+# Generated from observation_probe.py; refreshed by desktop/build-macos-app.sh.
+NODE_PROBE = 'set -e; printf \'__SERVERPILOT_GPU__\\n\'; if command -v nvidia-smi >/dev/null 2>&1; then if serverpilot_gpu_output=$(nvidia-smi --query-gpu=index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,pstate,pci.bus_id --format=csv,noheader,nounits 2>/dev/null); then serverpilot_gpu_rc=0; else serverpilot_gpu_rc=$?; fi; if [ "$serverpilot_gpu_rc" = 0 ] && [ -n "$serverpilot_gpu_output" ]; then serverpilot_nvidia=1; printf \'%s\\n\' "$serverpilot_gpu_output"; elif [ "$serverpilot_gpu_rc" = 0 ]; then serverpilot_nvidia=0; printf \'__SERVERPILOT_GPU_CPU_ONLY__\\n\'; else serverpilot_nvidia=0; printf \'__SERVERPILOT_GPU_UNAVAILABLE__\\n\'; fi; else serverpilot_nvidia=0; printf \'__SERVERPILOT_GPU_CPU_ONLY__\\n\'; fi; printf \'__SERVERPILOT_PROCESSES__\\n\'; if [ "$serverpilot_nvidia" = 1 ]; then serverpilot_processes=$(nvidia-smi --query-compute-apps=gpu_uuid,pid,used_memory,process_name --format=csv,noheader,nounits); printf \'%s\\n\' "$serverpilot_processes"; else serverpilot_processes=\'\'; fi; printf \'__SERVERPILOT_PROCESS_DETAILS__\\n\'; serverpilot_pids=$(printf \'%s\\n\' "$serverpilot_processes" | awk -F\',\' \'{pid=$2; gsub(/^[ \\t]+|[ \\t]+$/, "", pid); if (pid ~ /^[0-9]+$/ && pid > 0 && !seen[pid]++) {printf "%s%s", separator, pid; separator=","}}\'); if [ -n "$serverpilot_pids" ]; then serverpilot_ps_output=$(ps -o pid=,user=,etimes=,comm= -p "$serverpilot_pids" 2>&1) && serverpilot_ps_rc=0 || serverpilot_ps_rc=$?; if [ "$serverpilot_ps_rc" = 0 ]; then printf \'%s\\n\' "$serverpilot_ps_output"; elif [ "$serverpilot_ps_rc" != 1 ] || [ -n "$serverpilot_ps_output" ]; then printf \'%s\\n\' "$serverpilot_ps_output" >&2; exit "$serverpilot_ps_rc"; fi; fi; printf \'__SERVERPILOT_IDENTITY__\\n\'; hostname; cat /proc/sys/kernel/random/boot_id; printf \'__SERVERPILOT_HOST_RESOURCES__\\n\'; getconf _NPROCESSORS_ONLN; awk \'/MemTotal:/{total=$2} /MemAvailable:/{available=$2} END {printf "%d %d\\n", total/1024, available/1024}\' /proc/meminfo; cut -d \' \' -f1 /proc/loadavg; awk \'NR == 1 && $1 == "cpu" {idle=$5+$6; total=0; for (i=2; i<=NF; i++) total+=$i; printf "%.0f %.0f\\n", total, idle}\' /proc/stat; if [ -r /sys/fs/cgroup/cpu.max ] && [ -r /sys/fs/cgroup/cpu.stat ]; then awk \'FNR==NR {quota=$1; period=$2; next} $1=="usage_usec" && quota != "" && period != "" {printf "%s %s %s\\n", quota, period, $2}\' /sys/fs/cgroup/cpu.max /sys/fs/cgroup/cpu.stat; fi; if [ -r /sys/fs/cgroup/memory.max ] && [ -r /sys/fs/cgroup/memory.current ]; then printf "mem %s %s\\n" "$(cat /sys/fs/cgroup/memory.max)" "$(cat /sys/fs/cgroup/memory.current)"; fi'
+ALLOCATION_REF_PATTERN = re.compile(r"^[0-9]+(?:_[0-9]+)?$")
+UNSCHEDULABLE_TOKENS = frozenset({"drain", "drng", "drained", "down", "fail", "failing", "unknown", "unk", "maint", "maintenance", "n/a", "not_responding"})
+
+
+class RemoteFailure(RuntimeError):
+    def __init__(self, message: str, *, no_capacity: bool = False) -> None:
+        super().__init__(message)
+        self.no_capacity = no_capacity
+
+
+def emit(payload: dict) -> int:
+    print(json.dumps(payload, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
+def fail(message: str, code: int = 1) -> int:
+    print(message, file=sys.stderr)
+    return code
+
+
+def config_path() -> Path:
+    return Path(sys.argv[0]).resolve().with_name(Path(sys.argv[0]).name + ".json")
+
+
+def load_config() -> dict:
+    path = config_path()
+    raw = json.loads(path.read_text())
+    if not isinstance(raw, dict):
+        raise ValueError("provider configuration must be an object")
+    required = {"ssh_host", "partition", "gpu_name", "vram_mib", "gpus_per_node", "cpus_per_gpu", "mem_gib_per_gpu", "max_lease_seconds"}
+    if not required.issubset(raw):
+        raise ValueError("provider is unconfigured; missing " + ", ".join(sorted(required - set(raw))))
+    for key in ("ssh_host", "partition", "gpu_name"):
+        if not isinstance(raw[key], str) or not raw[key] or any(c in raw[key] for c in "\x00\n\r"):
+            raise ValueError("invalid provider configuration: " + key)
+    for key in ("vram_mib", "gpus_per_node", "cpus_per_gpu", "mem_gib_per_gpu", "max_lease_seconds"):
+        if type(raw[key]) is not int or raw[key] <= 0:
+            raise ValueError("invalid provider configuration: " + key)
+    if raw["max_lease_seconds"] > 2592000:
+        raise ValueError("provider maximum duration exceeds the public 30-day bound")
+    for key in ("qos", "account", "workspace_path", "control_path", "credential_path"):
+        raw.setdefault(key, "")
+        if not isinstance(raw[key], str) or any(c in raw[key] for c in "\x00\n\r"):
+            raise ValueError("invalid provider configuration: " + key)
+    raw.setdefault("ssh_port", 22)
+    if type(raw["ssh_port"]) is not int or not 1 <= raw["ssh_port"] <= 65535:
+        raise ValueError("invalid SSH port")
+    raw.setdefault("entry_verified", False)
+    if type(raw["entry_verified"]) is not bool:
+        raise ValueError("entry_verified must be a boolean")
+    return raw
+
+
+def ssh_argv(config: dict, *rest: str) -> list[str]:
+    argv = ["ssh", "-p", str(config["ssh_port"])]
+    if config["control_path"]:
+        argv.extend(["-o", "ControlPath=" + config["control_path"]])
+    return [*argv, *rest]
+
+
+def master_alive(config: dict) -> tuple[bool, str]:
+    result = subprocess.run(ssh_argv(config, "-O", "check", config["ssh_host"]),
+                            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=5)
+    return result.returncode == 0, "existing SSH session" if result.returncode == 0 else "SSH session missing"
+
+
+def connection_fact(state: str, error_code: str | None, message: str) -> dict:
+    return {"state": state, "error_code": error_code, "message": message}
+
+
+def totp(secret: str) -> str:
+    remaining = 30 - time.time() % 30
+    if remaining < 12:
+        time.sleep(remaining + 0.1)
+    key = base64.b32decode(secret.upper() + "=" * (-len(secret) % 8))
+    digest = hmac.new(key, struct.pack(">Q", int(time.time()) // 30), hashlib.sha1).digest()
+    offset = digest[-1] & 15
+    return f"{(struct.unpack('>I', digest[offset:offset+4])[0] & 0x7fffffff) % 1000000:06d}"
+
+
+def network_ready(config: dict) -> bool:
+    effective = subprocess.run(ssh_argv(config, "-G", config["ssh_host"]), capture_output=True, text=True, timeout=5)
+    if effective.returncode:
+        raise RuntimeError("SSH configuration lookup failed")
+    fields = dict(line.split(" ", 1) for line in effective.stdout.splitlines() if " " in line)
+    try:
+        channel = socket.create_connection((fields["hostname"], int(fields["port"])), timeout=3)
+    except OSError:
+        return False
+    with channel:
+        channel.settimeout(3)
+        try:
+            banner = channel.recv(255)
+        except OSError as exc:
+            raise RuntimeError("SSH greeting was not confirmed; authentication stopped") from exc
+        if not banner.startswith(b"SSH-"):
+            raise RuntimeError("SSH greeting was not confirmed; authentication stopped")
+    return True
+
+
+def authenticate(config: dict) -> dict:
+    if master_alive(config)[0]:
+        return connection_fact("connected", None, "登录连接可用。")
+    if not network_ready(config):
+        return connection_fact("network_unavailable", "network_unreachable", "SSH 网络不可达，等待网络恢复；未尝试认证。")
+    argv = ssh_argv(config, "-M", "-N", "-f", "-o", "ConnectTimeout=10", "-o", "ServerAliveInterval=30",
+                    "-o", "ServerAliveCountMax=3", "-o", "ControlPersist=12h",
+                    "-o", "StrictHostKeyChecking=yes")
+    if not config["credential_path"]:
+        result = subprocess.run([*argv, "-o", "BatchMode=yes", config["ssh_host"]],
+                                capture_output=True, stdin=subprocess.DEVNULL, timeout=20)
+        if result.returncode == 0 and master_alive(config)[0]:
+            return connection_fact("connected", None, "登录连接已建立。")
+        return connection_fact("action_required", "connection_failed", "SSH 认证未完成，自动恢复已停止；请检查账号、密钥和服务器指纹。")
+    # Credentials are read only here, never by info/observe/apply/release.
+    path = Path(config["credential_path"]).expanduser()
+    if path.stat().st_mode & 0o077:
+        return connection_fact("action_required", "auth_failed", "凭据文件权限必须为 600。")
+    credentials = {key.strip(): value.strip() for line in path.read_text().splitlines() if "=" in line
+                   for key, value in [line.split("=", 1)]}
+    password, secret = credentials.get("PASSWORD"), credentials.get("SECRET")
+    if not password or not secret:
+        return connection_fact("action_required", "auth_failed", "凭据文件缺少密码或动态码种子。")
+    import pty
+    import select
+    pid, fd = pty.fork()
+    if pid == 0:
+        os.execvp("ssh", [*argv, config["ssh_host"]])
+        os._exit(127)
+    buffer = b""
+    sent_password = sent_code = False
+    rejected = False
+    deadline = time.monotonic() + 40
+    try:
+        while time.monotonic() < deadline:
+            if not select.select([fd], [], [], 0.5)[0]:
+                continue
+            try:
+                chunk = os.read(fd, 4096)
+            except OSError:
+                break
+            if not chunk:
+                break
+            buffer = (buffer + chunk)[-1024:]
+            if b"permission denied" in buffer.lower():
+                rejected = True
+                break
+            if re.search(rb"verification code:\s*$", buffer, re.I):
+                if sent_code:
+                    rejected = True
+                    break
+                os.write(fd, totp(secret).encode() + b"\r")
+                sent_code = True
+                buffer = b""
+            elif re.search(rb"password:\s*$", buffer, re.I):
+                if sent_password:
+                    rejected = True
+                    break
+                os.write(fd, password.encode() + b"\r")
+                sent_password = True
+                buffer = b""
+    finally:
+        os.close(fd)
+        done, _ = os.waitpid(pid, os.WNOHANG)
+        if done == 0:
+            os.kill(pid, signal.SIGTERM)
+            os.waitpid(pid, 0)
+    if master_alive(config)[0]:
+        return connection_fact("connected", None, "登录连接已建立。")
+    stage = "动态码" if sent_code else "密码" if sent_password else "连接"
+    return connection_fact("action_required", "auth_failed" if rejected else "connection_failed",
+                           stage + "阶段未完成；自动恢复已停止。")
+
+
+def remote_script(config: dict) -> str:
+    public = {key: config[key] for key in ("ssh_host", "ssh_port", "partition", "qos", "account", "gpu_name", "vram_mib",
+              "gpus_per_node", "cpus_per_gpu", "mem_gib_per_gpu", "workspace_path", "entry_verified")}
+    return "CONFIG = " + repr(public) + "\nNODE_PROBE = " + repr(NODE_PROBE) + "\n" + REMOTE_HELPER
+
+
+def ssh_python(config: dict, verb: str, *args: str, timeout: int = 40) -> str:
+    # Only sealed verbs and bounded identifiers/numbers reach OpenSSH's remote command.
+    result = subprocess.run(ssh_argv(config, "-o", "ControlMaster=no", "-o", "BatchMode=yes", config["ssh_host"],
+                                    "python3", "-", verb, *args),
+                            input=remote_script(config), capture_output=True, text=True, timeout=timeout)
+    if result.returncode:
+        raise RemoteFailure("provider " + verb + " failed; original allocation remains traceable",
+                            no_capacity=result.returncode == NO_CAPACITY_EXIT_CODE)
+    return result.stdout
+
+
+def cmd_info() -> int:
+    # Unconfigured reference plugins remain discoverable; they cannot allocate.
+    try:
+        maximum = load_config()["max_lease_seconds"]
+        description = "Slurm 立即申请；连接管理与只读采集分离。"
+    except (OSError, ValueError):
+        maximum = 2592000
+        description = "尚未配置；请在插件旁创建同名 JSON 配置，配置完成前不能连接或申请。"
+    return emit({"plugin_id": Path(sys.argv[0]).name, "display_name": "Slurm 资源提供方",
+                 "schema_version": PLUGIN_INFO_SCHEMA_VERSION,
+                 "capabilities": ["observe", "apply", "release", "connect", "disconnect"],
+                 "release_granularity": "allocation", "entry_kind": "allocation", "description": description,
+                 "limits": {"lease_ends": "hard_kill_at_time_limit", "max_lease_seconds": maximum,
+                            "apply_max_seconds": APPLY_MAX_SECONDS, "queues": False}})
+
+
+def cmd_observe(config: dict) -> int:
+    if not master_alive(config)[0]:
+        return emit({"connection": connection_fact("disconnected", "session_missing", "登录连接已失效；需要恢复连接。")})
+    payload = json.loads(ssh_python(config, "observe"))
+    return emit({"schema_version": SCHEMA_VERSION, "nodes": payload["nodes"],
+                 "scheduler": payload["scheduler"], "allocations": payload["allocations"]})
+
+
+def cmd_apply(config: dict, argv: list[str]) -> int:
+    if len(argv) != 11 or argv[1::2] != ["--gpu-count", "--task-ref", "--duration-seconds", "--request-id", "--requirements-json"]:
+        return fail("apply requires count, task, duration, request identity and requirements", 2)
+    count, task, duration, request_id, requirements_json = argv[2::2]
+    requirements = json.loads(requirements_json)
+    if not isinstance(requirements, dict):
+        return fail("requirements must be an object", 2)
+    if requirements.get("nodes", 1) != 1 or any(requirements.get(key) for key in ("gpu_ids", "deny_gpu_ids", "gpu_labels")):
+        return fail("this provider supports single-node allocations without device pinning", 2)
+    if not count.isdigit() or not 1 <= int(count) <= config["gpus_per_node"]:
+        return fail("unsupported GPU count", 2)
+    if not duration.isdigit() or not 60 <= int(duration) <= config["max_lease_seconds"]:
+        return fail("unsupported task duration", 2)
+    if not task.strip() or len(task) > 255 or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id):
+        return fail("invalid task or request identity", 2)
+    if requirements.get("gpus_per_node") not in {None, int(count)}:
+        return fail("inconsistent GPUs per node", 2)
+    supplies = {
+        "cpu_cores": config["cpus_per_gpu"] * int(count),
+        "min_available_cpu_cores": config["cpus_per_gpu"] * int(count),
+        "memory_mib": config["mem_gib_per_gpu"] * int(count) * 1024,
+        "min_available_memory_mib": config["mem_gib_per_gpu"] * int(count) * 1024,
+        "min_total_vram_mib": config["vram_mib"],
+    }
+    if any((requirements.get(key) or 0) > available for key, available in supplies.items()):
+        return fail("requirements exceed this provider's configured per-GPU resources", 2)
+    if requirements.get("min_free_vram_mib"):
+        return fail("free VRAM cannot be guaranteed before allocation; request total VRAM instead", 2)
+    if not master_alive(config)[0]:
+        return fail("login session missing; allocation was not submitted")
+    try:
+        payload = json.loads(ssh_python(config, "apply", count, duration, request_id, timeout=SSH_APPLY_TIMEOUT_SECONDS))
+    except RemoteFailure as exc:
+        return fail(str(exc), NO_CAPACITY_EXIT_CODE if exc.no_capacity else 1)
+    return emit(payload)
+
+
+def cmd_release(config: dict, argv: list[str]) -> int:
+    if len(argv) != 3 or argv[1] != "--allocation-ref" or not ALLOCATION_REF_PATTERN.fullmatch(argv[2]):
+        return fail("release requires a numeric allocation-ref")
+    if not master_alive(config)[0]:
+        return fail("login session missing; release remains unconfirmed")
+    return emit(json.loads(ssh_python(config, "release", argv[2])))
+
+
+def main(argv=None) -> int:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    if argv == ["info"]:
+        return cmd_info()
+    if not argv or argv[0] not in {"observe", "apply", "release", "connect", "disconnect"}:
+        return fail("unsupported provider verb")
+    try:
+        config = load_config()
+        if argv == ["connect"]:
+            return emit(authenticate(config))
+        if argv == ["disconnect"]:
+            if master_alive(config)[0]:
+                subprocess.run(ssh_argv(config, "-O", "exit", config["ssh_host"]), capture_output=True, timeout=5)
+            if master_alive(config)[0]:
+                return emit(connection_fact("action_required", "connection_failed", "断开连接尚未确认。"))
+            return emit(connection_fact("disconnected", None, "连接维持已关闭；已有资源分配不受此操作管理。"))
+        if argv == ["observe"]:
+            return cmd_observe(config)
+        if argv[0] == "apply":
+            return cmd_apply(config, argv)
+        if argv[0] == "release":
+            return cmd_release(config, argv)
+        return fail("invalid provider arguments")
+    except (OSError, ValueError, RuntimeError, subprocess.SubprocessError):
+        if argv[0] in {"connect", "disconnect"}:
+            return emit(connection_fact("action_required", "connection_failed", "连接配置或操作失败；自动恢复已停止。"))
+        return fail("provider operation failed; check configuration and connection status")
+
+
+REMOTE_HELPER = r"""
+import json, os, re, subprocess, sys, time
+from datetime import datetime, timezone
+from pathlib import Path
 PARTITION = CONFIG["partition"]
 QOS = CONFIG["qos"]
 ACCOUNT = CONFIG["account"]
@@ -74,144 +325,29 @@ VRAM_MIB = CONFIG["vram_mib"]
 GPUS_PER_NODE = CONFIG["gpus_per_node"]
 CPUS_PER_GPU = CONFIG["cpus_per_gpu"]
 MEM_GIB_PER_GPU = CONFIG["mem_gib_per_gpu"]
-APPLY_TIME_LIMIT = "01:00:00"
 APPLY_IMMEDIATE_SECONDS = 25
 NO_CAPACITY_EXIT_CODE = 3
-UNSCHEDULABLE_TOKENS = frozenset({
-    "drain", "drng", "drained", "down", "fail", "failing",
-    "unknown", "unk", "maint", "maintenance", "n/a", "not_responding",
-})
+ROOT = Path.home() / ".serverpilot" / "allocations"
+UNSCHEDULABLE_TOKENS = frozenset({"drain", "drng", "drained", "down", "fail", "failing", "unknown", "unk", "maint", "maintenance", "n/a", "not_responding"})
 HOLD_SCRIPT = r'''
-import json, os, subprocess, sys, time
+import json
+import os
+import sys
+import time
 from pathlib import Path
-
-job = os.environ.get("SLURM_JOB_ID", "")
-node = os.uname().nodename
-cuda = os.environ.get("CUDA_VISIBLE_DEVICES", "")
-print("ALLOC\t%s\t%s\t%s" % (job, node, cuda), flush=True)
-
-def query(args):
-    result = subprocess.run(args, capture_output=True, text=True, check=False)
-    return result.stdout
-
-first = query([
-    "nvidia-smi",
-    "--query-gpu=index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,pstate",
-    "--format=csv,noheader,nounits",
-])
-sys.stdout.write(first)
-sys.stdout.flush()
-
-cache = Path.home() / ".serverpilot"
-cache.mkdir(mode=0o700, exist_ok=True)
-path = cache / ("alloc-%s.json" % job)
-
-def parse_gpus(raw):
-    gpus = []
-    for line in raw.splitlines():
-        parts = [item.strip() for item in line.split(",")]
-        if len(parts) < 6:
-            continue
-        try:
-            total = max(1, int(float(parts[3])))
-            used = max(0, int(float(parts[4])))
-            free = max(0, int(float(parts[5])))
-        except ValueError:
-            continue
-        gpu = {
-            "gpu_index": int(float(parts[0])),
-            "gpu_uuid": parts[1],
-            "name": parts[2],
-            "total_vram_mib": total,
-            "memory_used_mib": min(used, total),
-            "memory_free_mib": min(free, total),
-            "gpu_utilization_pct": None,
-            "memory_utilization_pct": None,
-            "temperature_c": None,
-            "power_watts": None,
-            "pstate": None,
-            "health": "OK",
-        }
-        if len(parts) > 6:
-            try:
-                gpu["gpu_utilization_pct"] = int(float(parts[6]))
-            except ValueError:
-                pass
-        if len(parts) > 7:
-            try:
-                gpu["memory_utilization_pct"] = int(float(parts[7]))
-            except ValueError:
-                pass
-        if len(parts) > 8:
-            try:
-                gpu["temperature_c"] = int(float(parts[8]))
-            except ValueError:
-                pass
-        if len(parts) > 9:
-            try:
-                gpu["power_watts"] = float(parts[9])
-            except ValueError:
-                pass
-        if len(parts) > 10 and parts[10]:
-            gpu["pstate"] = parts[10]
-        gpus.append(gpu)
-    return gpus
-
-def parse_apps(raw):
-    processes = []
-    for line in raw.splitlines():
-        parts = [item.strip() for item in line.split(",")]
-        if len(parts) < 4:
-            continue
-        try:
-            pid = int(float(parts[1]))
-            used_memory = int(float(parts[2]))
-        except ValueError:
-            continue
-        processes.append({
-            "gpu_uuid": parts[0],
-            "pid": pid,
-            "used_memory_mib": used_memory,
-            "executable": parts[3][:255] or "python",
-            "username": os.environ.get("USER") or os.environ.get("LOGNAME"),
-            "process_started_at": None,
-        })
-    return processes
-
-def write_sidecar(gpu_raw, app_raw):
-    payload = {
-        "job_id": job,
-        "node": node,
-        "cuda_visible_devices": cuda,
-        "gpus": parse_gpus(gpu_raw),
-        "processes": parse_apps(app_raw),
-    }
-    tmp = path.with_suffix(".tmp")
-    tmp.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(path)
-
-write_sidecar(first, query([
-    "nvidia-smi",
-    "--query-compute-apps=gpu_uuid,pid,used_memory,process_name",
-    "--format=csv,noheader,nounits",
-]))
-deadline = time.time() + 3600
-while time.time() < deadline:
-    time.sleep(5)
-    write_sidecar(
-        query([
-            "nvidia-smi",
-            "--query-gpu=index,uuid,name,memory.total,memory.used,memory.free,utilization.gpu,utilization.memory,temperature.gpu,power.draw,pstate",
-            "--format=csv,noheader,nounits",
-        ]),
-        query([
-            "nvidia-smi",
-            "--query-compute-apps=gpu_uuid,pid,used_memory,process_name",
-            "--format=csv,noheader,nounits",
-        ]),
-    )
+request_id, count = sys.argv[1], int(sys.argv[2])
+root = Path.home() / ".serverpilot" / "allocations"
+root.mkdir(mode=0o700, parents=True, exist_ok=True)
+path = root / (request_id + ".json")
+payload = {"request_id": request_id, "allocation_ref": os.environ["SLURM_JOB_ID"],
+           "node": os.uname().nodename, "gpu_count": count, "devices": [],
+           "running_process_count": None, "workload_observed_at": None}
+temporary = path.with_suffix(".tmp")
+temporary.write_text(json.dumps(payload, separators=(",", ":")))
+temporary.replace(path)
+while True:
+    time.sleep(60)
 '''
-
 
 def parse_idx(spec):
     used = set()
@@ -256,9 +392,14 @@ def parse_gres_used_indexes(text, total):
         inner = text[idx_at + 4:]
         if inner.endswith(")"):
             inner = inner[:-1]
-        return {index for index in parse_idx(inner) if 0 <= index < total}
-    match = re.search(r"gpu:[^:\s]+:(\d+)", text)
-    count = int(match.group(1)) if match is not None else 0
+        if inner.upper() != "N/A":
+            return {index for index in parse_idx(inner) if 0 <= index < total}
+    # Slurm may withhold indexes as IDX:N/A while still reporting the count.
+    # Only cardinality is used by the capacity calculation.
+    match = re.search(r"gpu:(?:[^:\s]+:)?(\d+)(?:\(|$)", text)
+    if match is None:
+        raise ValueError(f"unrecognized GPU allocation count: {text}")
+    count = int(match.group(1))
     if count <= 0:
         return set()
     if count >= total:
@@ -315,321 +456,288 @@ def host_telemetry():
     }
 
 
-def cluster_free_gpu_count():
-    try:
-        raw = subprocess.check_output(
-            [
-                "sinfo",
-                "-N",
-                "-h",
-                "-p",
-                PARTITION,
-                "-O",
-                "NodeList:32,StateCompact:20,Gres:40,GresUsed:80",
-            ],
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return 0, 0
-    free = 0
-    largest = 0
+def cluster_gpu_capacity():
+    raw = subprocess.check_output(
+        [
+            "sinfo", "-N", "-h", "-p", PARTITION, "-O",
+            "NodeList:32,StateCompact:20,Gres:40,GresUsed:80",
+        ],
+        text=True,
+    )
+    nodes = []
     for line in raw.splitlines():
-        if len(line) < 52:
+        if not line.strip():
             continue
-        node = line[0:32].strip()
+        if len(line) < 92:
+            raise ValueError("incomplete Slurm node row")
+        name = line[0:32].strip()
         state = line[32:52].strip()
-        gres = line[52:92].strip()
-        gres_used = line[92:].strip()
-        if not node or is_unschedulable(state):
-            continue
-        total = parse_gres_total(gres)
-        used = parse_gres_used_indexes(gres_used, total)
-        node_free = max(0, total - len(used))
-        free += node_free
-        if node_free > largest:
-            largest = node_free
-    return free, largest
+        total = parse_gres_total(line[52:92].strip())
+        allocated = len(parse_gres_used_indexes(line[92:].strip(), total))
+        nodes.append({
+            "name": name,
+            "state": state,
+            "total_gpus": total,
+            "allocated_gpus": allocated,
+            "schedulable": not is_unschedulable(state),
+        })
+    free = [node["total_gpus"] - node["allocated_gpus"]
+            for node in nodes if node["schedulable"]]
+    return {
+        "free_gpu_count": sum(free),
+        "largest_free_block": max(free, default=0),
+        "nodes": nodes,
+    }
+
+def timestamp():
+    return datetime.now(timezone.utc).isoformat()
 
 
-def running_jobs():
+def atomic_json(path, payload):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(payload, separators=(",", ":")))
+    temporary.replace(path)
+
+
+def read_json(path):
     try:
-        raw = subprocess.check_output(
-            ["squeue", "-u", os.environ.get("USER") or os.environ.get("LOGNAME") or "", "-h", "-t", "R", "-o", "%i|%T|%N"],
-            text=True,
-        )
-    except (OSError, subprocess.CalledProcessError):
-        return []
-    jobs = []
-    for line in raw.splitlines():
-        parts = line.strip().split("|")
-        if len(parts) < 3:
-            continue
-        job_id, state, node = parts[0], parts[1], parts[2]
-        if state != "RUNNING" or not job_id.isdigit():
-            continue
-        jobs.append({"job_id": job_id, "node": node})
-    return jobs
-
-
-def job_gpu_slots(job_id):
-    try:
-        raw = subprocess.check_output(["scontrol", "show", "job", job_id, "-d"], text=True)
-    except (OSError, subprocess.CalledProcessError):
-        return [], None
-    node = None
-    slots = []
-    for line in raw.splitlines():
-        text = line.strip()
-        if text.startswith("Nodes=") or " Nodes=" in (" " + text):
-            match = re.search(r"Nodes=(\S+)", text)
-            if match:
-                node = match.group(1).split(",")[0]
-        match = re.search(r"GRES_IDX=gpu(?::[^\s(]+)?\(IDX:([^)]+)\)", text)
-        if match:
-            slots = sorted(parse_idx(match.group(1)))
-    return slots, node
-
-
-def read_sidecar(job_id):
-    path = Path.home() / ".serverpilot" / ("alloc-%s.json" % job_id)
-    try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+        return json.loads(path.read_text())
+    except (OSError, ValueError):
         return None
-    if not isinstance(payload, dict):
+
+
+def entry(job_id):
+    return {"kind": "allocation", "host": CONFIG["ssh_host"], "port": CONFIG["ssh_port"],
+            "user": os.environ.get("USER") or Path.home().name,
+            "workspace_path": CONFIG["workspace_path"] or str(Path.home()),
+            "argv": ["srun", "--jobid=" + job_id, "--overlap", "--pty", "bash"],
+            "instructions": "先连接登录入口，再用上述命令进入已有分配；在该环境中使用 CUDA 设备编号。",
+            "verified": CONFIG["entry_verified"]}
+
+
+def job_details(job_id):
+    result = subprocess.run(["scontrol", "show", "job", job_id, "-dd", "-o"], capture_output=True, text=True, timeout=10)
+    if result.returncode == 0:
+        values = dict(re.findall(r"(?:^|\s)([A-Za-z][A-Za-z0-9_]*)=(\S+)", result.stdout))
+        values["NodePlacements"] = re.findall(r"(?:^|\s)Nodes=(\S+)\s+CPU_IDs=\S+\s+Mem=\S+\s+GRES=(\S+)", result.stdout)
+        return values
+    history = subprocess.run(["sacct", "-n", "-P", "-j", job_id, "--format=JobIDRaw,State,NodeList,End"],
+                             capture_output=True, text=True, timeout=10)
+    if history.returncode == 0:
+        for line in history.stdout.splitlines():
+            parts = line.split("|")
+            if len(parts) >= 4 and parts[0] == job_id:
+                return {"JobState": parts[1].split()[0], "NodeList": parts[2], "EndTime": parts[3]}
+    return {}
+
+
+def utc_time(value):
+    if not value or value in {"Unknown", "N/A", "None", "UNLIMITED"}:
         return None
-    return payload
+    try:
+        return datetime.fromisoformat(value).astimezone(timezone.utc).isoformat()
+    except ValueError:
+        return None
+
+
+def allocation_fact(job_id, request=None, sample=None):
+    details = job_details(job_id)
+    state = details.get("JobState", "UNKNOWN").split("+")[0]
+    mapped = {"RUNNING": "active", "COMPLETING": "active", "SUSPENDED": "active",
+              "COMPLETED": "released", "CANCELLED": "released", "TIMEOUT": "expired",
+              "FAILED": "failed", "NODE_FAIL": "failed", "OUT_OF_MEMORY": "failed", "PREEMPTED": "failed"}
+    locations = []
+    placements = details.get("NodePlacements", [])
+    for node_list, gres in placements:
+        count = sum(int(item) for item in re.findall(r"(?:^|,)gpu(?::[A-Za-z0-9_.-]+)?:(\d+)(?:\(|,|$)", gres))
+        names = subprocess.run(["scontrol", "show", "hostnames", node_list], capture_output=True, text=True, timeout=5)
+        if names.returncode:
+            raise RuntimeError("Slurm job node expansion failed")
+        locations.extend({"node": name, "gpu_count": count, "devices": [], "running_process_count": None}
+                         for name in names.stdout.split())
+    if locations:
+        pass
+    elif sample:
+        locations = [{"node": sample["node"], "gpu_count": sample["gpu_count"],
+                      "devices": sample["devices"], "running_process_count": sample["running_process_count"]}]
+    elif request and request.get("last_locations"):
+        locations = [{**item, "running_process_count": None,
+                      "devices": [{**device, "running_process_count": None} for device in item["devices"]]}
+                     for item in request["last_locations"]]
+    else:
+        nodes = details.get("NodeList", "")
+        # Unknown card placement stays unknown; aggregate external requests have no fake UUIDs.
+        if nodes and nodes not in {"(null)", "None", "N/A"}:
+            raw = subprocess.run(["scontrol", "show", "hostnames", nodes], capture_output=True, text=True, timeout=10)
+            names = raw.stdout.split() if raw.returncode == 0 else []
+            tres = next((details[key] for key in ("AllocTRES", "TRES") if key in details), "")
+            gpu = re.search(r"(?:^|,)gres/gpu=(\d+)(?:,|$)", tres)
+            if len(names) == 1 and gpu:
+                locations = [{"node": names[0], "gpu_count": int(gpu.group(1)), "devices": [], "running_process_count": None}]
+    fact = {"name": details.get("JobName"), "owner": details.get("UserId", "").split("(")[0] or None,
+            "accounting": None, "allocation_ref": job_id, "request_id": request.get("request_id") if request else None,
+            "state": mapped.get(state, "unknown"), "locations": locations,
+            "entry": entry(job_id) if request else None,
+            "expires_at": utc_time(details.get("EndTime")), "observed_at": timestamp(),
+            "workload_observed_at": sample.get("workload_observed_at") if sample else None}
+    return fact
+
+
+def read_accounting(job_ids):
+    result = subprocess.run(["sstat", "-a", "-j", ",".join(job_ids), "-P", "-n", "--format=JobID,TRESUsageInTot"],
+                            capture_output=True, text=True, timeout=5)
+    if result.returncode:
+        return {}
+    values = {}
+    seen = set()
+    for line in result.stdout.splitlines():
+        parts = line.split("|")
+        if len(parts) < 2 or parts[0] in seen:
+            continue
+        seen.add(parts[0])
+        job_id = parts[0].split(".")[0]
+        if job_id not in job_ids:
+            continue
+        fields = dict(item.split("=", 1) for item in parts[1].split(",") if "=" in item)
+        row = values.setdefault(job_id, {"cpu_time_seconds": None, "rss_mib": None, "observed_at": timestamp()})
+        cpu = re.fullmatch(r"(?:(\d+)-)?(\d+):(\d+):(\d+(?:\.\d+)?)", fields.get("cpu", ""))
+        if cpu:
+            day, hour, minute, second = cpu.groups()
+            row["cpu_time_seconds"] = (row["cpu_time_seconds"] or 0) + int(day or 0) * 86400 + int(hour) * 3600 + int(minute) * 60 + float(second)
+        mem = re.fullmatch(r"(\d+(?:\.\d+)?)([KMGT]?)", fields.get("mem", ""))
+        if mem:
+            row["rss_mib"] = (row["rss_mib"] or 0) + float(mem.group(1)) * {"": 1/1048576, "K": 1/1024, "M": 1, "G": 1024, "T": 1048576}[mem.group(2)]
+    return values
+
+
+def all_allocations():
+    requests = {}
+    samples = {}
+    if ROOT.is_dir():
+        for path in ROOT.glob("request-*.json"):
+            request = read_json(path)
+            if not request:
+                continue
+            sample = read_json(ROOT / (request["request_id"] + ".json"))
+            job_id = sample.get("allocation_ref") if sample else request.get("allocation_ref")
+            if job_id:
+                requests[job_id] = request
+                if sample:
+                    samples[job_id] = sample
+    result = subprocess.run(["squeue", "-r", "-u", os.environ.get("USER") or Path.home().name,
+                             "-h", "-o", "%i"], capture_output=True, text=True, timeout=10)
+    if result.returncode:
+        raise RuntimeError("Slurm allocation query failed")
+    ids = set(requests) | {line.strip() for line in result.stdout.splitlines() if re.fullmatch(r"[0-9]+(?:_[0-9]+)?", line.strip())}
+    facts = [allocation_fact(job_id, requests.get(job_id), samples.get(job_id)) for job_id in sorted(ids)]
+    running = [fact["allocation_ref"] for fact in facts if fact["state"] == "active"]
+    accounting = read_accounting(running) if running else {}
+    for fact in facts:
+        fact["accounting"] = accounting.get(fact["allocation_ref"])
+    return facts
+
+
+def observe_node(node, timeout_seconds):
+    record = {"node_id": node, "observed_at": timestamp(), "output": None, "error_code": None, "message": None}
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]*", node):
+        raise RuntimeError("invalid Slurm node identity")
+    try:
+        result = subprocess.run(["ssh", "-o", "BatchMode=yes", "-o", "StrictHostKeyChecking=yes",
+            "-o", "ConnectTimeout=5", node, "sh"], input=NODE_PROBE,
+            capture_output=True, text=True, timeout=timeout_seconds)
+        if result.returncode:
+            message = result.stderr.lower()
+            code = "host_key_rejected" if "host key" in message or "host identification" in message else "auth_failed" if "permission denied" in message else "connection_failed"
+            record.update(error_code=code, message="Compute node SSH probe failed: " + code)
+        else:
+            record["output"] = result.stdout
+    except subprocess.TimeoutExpired:
+        record.update(error_code="command_timeout", message="Compute node probe timed out")
+    return record
 
 
 def cmd_observe():
-    host = host_telemetry()
-    gpus = []
-    processes = []
-    ordinal = 0
-    username = os.environ.get("USER") or os.environ.get("LOGNAME") or "user"
-    for job in running_jobs():
-        sidecar = read_sidecar(job["job_id"])
-        if sidecar and isinstance(sidecar.get("gpus"), list) and sidecar["gpus"]:
-            for position, sample in enumerate(sidecar["gpus"]):
-                if not isinstance(sample, dict):
-                    continue
-                uuid = sample.get("gpu_uuid")
-                if not isinstance(uuid, str) or not uuid:
-                    continue
-                total = sample.get("total_vram_mib") or VRAM_MIB
-                used = sample.get("memory_used_mib") or 0
-                free = sample.get("memory_free_mib")
-                if not isinstance(total, int) or total < 1:
-                    total = VRAM_MIB
-                if not isinstance(used, int) or used < 0:
-                    used = 0
-                if not isinstance(free, int) or free < 0:
-                    free = max(0, total - used)
-                gpu = {
-                    "gpu_index": ordinal,
-                    "cuda_ordinal": ordinal,
-                    "gpu_uuid": uuid,
-                    "name": sample.get("name") or GPU_NAME,
-                    "total_vram_mib": total,
-                    "memory_used_mib": min(used, total),
-                    "memory_free_mib": min(free, total),
-                    "gpu_utilization_pct": sample.get("gpu_utilization_pct"),
-                    "memory_utilization_pct": sample.get("memory_utilization_pct"),
-                    "temperature_c": sample.get("temperature_c"),
-                    "power_watts": sample.get("power_watts"),
-                    "pstate": sample.get("pstate"),
-                    "health": "OK",
-                }
-                gpus.append(gpu)
-                for process in sidecar.get("processes") or []:
-                    if not isinstance(process, dict) or process.get("gpu_uuid") != uuid:
-                        continue
-                    pid = process.get("pid")
-                    used_memory = process.get("used_memory_mib")
-                    executable = process.get("executable") or "python"
-                    if type(pid) is not int or pid < 1 or type(used_memory) is not int:
-                        continue
-                    processes.append({
-                        "gpu_uuid": uuid,
-                        "pid": pid,
-                        "used_memory_mib": min(used_memory, total),
-                        "executable": str(executable)[:255],
-                        "username": process.get("username") or username,
-                        "process_started_at": process.get("process_started_at") or "2020-01-01T00:00:00+00:00",
-                    })
-                ordinal += 1
-            continue
-        slots, node = job_gpu_slots(job["job_id"])
-        node = node or job["node"]
-        if not slots:
-            slots = [0]
-        for slot in slots:
-            uuid = "gpu-%s-%s" % (node, slot)
-            gpus.append({
-                "gpu_index": ordinal,
-                "cuda_ordinal": ordinal,
-                "gpu_uuid": uuid,
-                "name": GPU_NAME,
-                "total_vram_mib": VRAM_MIB,
-                "memory_used_mib": 0,
-                "memory_free_mib": VRAM_MIB,
-                "gpu_utilization_pct": 0,
-                "memory_utilization_pct": 0,
-                "temperature_c": None,
-                "power_watts": None,
-                "pstate": None,
-                "health": "OK",
-            })
-            processes.append({
-                "gpu_uuid": uuid,
-                "pid": max(1, int(job["job_id"]) % 2_000_000_000),
-                "used_memory_mib": 1,
-                "executable": "slurm-job",
-                "username": username,
-                "process_started_at": "2020-01-01T00:00:00+00:00",
-            })
-            ordinal += 1
-    free_gpu_count, largest_free_block = cluster_free_gpu_count()
-    print(json.dumps({
-        "hostname": host["hostname"],
-        "boot_id": host["boot_id"],
-        "cpu_count": host["cpu_count"],
-        "load_1m": host["load_1m"],
-        "cpu_total_ticks": host["cpu_total_ticks"],
-        "cpu_idle_ticks": host["cpu_idle_ticks"],
-        "memory_total_mib": host["memory_total_mib"],
-        "memory_available_mib": host["memory_available_mib"],
-        "gpus": gpus,
-        "processes": processes,
-        "scheduler": {
-            "free_gpu_count": free_gpu_count,
-            "gpu_name": GPU_NAME,
-            "largest_free_block": largest_free_block,
-            "vram_mib": VRAM_MIB,
-            "max_gpus_per_lease": GPUS_PER_NODE,
-            "cpu_cores_per_gpu": CPUS_PER_GPU,
-            "memory_mib_per_gpu": MEM_GIB_PER_GPU * 1024,
-            "note": "按需申请，不排队",
-        },
-    }, separators=(",", ":")))
-
-
-def workspace_path():
-    configured = CONFIG.get("workspace_path") or ""
-    if configured.startswith("/"):
-        return configured
-    return str(Path.home())
-
-
-def parse_smi_gpus(lines):
-    gpus = []
-    for line in lines:
-        parts = [item.strip() for item in line.split(",")]
-        if len(parts) < 4:
-            continue
-        uuid = parts[1]
-        if not uuid.startswith("GPU-"):
-            continue
-        try:
-            total = max(1, int(float(parts[3])))
-        except ValueError:
-            total = VRAM_MIB
-        gpus.append({
-            "gpu_uuid": uuid,
-            "name": parts[2] if len(parts) > 2 else GPU_NAME,
-            "total_vram_mib": total,
-        })
-    return gpus
+    from concurrent.futures import ThreadPoolExecutor
+    capacity = cluster_gpu_capacity()
+    allocations = all_allocations()
+    nodes = sorted({location["node"] for allocation in allocations if allocation["state"] == "active"
+                    for location in allocation["locations"]})
+    # One endpoint deadline; queued nodes report an explicit unknown instead of
+    # making one slow node discard every healthy observation.
+    deadline = time.monotonic() + 20
+    def bounded_probe(node):
+        if time.monotonic() >= deadline:
+            return {"node_id": node, "observed_at": timestamp(), "output": None, "error_code": "command_timeout", "message": "Node probe budget exhausted"}
+        return observe_node(node, min(15, max(1, deadline - time.monotonic())))
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        samples = list(pool.map(bounded_probe, nodes))
+    print(json.dumps({"nodes": samples, "allocations": allocations,
+                      "scheduler": {**capacity, "observed_at": timestamp(), "gpu_name": GPU_NAME, "vram_mib": VRAM_MIB,
+                                    "max_gpus_per_lease": GPUS_PER_NODE, "cpu_cores_per_gpu": CPUS_PER_GPU,
+                                    "memory_mib_per_gpu": MEM_GIB_PER_GPU * 1024, "note": "按需申请，不排队"}},
+                     separators=(",", ":")))
 
 
 def cmd_apply():
-    gpu_count = int(sys.argv[2])
-    job_name = sys.argv[3]
-    cache = Path.home() / ".serverpilot"
-    cache.mkdir(mode=0o700, exist_ok=True)
-    hold = cache / "slurm-immediate-hold.py"
-    hold.write_text(HOLD_SCRIPT, encoding="utf-8")
-    log = Path(tempfile.mkstemp(prefix="splog", suffix=".txt")[1])
-    log_handle = open(log, "w", encoding="utf-8")
-    argv = [
-        "srun",
-        f"-I{APPLY_IMMEDIATE_SECONDS}",
-        f"--time={APPLY_TIME_LIMIT}",
-        "-p", PARTITION,
-    ]
+    count = int(sys.argv[2])
+    duration = int(sys.argv[3])
+    request_id = sys.argv[4]
+    if cluster_gpu_capacity()["largest_free_block"] < count:
+        raise SystemExit(NO_CAPACITY_EXIT_CODE)
+    ROOT.mkdir(mode=0o700, parents=True, exist_ok=True)
+    request_path = ROOT / ("request-" + request_id + ".json")
+    # The exclusive file is a durable reservation of this application identity.
+    # An uncertain attempt is queried, never submitted a second time.
+    try:
+        with request_path.open("x") as handle:
+            json.dump({"request_id": request_id, "allocation_ref": None}, handle)
+    except FileExistsError:
+        fact = next((item for item in all_allocations() if item["request_id"] == request_id), None)
+        if fact and fact["state"] == "active":
+            print(json.dumps(fact, separators=(",", ":")))
+            return
+        raise RuntimeError("original allocation outcome is unconfirmed; no resubmission")
+    hold = ROOT / ("hold-" + request_id + ".py")
+    hold.write_text(HOLD_SCRIPT)
+    log = ROOT / ("request-" + request_id + ".log")
+    argv = ["srun", "-I" + str(APPLY_IMMEDIATE_SECONDS), "--time=" + str((duration + 59) // 60),
+            "-p", PARTITION, "-N1", "--ntasks=1", "--gres=gpu:" + str(count),
+            "-c", str(CPUS_PER_GPU * count), "--mem=" + str(MEM_GIB_PER_GPU * count) + "G",
+            "--job-name=sp-" + request_id, "--export=ALL,CUDA_DEVICE_ORDER=PCI_BUS_ID"]
     if QOS:
-        argv.append(f"--qos={QOS}")
+        argv.extend(["--qos", QOS])
     if ACCOUNT:
         argv.extend(["-A", ACCOUNT])
-    argv.extend([
-        "-N1",
-        f"--gres=gpu:{gpu_count}",
-        "-c", str(CPUS_PER_GPU * gpu_count),
-        f"--mem={MEM_GIB_PER_GPU * gpu_count}G",
-        "--job-name", job_name,
-        "python3", str(hold),
-    ])
-    try:
-        proc = subprocess.Popen(
-            argv,
-            stdout=log_handle,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-    except OSError as exc:
-        log_handle.close()
-        raise SystemExit(f"srun could not start: {exc}") from exc
-    deadline = time.time() + APPLY_IMMEDIATE_SECONDS + 8
-    allocated = None
-    smi_lines = []
-    while time.time() < deadline:
-        text = log.read_text(encoding="utf-8", errors="replace")
-        if "Unable to allocate resources" in text or "Immediate termination" in text:
-            proc.poll()
-            sys.stderr.write((text.strip().splitlines()[-1][:500] if text.strip() else "srun found nothing free") + "\n")
-            raise SystemExit(NO_CAPACITY_EXIT_CODE)
-        for line in text.splitlines():
-            if line.startswith("ALLOC\t"):
-                parts = line.split("\t")
-                if len(parts) >= 4:
-                    allocated = {"job_id": parts[1], "node": parts[2], "cuda": parts[3]}
-            elif allocated is not None and "," in line:
-                smi_lines.append(line.strip())
-        if allocated is not None and (smi_lines or proc.poll() is not None):
-            break
-        if proc.poll() is not None and allocated is None:
-            raise SystemExit(text.strip().splitlines()[-1][:500] if text.strip() else "srun exited before allocation")
-        time.sleep(0.4)
-    if allocated is None:
-        proc.terminate()
-        subprocess.run(["scancel", "--jobname", job_name], capture_output=True, check=False)
-        sys.stderr.write("no immediate GPU capacity on partition %s\n" % PARTITION)
-        raise SystemExit(NO_CAPACITY_EXIT_CODE)
-    cuda = allocated["cuda"]
-    if not re.fullmatch(r"[0-9]+(,[0-9]+)*", cuda):
-        subprocess.run(["scancel", allocated["job_id"]], capture_output=True, check=False)
-        raise SystemExit("srun CUDA_VISIBLE_DEVICES is invalid")
-    user = os.environ.get("USER") or os.environ.get("LOGNAME") or Path.home().name
-    print(json.dumps({
-        "allocation_ref": allocated["job_id"],
-        "ssh": {"host": CONFIG["ssh_host"], "port": int(CONFIG["ssh_port"]), "user": user},
-        "workspace_path": workspace_path(),
-        "cuda_visible_devices": cuda,
-        "gpus": parse_smi_gpus(smi_lines),
-        "node": allocated["node"],
-    }, separators=(",", ":")))
+    argv.extend(["python3", str(hold), request_id, str(count)])
+    with log.open("w") as output:
+        proc = subprocess.Popen(argv, stdout=output, stderr=output, stdin=subprocess.DEVNULL, start_new_session=True)
+    deadline = time.monotonic() + APPLY_IMMEDIATE_SECONDS + 5
+    while time.monotonic() < deadline:
+        sample = read_json(ROOT / (request_id + ".json"))
+        if sample:
+            job_id = sample["allocation_ref"]
+            fact = allocation_fact(job_id, {"request_id": request_id}, sample)
+            atomic_json(request_path, {"request_id": request_id, "allocation_ref": job_id,
+                                       "last_locations": fact["locations"]})
+            if fact["state"] == "active" and fact["expires_at"]:
+                print(json.dumps(fact, separators=(",", ":")))
+                return
+        if proc.poll() is not None:
+            raise RuntimeError("Slurm apply exited; original request retained for reconciliation")
+        time.sleep(0.25)
+    raise RuntimeError("allocation outcome unconfirmed; inspect the original request")
 
 
 def cmd_release():
     job_id = sys.argv[2]
-    sidecar = Path.home() / ".serverpilot" / ("alloc-%s.json" % job_id)
-    completed = subprocess.run(["scancel", job_id], capture_output=True, text=True, check=False)
-    sidecar.unlink(missing_ok=True)
-    detail = (completed.stderr or completed.stdout).strip()
-    if completed.returncode == 0 or not detail or "Invalid job id" in detail or "already" in detail.lower():
-        print(json.dumps({"state": "released"}, separators=(",", ":")))
-        return
-    raise SystemExit(detail[:500])
+    # Release is idempotent; command success alone is not completion evidence.
+    result = subprocess.run(["scancel", job_id], capture_output=True, text=True, timeout=10)
+    if result.returncode and "Invalid job id" not in result.stderr:
+        raise RuntimeError("Slurm release command failed")
+    fact = allocation_fact(job_id)
+    if fact["state"] not in {"released", "expired", "failed"}:
+        raise RuntimeError("release requested; provider completion is not yet confirmed")
+    print(json.dumps({"state": "released"}, separators=(",", ":")))
 
 
 verb = sys.argv[1]
@@ -640,351 +748,8 @@ elif verb == "apply":
 elif verb == "release":
     cmd_release()
 else:
-    raise SystemExit(f"unknown remote verb {verb}")
+    raise SystemExit("unsupported verb")
 """
 
-
-def parse_idx(spec: str) -> set[int]:
-    used: set[int] = set()
-    spec = spec.strip()
-    if not spec:
-        return used
-    for part in spec.split(","):
-        part = part.strip()
-        if not part:
-            continue
-        if "-" in part:
-            start_s, end_s = part.split("-", 1)
-            used.update(range(int(start_s), int(end_s) + 1))
-        else:
-            used.add(int(part))
-    return used
-
-
-def is_unschedulable(state: str) -> bool:
-    tokens = state.lower().replace("*", " ").replace("+", " ").split()
-    if set(tokens) & UNSCHEDULABLE_TOKENS:
-        return True
-    return any(
-        token.startswith("drain") or token.startswith("down") or token.startswith("fail")
-        for token in tokens
-    )
-
-
-def parse_gres_used_indexes(text: str, total: int) -> set[int]:
-    text = text.strip()
-    if not text or text in {"(null)", "N/A", "n/a"}:
-        return set()
-    idx_at = text.find("IDX:")
-    if idx_at >= 0:
-        inner = text[idx_at + 4 :]
-        if inner.endswith(")"):
-            inner = inner[:-1]
-        return {index for index in parse_idx(inner) if 0 <= index < total}
-    match = re.search(r"gpu:[^:\s]+:(\d+)", text)
-    count = int(match.group(1)) if match is not None else 0
-    if count <= 0:
-        return set()
-    if count >= total:
-        return set(range(total))
-    return set(range(count))
-
-
-def job_name_from_task_ref(task_ref: str) -> str:
-    cleaned = re.sub(r"[^A-Za-z0-9._-]", "-", task_ref).strip("-.")[:32]
-    if not cleaned or not re.match(r"[A-Za-z0-9]", cleaned):
-        cleaned = "task"
-    name = f"sp-{cleaned}"
-    return name[:40]
-
-
-def emit(payload: dict) -> int:
-    json.dump(payload, sys.stdout, ensure_ascii=False, separators=(",", ":"))
-    sys.stdout.write("\n")
-    return 0
-
-
-def fail(message: str, code: int = 1) -> int:
-    sys.stderr.write(message.rstrip() + "\n")
-    return code
-
-
-def config_path() -> Path:
-    return Path(sys.argv[0]).resolve().parent / CONFIG_NAME
-
-
-def load_config() -> dict:
-    path = config_path()
-    if not path.is_file():
-        raise RuntimeError(
-            "slurm-immediate is unconfigured. Create "
-            f"{path} with ssh_host, partition, gpu_name, vram_mib, "
-            "gpus_per_node, cpus_per_gpu, and mem_gib_per_gpu. "
-            "Copy this plugin to the user plugin directory if you should "
-            "not write next to the bundled copy."
-        )
-    try:
-        raw = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as exc:
-        raise RuntimeError(f"slurm-immediate.json is invalid: {exc}") from exc
-    if not isinstance(raw, dict):
-        raise RuntimeError("slurm-immediate.json must be a JSON object")
-    config: dict = {}
-    for key in REQUIRED_STR:
-        value = raw.get(key)
-        if not isinstance(value, str) or not value.strip():
-            raise RuntimeError(f"slurm-immediate.json {key} must be a non-empty string")
-        config[key] = value.strip()
-    for key in REQUIRED_INT:
-        value = raw.get(key)
-        if type(value) is not int or isinstance(value, bool) or value < 1:
-            raise RuntimeError(f"slurm-immediate.json {key} must be a positive integer")
-        config[key] = value
-    for key in ("qos", "account", "control_path", "workspace_path"):
-        value = raw.get(key)
-        if value is None or value == "":
-            config[key] = ""
-            continue
-        if not isinstance(value, str) or not value.strip():
-            raise RuntimeError(f"slurm-immediate.json {key} must be a string")
-        config[key] = value.strip()
-    if config["workspace_path"] and not config["workspace_path"].startswith("/"):
-        raise RuntimeError("slurm-immediate.json workspace_path must be an absolute path")
-    ssh_port = raw.get("ssh_port")
-    if ssh_port is None:
-        config["ssh_port"] = 22
-        config["pass_ssh_port"] = False
-    elif type(ssh_port) is not int or isinstance(ssh_port, bool) or not 1 <= ssh_port <= 65535:
-        raise RuntimeError("slurm-immediate.json ssh_port must be an integer 1-65535")
-    else:
-        config["ssh_port"] = ssh_port
-        config["pass_ssh_port"] = True
-    return config
-
-
-def ssh_argv(config: dict, *rest: str) -> list[str]:
-    argv = ["ssh"]
-    control_path = config.get("control_path") or ""
-    if control_path:
-        argv.extend(["-o", f"ControlPath={control_path}"])
-    if config.get("pass_ssh_port") and rest[:1] != ("-O",):
-        argv.extend(["-p", str(config["ssh_port"])])
-    argv.extend(rest)
-    return argv
-
-
-def master_alive(config: dict) -> tuple[bool, str]:
-    probe = subprocess.run(
-        ssh_argv(config, "-O", "check", config["ssh_host"]),
-        capture_output=True,
-        text=True,
-        check=False,
-        stdin=subprocess.DEVNULL,
-    )
-    detail = (probe.stderr or probe.stdout).strip().splitlines()
-    return probe.returncode == 0, detail[-1] if detail else ""
-
-
-def require_master(config: dict) -> str | None:
-    alive, detail = master_alive(config)
-    if alive:
-        return None
-    host = config["ssh_host"]
-    return (
-        f"no live ControlMaster for {host}"
-        + (f" ({detail})" if detail else "")
-        + f". Open one first with: ssh -fN {host}. "
-        "This plugin never authenticates."
-    )
-
-
-def remote_script(config: dict) -> str:
-    injected = {
-        "ssh_host": config["ssh_host"],
-        "ssh_port": config["ssh_port"],
-        "partition": config["partition"],
-        "qos": config["qos"],
-        "account": config["account"],
-        "gpu_name": config["gpu_name"],
-        "vram_mib": config["vram_mib"],
-        "gpus_per_node": config["gpus_per_node"],
-        "cpus_per_gpu": config["cpus_per_gpu"],
-        "mem_gib_per_gpu": config["mem_gib_per_gpu"],
-        "workspace_path": config["workspace_path"],
-    }
-    return "CONFIG = " + json.dumps(injected, ensure_ascii=True) + "\n" + REMOTE_HELPER
-
-
-def ssh_python(config: dict, verb: str, *args: str, timeout: int = 40) -> str:
-    completed = subprocess.run(
-        ssh_argv(
-            config,
-            "-o",
-            "ControlMaster=no",
-            "-o",
-            "BatchMode=yes",
-            config["ssh_host"],
-            "python3",
-            "-",
-            verb,
-            *args,
-        ),
-        input=remote_script(config),
-        capture_output=True,
-        text=True,
-        check=False,
-        timeout=timeout,
-    )
-    if completed.returncode != 0:
-        detail = (completed.stderr or completed.stdout).strip().replace("\n", " ")[:500]
-        raise RemoteFailure(
-            detail or f"ssh exited {completed.returncode}",
-            no_capacity=completed.returncode == NO_CAPACITY_EXIT_CODE,
-        )
-    return completed.stdout
-
-
-def cmd_info() -> int:
-    return emit(
-        {
-            "plugin_id": "slurm-immediate",
-            "display_name": "Slurm 立刻申请",
-            "schema_version": PLUGIN_INFO_SCHEMA_VERSION,
-            "capabilities": ["observe", "apply", "release"],
-            "description": (
-                "只观测本用户自己的 Slurm GPU 作业；用 srun --immediate 立刻申请，"
-                "不能马上启动则失败、不排队。集群参数来自插件旁的 slurm-immediate.json；"
-                "未配置则失败。配置了 SSH 目标时，master 不在则失败，绝不认证。"
-            ),
-            "limits": {
-                "lease_ends": "hard_kill_at_time_limit",
-                "max_lease_seconds": MAX_LEASE_SECONDS,
-                "apply_max_seconds": APPLY_MAX_SECONDS,
-                "queues": False,
-            },
-        }
-    )
-
-
-def cmd_observe(config: dict) -> int:
-    missing = require_master(config)
-    if missing:
-        return fail(missing)
-    try:
-        payload = json.loads(ssh_python(config, "observe"))
-    except Exception as exc:
-        return fail(f"slurm-immediate observe failed: {exc}")
-    gpus = payload.get("gpus") or []
-    has_gpus = bool(gpus)
-    snapshot = {
-        "schema_version": SCHEMA_VERSION,
-        "identity": {
-            "hostname": payload["hostname"],
-            "boot_id": payload["boot_id"],
-        },
-        "host": {
-            "cpu_count": payload["cpu_count"],
-            "load_1m": payload["load_1m"],
-            "cpu_total_ticks": payload["cpu_total_ticks"],
-            "cpu_idle_ticks": payload["cpu_idle_ticks"],
-            "memory_total_mib": payload["memory_total_mib"],
-            "memory_available_mib": payload["memory_available_mib"],
-        },
-        "gpu_probe_available": has_gpus,
-        "gpu_probe_status": "gpu" if has_gpus else "cpu_only",
-        "gpus": gpus,
-        "processes": payload.get("processes") or [],
-    }
-    scheduler = payload.get("scheduler")
-    if isinstance(scheduler, dict):
-        snapshot["scheduler"] = scheduler
-    return emit(snapshot)
-
-
-def cmd_apply(config: dict, argv: list[str]) -> int:
-    missing = require_master(config)
-    if missing:
-        return fail(missing)
-    gpu_count = None
-    task_ref = None
-    rest = argv[1:]
-    while rest:
-        flag, rest = rest[0], rest[1:]
-        if flag == "--gpu-count" and rest:
-            gpu_count, rest = rest[0], rest[1:]
-            continue
-        if flag == "--task-ref" and rest:
-            task_ref, rest = rest[0], rest[1:]
-            continue
-        return fail("slurm-immediate apply requires --gpu-count N --task-ref REF")
-    try:
-        count = int(gpu_count) if gpu_count is not None else 0
-    except (TypeError, ValueError):
-        return fail("slurm-immediate apply gpu_count must be a positive integer")
-    if type(count) is not int or isinstance(count, bool) or count < 1:
-        return fail("slurm-immediate apply gpu_count must be a positive integer")
-    if not isinstance(task_ref, str) or not task_ref.strip():
-        return fail("slurm-immediate apply requires a non-empty --task-ref")
-    # task_ref is a human task name and may be any script. job_name_from_task_ref
-    # is what bounds it into a Slurm job name; JOB_NAME_PATTERN below is the
-    # check that actually guards the argv.
-    job_name = job_name_from_task_ref(task_ref)
-    if not JOB_NAME_PATTERN.fullmatch(job_name):
-        return fail("slurm-immediate apply job name is invalid")
-    try:
-        payload = json.loads(
-            ssh_python(config, "apply", str(count), job_name, timeout=SSH_APPLY_TIMEOUT_SECONDS)
-        )
-    except Exception as exc:
-        code = NO_CAPACITY_EXIT_CODE if getattr(exc, "no_capacity", False) else 1
-        return fail(f"slurm-immediate apply failed: {exc}", code)
-    return emit(
-        {
-            "allocation_ref": payload["allocation_ref"],
-            "ssh": payload["ssh"],
-            "workspace_path": payload["workspace_path"],
-            "cuda_visible_devices": payload["cuda_visible_devices"],
-            "gpus": payload.get("gpus", []),
-        }
-    )
-
-
-def cmd_release(config: dict, argv: list[str]) -> int:
-    missing = require_master(config)
-    if missing:
-        return fail(missing)
-    rest = argv[1:]
-    allocation_ref = None
-    if rest[:1] == ["--allocation-ref"] and len(rest) >= 2:
-        allocation_ref = rest[1]
-    if not isinstance(allocation_ref, str) or not ALLOCATION_REF_PATTERN.fullmatch(allocation_ref):
-        return fail("slurm-immediate release allocation-ref is invalid")
-    if not allocation_ref.isdigit():
-        return fail("slurm-immediate release allocation-ref must be a Slurm job id")
-    try:
-        payload = json.loads(ssh_python(config, "release", allocation_ref))
-    except Exception as exc:
-        return fail(f"slurm-immediate release failed: {exc}")
-    if payload.get("state") != "released":
-        return fail("slurm-immediate release state must be released")
-    return emit({"state": "released"})
-
-
-def main(argv: list[str]) -> int:
-    if argv == ["info"]:
-        return cmd_info()
-    try:
-        config = load_config()
-    except RuntimeError as exc:
-        return fail(str(exc))
-    if argv == ["observe"]:
-        return cmd_observe(config)
-    if argv[:1] == ["apply"]:
-        return cmd_apply(config, argv)
-    if argv[:1] == ["release"]:
-        return cmd_release(config, argv)
-    return fail("slurm-immediate supports info, observe, apply, and release")
-
-
 if __name__ == "__main__":
-    sys.exit(main(sys.argv[1:]))
+    raise SystemExit(main())

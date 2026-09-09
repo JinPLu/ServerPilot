@@ -32,6 +32,7 @@ struct ServerDetailSheet: View {
     private var endpointLeases: [LeaseRecord] {
         store.snapshot.leases.filter { lease in
             lease.gpuIDs.contains { gpuID in gpus.contains(where: { $0.id == gpuID }) }
+                || lease.allocations.contains { $0.endpointID == endpointID }
         }
     }
 
@@ -119,6 +120,18 @@ struct ServerDetailSheet: View {
                         header(endpoint)
                         serverActions(endpoint)
 
+                        ForEach(endpointLeases) { lease in
+                            ForEach(lease.allocations.filter { $0.endpointID == endpointID && $0.releaseGranularity == "allocation" }) { allocation in
+                                VStack(alignment: .leading, spacing: 8) {
+                                    Text("\(lease.projectID) · \(lease.taskReference ?? "未标注任务")").font(Typography.label)
+                                    AllocationFactsView(allocation: allocation)
+                                }
+                            }
+                        }
+                        ForEach(store.snapshot.pendingAllocations.filter { $0.endpointID == endpointID }) { allocation in
+                            AllocationFactsView(allocation: allocation)
+                        }
+
                         if endpoint.monitorStatus != "ONLINE" {
                             DetailCallout(
                                 icon: endpointStateIcon(endpoint.monitorStatus),
@@ -169,7 +182,7 @@ struct ServerDetailSheet: View {
                                 // state made an unreachable server -- whose
                                 // cards all read UNKNOWN_STALE -- announce
                                 // "有 0 张 GPU", next to a live button.
-                                let gpuCount = lease.gpuIDs.count
+                                let gpuCount = lease.gpuCount
                                 // The broker waives the emptiness proof only
                                 // when the machine has stopped answering, so
                                 // that case may not borrow wording that claims
@@ -888,6 +901,7 @@ struct GPUDetailSheet: View {
                 GPUDetailMetric(label: "计算利用率", value: utilizationLabel, accent: DesignTokens.warning)
                 GPUDetailMetric(label: "温度", value: temperatureLabel, accent: DesignTokens.danger)
             }
+            GPUProcessesView(gpu: gpu)
             if gpuHasLegacyWorkloadProcessReview(gpu) {
                 DetailCallout(
                     icon: "info.circle.fill",

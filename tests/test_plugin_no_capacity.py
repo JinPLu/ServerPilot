@@ -87,7 +87,7 @@ def test_the_reference_plugin_reports_an_unconfigured_cluster_as_a_failure() -> 
     path = bundled_plugin_dir() / "slurm-immediate"
 
     with pytest.raises(PluginError) as error:
-        invoke_plugin(path, ["apply", "--gpu-count", "1", "--task-ref", "probe"], timeout_seconds=10)
+        invoke_plugin(path, ["apply", "--gpu-count", "1", "--task-ref", "probe", "--duration-seconds", "3600", "--request-id", "probe", "--requirements-json", "{}"], timeout_seconds=10)
 
     assert error.value.no_capacity is False
-    assert "unconfigured" in str(error.value)
+    assert "configuration" in str(error.value)

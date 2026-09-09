@@ -375,6 +375,42 @@ def endpoint_list(
     _print(_call(lambda: _client(url, actor).endpoints()), as_json)
 
 
+@endpoint_app.command("connect")
+def endpoint_connect(
+    endpoint_id: str,
+    disconnect: Annotated[bool, typer.Option("--disconnect", help="Stop maintaining this connection; allocations remain separate.")] = False,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")] = None,
+    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")] = None,
+) -> None:
+    _print(_call(lambda: _client(url, actor).request(
+        "PUT", f"/api/v1/endpoints/{endpoint_id}/connection", json_body={"enabled": not disconnect}, timeout=70,
+    )), as_json)
+
+
+@gpu_app.command("apply")
+def gpu_apply(
+    project: Annotated[str, typer.Option("--project")],
+    task: Annotated[str, typer.Option("--task")],
+    duration_seconds: Annotated[int, typer.Option("--duration-seconds", min=60, max=2592000)],
+    gpu_count: Annotated[int, typer.Option("--gpu-count", min=1)] = 1,
+    server_group: Annotated[str | None, typer.Option("--server-group")] = None,
+    endpoint: Annotated[str | None, typer.Option("--endpoint")] = None,
+    idempotency_key: Annotated[str | None, typer.Option("--idempotency-key")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")] = None,
+    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")] = None,
+) -> None:
+    constraints = {"gpu_count": gpu_count, "same_host": True,
+                   "server_group_ids": [server_group] if server_group else [],
+                   "endpoint_ids": [endpoint] if endpoint else []}
+    _print(_call(lambda: _client(url, actor).post(
+        "/api/v1/claims", {"project_id": project, "task_ref": task, "purpose": task,
+                           "duration_seconds": duration_seconds, "constraints": constraints},
+        idempotency_key=_idempotency_key(idempotency_key),
+    )), as_json)
+
+
 @gpu_app.command("list")
 def gpu_list(
     state: Annotated[str | None, typer.Option()] = None,
@@ -394,6 +430,24 @@ def who(
 ) -> None:
     response = _call(lambda: _client(url, actor).leases(project_id=project))
     _print(response, as_json)
+    if not as_json:
+        for lease in response.get("data", []):
+            for allocation in lease.get("allocations", []):
+                typer.echo(f"\n{lease['project_id']} · {lease.get('task_ref') or '—'} · {allocation['state']} · {allocation.get('allocation_ref') or '未确认'}")
+                typer.echo(f"截止：{allocation.get('expires_at') or '未确认'}；最后确认：{allocation.get('confirmed_at') or '未确认'}")
+                for location in allocation["locations"]:
+                    typer.echo(f"  {location['node']} · {location['gpu_count']} GPU")
+                    for device in location["devices"]:
+                        typer.echo(f"    {device['gpu_uuid']} · 物理卡 {device.get('physical_index')} · 环境内编号 {device.get('device_selector')}")
+                entry = allocation.get("entry")
+                if entry:
+                    import shlex
+                    typer.echo(f"登录：{entry['user']}@{entry['host']}:{entry['port']}；目录：{entry['workspace_path']}")
+                    if entry['argv']:
+                        typer.echo(shlex.join(entry['argv']))
+                    typer.echo(entry['instructions'])
+                    if not entry['verified']:
+                        typer.echo("进入方式尚未通过现场验证。")
 
 
 @lease_app.command("activate")

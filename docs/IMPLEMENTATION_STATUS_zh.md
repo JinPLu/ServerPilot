@@ -1,8 +1,136 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-09-03（Asia/Shanghai）
+更新时间：2026-09-08（Asia/Shanghai）
 
-本文只记录当前事实、直接证据和仍未验证的边界。源码与构建完成不等于本机正在运行或已部署。当前包装版本为 `2.0.0`；工作树已实现一等服务器分组与任务声明 GPU 需求，去掉外部调度器提交、通用资源规划、工作负载预设和整套浏览器 `/ui`，并把插件接入的集群并入同一个集群模型：不再有平行的 `scheduler_servers` 顶层桶，每个分组投影同形的 `allocation` / `limits` / `largest_allocatable_block`。同时取消了 PyPI 发布工作流，`tag` 与 `__version__` 的一致性校验保留在 `release.yml`；Windows 桌面 App 已整体移除，Windows 上继续通过 CLI 和 MCP 支持。本文件不宣称已重启 daemon、已重装 MCP 入口，或已重新生成现场连接器描述。`1.9.1` 及更早各版本的现场验收证据已归档到 `docs/archive/`，与本次源码变更分开记录。
+当前包装版本仍为 `3.0.0`，本轮未提交、推送或正式发布。下方最新条目是当前交付状态，
+更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 普通服务器与插件共用节点观测（2026-09-08）
+
+本轮替代先前仅汇总「已领分配」的方案。普通 SSH 与插件计算节点共用固定 Linux/NVIDIA
+探针、解析、持久化和资源投影；插件协议 v5 / 观测 schema 3。Slurm 只补充节点目录、
+分配关系及作业 accounting。CPU、内存、GPU、显存与进程在 REST、CLI、MCP、桌面使用
+同一节点观测；节点表显示当前值，作业 CPU 时间与 RSS 单独显示。
+
+节点身份为 endpoint＋node_id，GPU 再按 UUID 定位；迁移 0040 保留普通服务器 GPU ID
+及租约关系。节点局部失败保留资源身份与分配事实，指标显示未知；调度管理卡即使观测空闲
+也不可绕过提供方申请。未采到计算节点时不展示登录节点的 CPU／内存代替。
+
+已验证：普通／插件同输入解析一致，多节点同序号和 PID 隔离、CPU 差分与重启基线、
+委托空闲卡不可直接分配、迁移保留资源与租约身份；额外 18 项相关测试通过。
+Python 全量 695 项回归通过，额外节点／迁移 18 项通过（其中 3 项为新增）；Ruff、
+MCP policy 与 diff 校验通过。桌面 75 项测试通过；实机发现并修正旧无障碍口径文案后，
+再次构建与校验根目录唯一 App，并重启验收。
+
+本机已部署：停止控制面并备份至 `state/backups/pre-node-v5.sqlite3`，更新 uv 工具安装和
+本机插件后启动，迁移正常、health ready。14:50 的 API、CLI 和新启动的 MCP 进程均返回
+百舸三个节点的实时观测，以及瀚海 gnode07 的 `host_key_rejected` 与空用量。桌面已核对
+「资源指标：节点当前值」与外部作业行。已启动的旧 MCP 连接仍保留旧进程代码，需要客户端
+重连才能使用新投影；新 MCP stdio 路径已实测。
+
+现场依赖更新（14:54）：用户明确回复「允许」，已在登录节点的用户 known_hosts 登记此前
+确认的 gnode07 ED25519 公钥，指纹 `SHA256:PO9d4bGGydmy9krRfpyYwUfgFjBx3nwSgdnB38jN4cc`。
+严格主机校验已通过，实际 SSH 准入随后返回 `Permission denied (publickey,password)`。
+只读检查发现登录节点 ~/.ssh 仅有 known_hosts，没有用户公钥凭据；未读取私钥或输入密码。
+后台 API 已更新为 `auth_failed`，用量保持未知，作业 1158293 仍 active、gnode07、8 GPU。
+
+官方登录手册说明账号密码和二次认证，并明确禁止 SSH 密钥登录；其计算节点适用范围尚需
+管理员确认，不能据此自行新增账号密钥。当前需要计算节点认可的认证方式；主机密钥问题
+已解决，账号准入仍未通过，因此真实 GPU 连续采样及各端真实用量验收仍未完成。
+未创建 srun 步骤、未改变训练、未启动远端采集进程。
+
+## 通用分配模型与插件 v5（2026-09-08）
+
+状态：**实现完成；现场连接接管、重启与只读核对通过，真实申请／进入／归还路径待验证。**
+
+- 正式分配表与连接意图表已迁移。普通主机保持内置 SSH 与逐卡分配；插件以能力声明接入。
+  服务层统一拥有申请与归还，REST 不再编排插件申请；旧约束 JSON 释放引用迁入正式记录。
+- 分配结果包含租约任务关联、远端引用、节点、已知 UUID／物理卡号／环境内编号、请求时长、
+  实际截止时间、进入信息和确认状态。未知不填零；旧记录缺位置保持未确认。
+- 申请前持久化稳定标识；远端响应丢失或本机租约写入失败时保留原申请，重试先只读核对。
+  归还失败保留占有及待确认状态，不能通过本机到期时间假装远端已归还。
+- 整份分配回收要求任务失联、完整且一致的新鲜空闲观测持续达到现有阈值；观测中断重置空闲证据。
+  插件分配不能逐卡改派，不能本机续租延长提供方硬时限。外部同账号作业只展示、不接管。
+- 插件 `info` 升至 v5，新增可选 `connect/disconnect`；认证只在 connect 内执行。
+  连接维持意图持久化，认证失败与原因不明停止自动恢复，明确网络不可达等待网络恢复。
+  未配置或旧版插件的发现错误可见。
+- 容量、分配确认、设备活动各用各自采样时间；重新读取不能刷新旧数据。
+  节点位于 REST endpoint.nodes，当前容量单独提供；断连仍可看上次位置。
+- GUI 保留单张表、纵向分组、每组最多四行滚动。组标题显示连接状态与操作，节点可查看任务及
+  外部作业，申请成功展示位置／截止／进入方式，未确认申请有可见入口。
+  CLI `gpu apply` 显式传时长，`who` 展示分配；MCP 仍为五工具，gpu_apply 必填 duration_seconds。
+  契约唯一源和生成政策已同步。
+
+验证：Python 临时数据库与 fake provider 覆盖申请、幂等、失联、响应丢失、本机写失败、
+整份回收、归还失败保留占有、旧引用迁移、外部作业、独立容量新鲜度与普通主机回归。
+146 项接口／插件／MCP／keepalive 定向检查、60 项 Collector 回归及 3 项隔离 MCP 协议检查通过；
+后续生命周期定向检查通过。Swift 73 项通过；Ruff、生成政策校验与根目录应用构建验证通过。
+
+本机交付与现场证据：
+
+- 控制面停止后创建 `state/backups/pre-provider-v4.sqlite3`，再安装源码并启动迁移。
+  瀚海独立插件位于用户插件目录，站点配置只引用原凭据路径，没有复制凭据或依赖 Storyboard 代码。
+- 显式开启 hanhai22-p22 连接返回 connected（复用现有会话）；daemon 重启后 enabled=true 保留。
+  13:05 的只读采集为 ONLINE，18 个节点、53 张分区空闲卡、单节点最大块 8；此数字是当时观测，
+  不代表之后仍有容量。旧虚构 GPU 行已在完整观测后退出设备账本。
+- 同账号外部作业 1158293 的只读 Slurm 结果为 RUNNING、gnode07、8 GPU，设备映射和活动未知，
+  控制面未绑定项目／租约、未进入或修改该作业。现场采用 TRES 字段，已在插件读取路径覆盖。
+- 根目录唯一 `ServerPilot.app` 已重启并实机核对：已连接状态、节点表、四行滚动、列对齐正常。
+
+仍未知：此前人工 SSH master 退出的底层原因；本轮未主动断开现有会话，因此未现场验证密码／
+TOTP 重新认证。真实 Slurm 申请、进入已有分配和归还须在获准的专用测试分配上执行，
+`entry_verified` 保持 false，不能宣称整条现场执行链路已经验证。
+
+## GPU 分区节点列表与组内排序（2026-09-07）
+
+保留原服务器页的单张表、纵向分组段头、44 pt 行与响应式列宽。Slurm 有在线节点明细时
+只显示当前 GPU 分区的节点，去掉重复的登录入口「按需申请」行，该说明保留在组标题。
+每组最多 4 行，短组按内容高度展示，长组显示纵向滚动条。
+横向卡片方案已按用户纠正撤回。所有组的滚动内容与表头保留相同的滚动条留白以保持列对齐。
+
+连接列统一为 `host:port`；Slurm 节点显示 `登录入口 host:port / 节点名`，没有虚构计算节点
+SSH 端口。节点名在 endpoint 内唯一，原有 GPU UUID、租约与申请路径不变。
+插件 `scheduler.nodes` 经校验、既有容量 JSON 持久化与 REST 原样传递到 Swift 模型。
+未采集的节点压力指标为 `—`，维护节点不展示可申请数字。
+
+排序统一作用于组内全部行，排序键由渲染行提供，避免“显示按需、却按分区总空闲排序”。
+缺失指标不再映射成 -1，两个方向都置后；相同值按地址/节点名自然排序。
+切换排序后组内回到顶部，刷新不会主动重置滚动。
+
+验证与交付：
+
+- 插件、插件分配、MCP 分组定向测试共 40 项通过；Swift 72 项通过（包含缺失值、自然地址顺序、
+  同值稳定排序、IPv6 地址显示和节点解码）。Ruff 与 `git diff --check` 通过。
+- 根目录 `ServerPilot.app` 已构建，`desktop/verify-macos-app.sh` 通过。
+- 删除重复入口行后再次构建、校验并重开根目录 App；实机滚至组内末尾，只有节点行，
+  「按需申请」仍显示在组标题。
+- 已更新本机插件、安装当前控制面并重启 daemon；读取本机 REST 观察到 ONLINE、18 个真实 GPU 节点。
+  未手动连接 GPU、未提交测试作业，真实数据来自既有后台采集。
+- 根目录 App 实机点击验证：空闲降序为 7/8、6/8…，升序以 0/8 开始；普通主机的未知空闲行
+  留在数字行后；GPU 利用率为 65%、1%、—。滚动条能到 1（列表末尾），切换排序回 0。
+  这些数值仅记录排序检查时的观测，不作为当前容量承诺。
+
+## 瀚海容量停在三卡（2026-09-07）
+
+本轮读取本机 REST `/api/v1/state`，瀚海 `largest_allocatable_block=3`、
+`free_gpu_count=12` 来自最后成功观测 `2026-09-04T14:26:30Z`，并非三卡配额。
+当时最新尝试为 `2026-09-07T02:53:00Z`，错误链为
+`cluster_free_gpu_count → parse_gres_used_indexes → parse_idx → int('N/A')`。
+本机插件的 `max_gpus_per_lease` 实际为 8。
+
+已修随包 Slurm 插件及本机 `hanhai22` 的远端解析器：索引为 `N/A` 时读取 Slurm
+明确报告的占用数量，无法识别数量仍报错；删除只供旧测试使用的本地重复解析器。
+控制面快照使用既有 `freshness.fresh` 判据，过期后不再投影 scheduler capacity，
+因此组级最大可申请块为 `null`，MCP 不再展示旧容量。
+
+验证：插件、插件分配与 MCP 分组三个测试文件共 40 项通过，Ruff 与 diff 检查通过；
+本机插件远端 helper 已在本地验证并原地更新，未调用 SSH 或申请作业。
+本机插件更新后，已有后台采集于 `2026-09-07T02:56:23Z` 恢复，随后读取本机 REST
+确认 `ONLINE`、`free_gpu_count=57`、`largest_free_block=8`、错误清除，观测年龄 4.5 秒。
+这证明采集修复已在真实路径生效；未提交作业，8 仅为 GPU 空闲块，不是立即分配保证。
+控制面屏蔽过期容量的改动已随后续节点列表交付一并安装、重启；过期分支由定向测试覆盖。
+Storyboard 的使用规则同时指出 CPU 余量和单节点作业形状会限制可用卡数；
+本轮不把分散空卡等同于一次可申请容量，也未扩展排队、多节点或时限语义。
 
 ## 当前工作树：观测层重做（2026-09-03，已在本机运行并验证）
 
@@ -60,7 +188,7 @@
 
 1. **信息采集**：固定只读探针采集服务器 CPU、内存、GPU、进程和历史趋势；APP 刷新只读取这份状态。共享集群通过本机插件的 `observe` / `apply` / `release` 接入，随包参考插件为 `slurm-immediate`，没有独立的调度器提交面。GPU 与主机资源都投影最近 10 分钟均值，endpoint 快照在 `host_telemetry.recent_average` 提供标准化 CPU 负载和内存占用率，详情页的逐卡显存环图仍以当前观测绘制。
 2. **人类监控与纠错**：macOS 桌面 App 展示服务器分组、任务与 GPU；Windows 上没有桌面 App，CLI 和 MCP 仍可用。没有浏览器界面，也不再提供 `/ui/*` 页面。分组携带共享工作目录、环境说明和数据/权重说明；成员可继承或覆盖工作目录。环境说明只供阅读，不会被执行或注入。App 刷新只读取本机 daemon 已提交快照。保持卡数不变并选择新 GPU，以及释放已确认空闲占用，只在 macOS App 与 REST operator 路径上提供。目标 GPU 正在占卡时，macOS / REST 改派先按卡停止并刷新确认，再更新分配，随后提示对应 Agent 按返回的 `CUDA_VISIBLE_DEVICES` 重启任务。
-3. **Agent 操作**：源码日常 MCP 正好五个工具：`gpu_status`、`gpu_apply`、`gpu_release`、`gpu_add_server`、`gpu_update_server`。申请签名为 `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`：`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，不从空闲容量推断；已分组裸机先选定组，再在组内 best-fit 一台主机，一份租约始终只落在一台机器上；插件接入的分组同样可以直接以 `server_group_id` 申请，由 `apply_plugin_for_claim` 在该组恰好一个声明了 `apply` 的成员上落地，`server_id` 仍用于未分组主机。`gpu_add_server` 登记主机，`gpu_update_server` 更新安全元数据；删除不是 MCP 工具。`gpu_status` 按 组 → 服务器 → SKU 投影可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，不含遥测与 `keepalive`；连接与远端工作目录随该服务器投影一次。插件接入的集群不再有平行的 `scheduler_servers` 顶层桶：它的登录节点以同一个 `{server_id, workspace_path, workspace, ssh, gpus[]}` 形状挂在所属分组内，未知的 `total_count` 省略而不是填 `null`，且不再同时出现在 `cpu_only_servers`。没有逐卡 GPU 行的分组也会被投影，因此手工设置的组名与共享工作目录不会丢失。每个分组另投影 `allocation`（`direct` / `delegated`）、`limits`（`max_gpus_per_lease`、`max_lease_seconds`、`lease_ends`、`cpu_cores_per_gpu`、`memory_mib_per_gpu`、`apply_max_seconds`、`queues`）和 `largest_allocatable_block`。`largest_allocatable_block` 的语义固定为**一次申请能拿到的最大卡数**：委托型取插件上报的单节点最大空闲块，缺失时只在同时已知单次上限时回退为 `min(free_gpu_count, max_gpus_per_lease)`，两者都未知时为 `null`，绝不用跨节点池子总数冒充；直连型取组内单台主机的最大可申请卡数。默认响应附带紧凑 `busy_gpus`（`server_id`、`gpu_id`、`index`、`status`、人类可读 `task`），占用情况不需要第二次调用，`server_id` 可将响应收窄到一台服务器。申请成功后的 `gpus[]` 仍按卡返回，每行只保留 `server_id` 外键和该卡自身字段。遥测只随租约投影：`gpu_status(lease_id=…)` 返回 `leased_gpus` 逐卡 `recent_average` 与 `current`，以及 `lease` 汇总（`telemetry_gpu_count`、`min_memory_free_mib`、多卡时的 `gpu_utilization_spread_pct` 与 `slowest_gpu`）。近 10 分钟均值的时间窗描述由 `lease.telemetry_window` 承担，逐卡窗口与其他卡不一致时才落到该卡的 `window_override`，部分失败的采集不会被投影成一个共享窗口；`lease_id` 已释放、被回收或不在本次收窄范围内时返回 `no_leased_gpus`。`gpu_release` 回显被结算的 `lease_id` 与 `state`。连接、工作目录、代码位置和设备选择仍分开投影：`ssh` 只负责连接；`workspace {path, kind=working_directory, use_as_cwd=true, code_location=not_provided}` 明确远端 cwd 且不暗示代码路径；`workspace_path` 继续保留。GPU UUID 只作物理身份，`gpu_index` 保留采集时的 `nvidia-smi index`；collector schema v2 另按 PCI bus 顺序生成 `cuda_ordinal`，lease 返回 `cuda_device_order=PCI_BUS_ID`、顶层完整 `cuda_visible_devices` ordinal 集合和逐卡 `gpu_cuda_visible_devices` ordinal。数据库中没有当前 `cuda_ordinal` 的 GPU 不参与分配。启动前做最小 CUDA gate，失败立即释放并在当前任务内避开同一环境。租约持续到显式释放、macOS App / REST 人工改派或释放空闲占用，或被两阶段空闲回收收回；容量不足返回 `no_capacity`，未选定合适分组时返回 `group_selection_required`，两者都不排队且同一 turn 不反复轮询。空闲回收只依据观测且**按卡粒度**：每张卡各自计时，某张卡在**新鲜**采集下持续没有计算进程时单独被收回，同一租约中仍在工作的卡不受影响；全部卡都被收回时租约转 `EXPIRED_EMPTY`——但**只要这份租约在任何一张卡上都没有当前进程，收回任何一张卡都还要求持有者本身已经沉默**。`_lease_liveness_age_seconds` 是控制面唯一的存活判据：取该租约各活跃 GPU 上任意进程观察的最后 `last_seen_at`（不看该行的 `active` 标志）与 `lease.last_heartbeat_at` 的较晚者；租约在任何一张卡上都没有当前进程、且在 `idle_lease_reclaim_seconds` 内还有任一存活证据时，只告警不收回——因为「此刻每张卡都没有进程」正是分阶段任务两批之间的样子。这道门覆盖**每一张**卡，不只是最后一张：一张卡的遥测抖一次，或某个阶段只用了这份租约的一部分卡，各卡的空闲计时就会错开，只在「全部卡同时到期」时才生效的门恰好挡不住这些情形。心跳不需要 Agent 新增调用：MCP `gpu_status(lease_id=…)` 经 `POST /api/v1/routine/leases/{lease_id}/heartbeat` 刷新 `last_heartbeat_at`，该路由不写审计、不 bump revision，对已释放或不属于调用者的租约返回 `recorded: false` 而非报错。原先「声明了 duration 的租约豁免观测空闲回收」已被这条判据取代：routine claim 固定清空 `expires_at`，那条豁免按构造永远轮不到最需要它的租约。**这对 CLI / App 路径是可见的行为变化**——声明了时长的租约此前完全不参与观测空闲回收，现在与其他租约同一套判据，卡持续空闲且持有者连续沉默超过回收窗口时同样会被收回；声明的时长仍然决定租约何时到期。租约里**还有卡在跑进程**时这道门不生效：那时闲着的卡就是这份租约用不上的卡，仍按卡收回，一个仍在跑的进程护不住同租约其余空闲的卡。当租约的全部 GPU 持续空闲，超过 `idle_lease_alert_seconds`（默认 600s）记 `idle_lease` 警告告警，超过 `idle_lease_reclaim_seconds`（默认 3600s）且持有者同样沉默时以 `EXPIRED_EMPTY` 释放并写审计 `lease.idle_reclaimed`。出现进程或采集变 stale 都会清零 `lease_resources.idle_since`，因此计时始终是一段完整观测到的空闲窗口，采集中断不会累积成回收。一次 MCP 调用具有内部重放键并在本地传输失败时只重试一次；新的同参数调用仍能取得第二个 lease，多个 lease 由申请者逐个确认释放。
+3. **Agent 操作**：源码日常 MCP 正好五个工具：`gpu_status`、`gpu_apply`、`gpu_release`、`gpu_add_server`、`gpu_update_server`。申请签名为 `gpu_apply(duration_seconds, server_group_id?, server_id?, gpu_count=1, task?)`：`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，不从空闲容量推断；已分组裸机先选定组，再在组内 best-fit 一台主机，一份租约始终只落在一台机器上；插件接入的分组同样可以直接以 `server_group_id` 申请，由 `service.claim_provider` 在该组恰好一个声明了 `apply` 的成员上落地，`server_id` 仍用于未分组主机。`gpu_add_server` 登记主机，`gpu_update_server` 更新安全元数据；删除不是 MCP 工具。`gpu_status` 按 组 → 服务器 → SKU 投影可申请容量（`name`、`vram_mib`、`total_count`、`available_count`），不是逐张空闲卡菜单，不含遥测与 `keepalive`；连接与远端工作目录随该服务器投影一次。插件接入的集群不再有平行的 `scheduler_servers` 顶层桶：它的登录节点以同一个 `{server_id, workspace_path, workspace, ssh, gpus[]}` 形状挂在所属分组内，未知的 `total_count` 省略而不是填 `null`，且不再同时出现在 `cpu_only_servers`。没有逐卡 GPU 行的分组也会被投影，因此手工设置的组名与共享工作目录不会丢失。每个分组另投影 `allocation`（`direct` / `delegated`）、`limits`（`max_gpus_per_lease`、`max_lease_seconds`、`lease_ends`、`cpu_cores_per_gpu`、`memory_mib_per_gpu`、`apply_max_seconds`、`queues`）和 `largest_allocatable_block`。`largest_allocatable_block` 的语义固定为**一次申请能拿到的最大卡数**：委托型取插件上报的单节点最大空闲块，缺失时只在同时已知单次上限时回退为 `min(free_gpu_count, max_gpus_per_lease)`，两者都未知时为 `null`，绝不用跨节点池子总数冒充；直连型取组内单台主机的最大可申请卡数。默认响应附带紧凑 `busy_gpus`（`server_id`、`gpu_id`、`index`、`status`、人类可读 `task`），占用情况不需要第二次调用，`server_id` 可将响应收窄到一台服务器。申请成功后的 `gpus[]` 仍按卡返回，每行只保留 `server_id` 外键和该卡自身字段。遥测只随租约投影：`gpu_status(lease_id=…)` 返回 `leased_gpus` 逐卡 `recent_average` 与 `current`，以及 `lease` 汇总（`telemetry_gpu_count`、`min_memory_free_mib`、多卡时的 `gpu_utilization_spread_pct` 与 `slowest_gpu`）。近 10 分钟均值的时间窗描述由 `lease.telemetry_window` 承担，逐卡窗口与其他卡不一致时才落到该卡的 `window_override`，部分失败的采集不会被投影成一个共享窗口；`lease_id` 已释放、被回收或不在本次收窄范围内时返回 `no_leased_gpus`。`gpu_release` 回显被结算的 `lease_id` 与 `state`。连接、工作目录、代码位置和设备选择仍分开投影：`ssh` 只负责连接；`workspace {path, kind=working_directory, use_as_cwd=true, code_location=not_provided}` 明确远端 cwd 且不暗示代码路径；`workspace_path` 继续保留。GPU UUID 只作物理身份，`gpu_index` 保留采集时的 `nvidia-smi index`；collector schema v2 另按 PCI bus 顺序生成 `cuda_ordinal`，lease 返回 `cuda_device_order=PCI_BUS_ID`、顶层完整 `cuda_visible_devices` ordinal 集合和逐卡 `gpu_cuda_visible_devices` ordinal。数据库中没有当前 `cuda_ordinal` 的 GPU 不参与分配。启动前做最小 CUDA gate，失败立即释放并在当前任务内避开同一环境。租约持续到显式释放、macOS App / REST 人工改派或释放空闲占用，或被两阶段空闲回收收回；容量不足返回 `no_capacity`，未选定合适分组时返回 `group_selection_required`，两者都不排队且同一 turn 不反复轮询。空闲回收只依据观测且**按卡粒度**：每张卡各自计时，某张卡在**新鲜**采集下持续没有计算进程时单独被收回，同一租约中仍在工作的卡不受影响；全部卡都被收回时租约转 `EXPIRED_EMPTY`——但**只要这份租约在任何一张卡上都没有当前进程，收回任何一张卡都还要求持有者本身已经沉默**。`_lease_liveness_age_seconds` 是控制面唯一的存活判据：取该租约各活跃 GPU 上任意进程观察的最后 `last_seen_at`（不看该行的 `active` 标志）与 `lease.last_heartbeat_at` 的较晚者；租约在任何一张卡上都没有当前进程、且在 `idle_lease_reclaim_seconds` 内还有任一存活证据时，只告警不收回——因为「此刻每张卡都没有进程」正是分阶段任务两批之间的样子。这道门覆盖**每一张**卡，不只是最后一张：一张卡的遥测抖一次，或某个阶段只用了这份租约的一部分卡，各卡的空闲计时就会错开，只在「全部卡同时到期」时才生效的门恰好挡不住这些情形。心跳不需要 Agent 新增调用：MCP `gpu_status(lease_id=…)` 经 `POST /api/v1/routine/leases/{lease_id}/heartbeat` 刷新 `last_heartbeat_at`，该路由不写审计、不 bump revision，对已释放或不属于调用者的租约返回 `recorded: false` 而非报错。原先「声明了 duration 的租约豁免观测空闲回收」已被这条判据取代：routine claim 固定清空 `expires_at`，那条豁免按构造永远轮不到最需要它的租约。**这对 CLI / App 路径是可见的行为变化**——声明了时长的租约此前完全不参与观测空闲回收，现在与其他租约同一套判据，卡持续空闲且持有者连续沉默超过回收窗口时同样会被收回；声明的时长仍然决定租约何时到期。租约里**还有卡在跑进程**时这道门不生效：那时闲着的卡就是这份租约用不上的卡，仍按卡收回，一个仍在跑的进程护不住同租约其余空闲的卡。当租约的全部 GPU 持续空闲，超过 `idle_lease_alert_seconds`（默认 600s）记 `idle_lease` 警告告警，超过 `idle_lease_reclaim_seconds`（默认 3600s）且持有者同样沉默时以 `EXPIRED_EMPTY` 释放并写审计 `lease.idle_reclaimed`。出现进程或采集变 stale 都会清零 `lease_resources.idle_since`，因此计时始终是一段完整观测到的空闲窗口，采集中断不会累积成回收。一次 MCP 调用具有内部重放键并在本地传输失败时只重试一次；新的同参数调用仍能取得第二个 lease，多个 lease 由申请者逐个确认释放。
 4. **空闲 GPU 占卡**：明确分开持久意图与当前进程状态。endpoint 的 `desired` 只有 `ON / OFF`，只随用户开关改变；逐卡 `actual` 只有 `ON / OFF / ERROR`，由 helper 操作与新鲜采集更新。内部逐卡归属不再使用 TTL，并持久保存唯一的 collector PID、boot ID 和进程启动时间；远端 helper 本地状态保存其 PID namespace 内的 PID、Linux boot ID、`/proc` 启动时钟和固定 worker marker，停止前使用 pidfd 重新校验并发信号，PID 重用或 marker 不匹配时绝不 kill。恢复时 helper 先确认该 namespace worker 仍是自己，再以固定 NVIDIA 查询证明目标 UUID 恰有一个 driver-visible PID；ServerPilot 只在该 driver PID 与 boot ID 同新鲜 collector 的唯一进程一致时重新登记 worker，且以 collector 的启动时间写入持久状态。helper namespace 的 ticks 不被伪装为 host PID 的启动身份；当前 collector schema v2 尚未提供可端到端比较的 host ticks。PID-only 或旧 marker 状态直接 fail closed，不提供旧版收养路径。额外或替代业务进程为 `ERROR/CONFLICT` 并 fail closed。helper 状态文件和数据库备份都通过同目录临时文件、fsync 与原子替换发布。
 
 一等分组持久保存共享 `workspace_path`、环境说明和数据/权重说明。未分组 endpoint 仍必须自带绝对远端路径；已分组 endpoint 可继承组默认工作目录，或按 endpoint 覆盖。新增或更新服务器时 REST、五个 MCP 工具中的登记/更新工具和原生 APP 都要求最终能解析出绝对远端路径；`gpu_status` / `gpu_apply` 在不改变持久化模型的前提下将生效路径投影为结构化 `workspace`，明确这是远端 cwd、不是代码路径。历史记录迁移保留且未知路径保持空值，不猜测项目子目录。该字段只是元数据和操作指引，不创建/删除远端目录、不授权启动 workload；环境说明只供阅读，不会被执行或注入。密封占卡 helper 固定布局为 `${workspace_path}/serverpilot-keepalive`（此处为生效工作目录），adapter 先只读执行 `./serverpilot-keepalive --protocol-info`，确认 v3 和 `worker_attestation` 能力后再执行固定启停命令。身份恢复时只读执行固定 `--inspect --schema-version 3`，不依赖远端 `PATH`，也不允许 caller 传入 PID、路径、命令或参数；预检失败不发送 mutation，旧 v2 wire/state 直接 fail closed。

@@ -9,7 +9,7 @@ from sqlalchemy import select
 
 from serverpilot import mcp_server
 from serverpilot.models import Lease, LeaseResource, ProcessObservation
-from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
+from serverpilot.schemas import EndpointObservation, NodeObservation, ProcessInput, TelemetryInput
 
 
 def observation(
@@ -20,6 +20,7 @@ def observation(
     prefix: str = "GPU",
     gpu_uuids: list[str] | None = None,
     observation_complete: bool = True,
+    gpu_probe_status: str = "unknown",
     observed_at: datetime | None = None,
     host: dict[str, object] | None = None,
 ) -> EndpointObservation:
@@ -37,8 +38,8 @@ def observation(
     }
     if host is not None:
         host_payload.update(host)
-    return EndpointObservation(
-        endpoint_id=endpoint_id,
+    node = NodeObservation(
+        node_id="self",
         observed_at=now,
         boot_id=f"boot-{endpoint_id}",
         host=host_payload,
@@ -61,9 +62,10 @@ def observation(
             for index, gpu_uuid in enumerate(uuids)
         ],
         processes=processes or [],
-        observation_complete=observation_complete,
+        observation_complete=observation_complete, gpu_probe_status=gpu_probe_status,
     )
 
+    return EndpointObservation(endpoint_id=endpoint_id, observed_at=now, nodes=[node])
 
 def process_for_gpu(uuid: str, *, pid: int = 1234) -> ProcessInput:
     return ProcessInput(
@@ -177,3 +179,33 @@ def keepalive_start_candidates(service, endpoint_id: str) -> list[str]:
 
     plan = service.list_keepalive_transitions(endpoint_id)
     return [item["gpu_id"] for item in plan["transitions"] if item["action"] == "start"]
+
+
+def probe_bundle(snapshot: dict) -> dict:
+    """Build transport fixtures from readable resource examples (not production parsing)."""
+    gpu_lines = []
+    for gpu in snapshot.get("gpus", []):
+        gpu_lines.append(", ".join(str(gpu.get(key, "N/A")) for key in (
+            "gpu_index", "gpu_uuid", "name", "total_vram_mib", "memory_used_mib", "memory_free_mib",
+            "gpu_utilization_pct", "memory_utilization_pct", "temperature_c", "power_watts", "pstate"
+        )) + f", 00000000:{gpu['gpu_index'] + 1:02x}:00.0")
+    if not gpu_lines:
+        gpu_lines = ["__SERVERPILOT_GPU_CPU_ONLY__" if snapshot.get("gpu_probe_status") == "cpu_only" else "__SERVERPILOT_GPU_UNAVAILABLE__"]
+    host = snapshot["host"]
+    identity = snapshot["identity"]
+    optional = ""
+    if host.get("cpu_usage_usec") is not None:
+        optional += f"{host.get('cpu_quota_usec') or 'max'} {host.get('cpu_period_usec',100000)} {host['cpu_usage_usec']}\n"
+    if host.get("memory_limit_mib") is not None:
+        optional += f"mem {host['memory_limit_mib'] * 1024**2} {host.get('memory_current_mib',0) * 1024**2}\n"
+    processes = snapshot.get("processes", [])
+    gpu_section = "\n".join(gpu_lines)
+    process_section = "\n".join(f"{p['gpu_uuid']}, {p['pid']}, {p['used_memory_mib']}, {p['executable']}" for p in processes)
+    details = "\n".join(f"{p['pid']} {p.get('username') or 'user'} 10 {p['executable']}" for p in processes)
+    output = (f"__SERVERPILOT_GPU__\n{gpu_section}\n__SERVERPILOT_PROCESSES__\n{process_section}\n"
+              f"__SERVERPILOT_PROCESS_DETAILS__\n{details}\n__SERVERPILOT_IDENTITY__\n{identity['hostname']}\n{identity['boot_id']}\n"
+              f"__SERVERPILOT_HOST_RESOURCES__\n{host['cpu_count']}\n{host['memory_total_mib']} {host['memory_available_mib']}\n"
+              f"{host['load_1m']}\n{host.get('cpu_total_ticks',100)} {host.get('cpu_idle_ticks',50)}\n{optional}")
+    return {"schema_version": 3, "nodes": [{"node_id": "self", "observed_at": snapshot.get("observed_at", datetime.now(UTC).isoformat()), "output": output, "error_code": None, "message": None}],
+            "scheduler": snapshot.get("scheduler"), "allocations": snapshot.get("allocations", []),
+            **({"implementation_version": snapshot["implementation_version"]} if "implementation_version" in snapshot else {})}

@@ -36,6 +36,7 @@ from serverpilot.models import (
     Alert,
     AuditEvent,
     Endpoint,
+    EndpointConnection,
     EndpointDeletion,
     EndpointObservationFact,
     EndpointTelemetryCurrent,
@@ -46,9 +47,11 @@ from serverpilot.models import (
     Lease,
     LeaseEndpointCommitment,
     LeaseResource,
+    NodeObservationState,
     ProcessObservation,
     Project,
     ProviderState,
+    ResourceAllocation,
     Revision,
     RuntimeSetting,
     ServerGroup,
@@ -63,6 +66,7 @@ from serverpilot.schemas import (
     EndpointUpdate,
     LeaseBind,
     LeaseObservedBind,
+    NodeObservation,
     RequestCreate,
     ResourceConstraints,
     ServerGroupCreate,
@@ -197,6 +201,8 @@ class BrokerService:
         # already publishes, kept inside the process instead of being fought
         # out in SQLite's busy handler by whichever threads happen to arrive.
         self._domain_executor: ThreadPoolExecutor | None = None
+        self._provider_operation_locks: dict[str, asyncio.Lock] = {}
+        self._connection_locks: dict[str, asyncio.Lock] = {}
 
     # ---- initialization, identity and transaction primitives -----------------
 
@@ -1095,7 +1101,13 @@ class BrokerService:
             )
             .limit(1)
         )
-        return commitment_lease_id is not None
+        if commitment_lease_id is not None:
+            return True
+        return session.scalar(select(ResourceAllocation.id).where(
+            ResourceAllocation.endpoint_id == endpoint_id,
+            ResourceAllocation.provider_id != "builtin",
+            ResourceAllocation.state.in_(["applying", "unconfirmed", "active", "release_pending"]),
+        ).limit(1)) is not None
 
     def _settle_leases_for_deleted_endpoint(
         self,
@@ -1438,6 +1450,7 @@ class BrokerService:
             "cpu_cores_per_gpu",
             "memory_mib_per_gpu",
             "note",
+            "nodes", "observed_at",
         ):
             if key in capacity:
                 payload[key] = capacity[key]
@@ -1477,6 +1490,7 @@ class BrokerService:
             "cpu_cores_per_gpu",
             "memory_mib_per_gpu",
             "note",
+            "nodes", "observed_at",
         }
         if set(payload) - allowed:
             return None
@@ -1487,6 +1501,13 @@ class BrokerService:
         if not isinstance(name, str) or not name:
             return None
         result: dict[str, Any] = {"free_gpu_count": count, "gpu_name": name}
+        if "observed_at" in payload:
+            try:
+                if _external_datetime(payload["observed_at"]) is None:
+                    return None
+            except (ValueError, TypeError, AttributeError):
+                return None
+            result["observed_at"] = payload["observed_at"]
         if "largest_free_block" in payload:
             largest = payload["largest_free_block"]
             if (
@@ -1514,6 +1535,13 @@ class BrokerService:
             if not isinstance(note, str) or not note:
                 return None
             result["note"] = note
+        if "nodes" in payload:
+            from serverpilot.schemas import scheduler_nodes
+
+            try:
+                result["nodes"] = scheduler_nodes(payload["nodes"])
+            except ValueError:
+                return None
         return result
 
     def _persist_plugin_capacity(
@@ -1525,132 +1553,435 @@ class BrokerService:
         now: datetime,
     ) -> None:
         if capacity is None:
-            from serverpilot.plugins import get_plugin, is_plugin_profile
-
-            fact = session.get(EndpointObservationFact, endpoint.id)
-            if fact is None or fact.plugin_capacity_json is None:
-                return
-            if not is_plugin_profile(endpoint.observation_profile):
-                return
-            plugin = get_plugin(endpoint.observation_profile)
-            if plugin is None or "apply" not in plugin.capabilities:
-                return
-            fact.plugin_capacity_json = None
-            fact.updated_at = now
-            self._forget_observation_fact_if_empty(session, fact)
             return
         self._observation_fact(session, endpoint.id, now=now).plugin_capacity_json = (
             self._encode_plugin_capacity(capacity)
         )
 
+    def _connection_dict(self, session: Session, endpoint: Endpoint) -> dict[str, Any]:
+        from serverpilot.plugins import get_plugin
+
+        plugin = get_plugin(endpoint.observation_profile)
+        supported = plugin is not None and "connect" in plugin.capabilities
+        record = session.get(EndpointConnection, endpoint.id)
+        if record is None:
+            return {"supported": supported, "enabled": False, "state": "unmanaged",
+                    "error_code": None, "message": None, "last_attempt_at": None}
+        return {"supported": supported, "enabled": record.desired, "state": record.state,
+                "error_code": record.error_code, "message": record.message,
+                "last_attempt_at": _iso(record.last_attempt_at), "connected_at": _iso(record.connected_at)}
+
+    async def set_connection(self, actor: ActorContext, endpoint_id: str, *, enabled: bool) -> dict[str, Any]:
+        from serverpilot.plugins import get_plugin
+
+        self._require_role(actor, OPERATOR_ROLES)
+        endpoint = await self.in_domain(self.collector_endpoint, endpoint_id)
+        plugin = await asyncio.to_thread(get_plugin, endpoint.observation_profile)
+        if plugin is None or "connect" not in plugin.capabilities:
+            raise BrokerError("connection_management_unavailable", "此提供方未声明连接管理能力", status_code=409)
+        async with self._connection_locks.setdefault(endpoint_id, asyncio.Lock()):
+            def intent(session: Session) -> None:
+                now = utcnow()
+                record = session.get(EndpointConnection, endpoint_id)
+                if record is None:
+                    record = EndpointConnection(endpoint_id=endpoint_id, updated_at=now)
+                    session.add(record)
+                record.desired = enabled
+                record.state = "connecting" if enabled else "disconnecting"
+                record.error_code = None
+                record.message = None
+                record.updated_at = now
+                self._bump_revision(session, now)
+                self._audit(session, actor_id=actor.id, action="connection.intent", resource_type="endpoint",
+                            resource_id=endpoint_id, result="success", summary={"enabled": enabled}, now=now)
+            await self.in_domain(self._write, intent)
+            await self._run_connection(endpoint_id, plugin.plugin_id, enabled)
+        return await self.in_domain(self.connection_status, actor, endpoint_id)
+
+    def connection_status(self, actor: ActorContext, endpoint_id: str) -> dict[str, Any]:
+        def operation(session: Session) -> dict[str, Any]:
+            endpoint = session.get(Endpoint, endpoint_id)
+            if endpoint is None:
+                raise BrokerError("endpoint_not_found", "找不到服务器", status_code=404)
+            return self.envelope(session, self._connection_dict(session, endpoint))
+        return self._read(operation)
+
+    async def _run_connection(self, endpoint_id: str, plugin_id: str, enabled: bool) -> None:
+        from serverpilot.plugins import PluginError, set_plugin_connection
+
+        def started(session: Session) -> None:
+            record = session.get(EndpointConnection, endpoint_id)
+            record.last_attempt_at = utcnow()
+            record.updated_at = record.last_attempt_at
+        await self.in_domain(self._write, started)
+        try:
+            fact = await asyncio.to_thread(set_plugin_connection, plugin_id, enabled=enabled)
+        except PluginError:
+            # Arbitrary authentication transcripts are never copied into control-plane logs.
+            fact = {"state": "action_required", "error_code": "connection_failed",
+                    "message": "连接操作失败；自动恢复已停止，请检查插件配置后重新连接。"}
+        def finished(session: Session) -> None:
+            record = session.get(EndpointConnection, endpoint_id)
+            now = utcnow()
+            record.state = fact["state"]
+            record.error_code = fact["error_code"]
+            record.message = fact["message"]
+            record.updated_at = now
+            if record.state == "connected":
+                record.connected_at = now
+            self._bump_revision(session, now)
+            self._audit(session, actor_id=SYSTEM_ACTOR_ID, action="connection.result", resource_type="endpoint",
+                        resource_id=endpoint_id, result="success" if record.state in {"connected", "disconnected"} else "failure",
+                        summary={"state": record.state, "error_code": record.error_code}, now=now)
+        await self.in_domain(self._write, finished)
+
+    async def maintain_connections(self) -> None:
+        """The sole owner of automatic session restoration after explicit opt-in."""
+        def due(session: Session) -> list[tuple[str, str]]:
+            rows = []
+            for record in session.scalars(select(EndpointConnection).where(EndpointConnection.desired.is_(True))).all():
+                if record.state == "action_required":
+                    continue
+                endpoint = session.get(Endpoint, record.endpoint_id)
+                failure = session.scalar(select(ProviderState).where(
+                    ProviderState.endpoint_id == endpoint.id, ProviderState.provider == "raw-ssh"
+                ))
+                recover = record.state in {"connecting", "recovering", "network_unavailable"}
+                if record.state == "connected" and failure and failure.last_error_code == "session_missing":
+                    attempted = _as_utc(failure.last_attempt_at)
+                    connected = _as_utc(record.connected_at)
+                    recover = attempted is not None and (connected is None or attempted > connected)
+                if recover:
+                    rows.append((endpoint.id, endpoint.observation_profile))
+            return rows
+        async def restore(endpoint_id: str, profile: str) -> None:
+            lock = self._connection_locks.setdefault(endpoint_id, asyncio.Lock())
+            if lock.locked():
+                return
+            async with lock:
+                await self._run_connection(endpoint_id, profile, True)
+        await asyncio.gather(*(restore(*item) for item in await self.in_domain(self._read, due)))
+
+    def _external_allocations(self, session: Session, endpoint_id: str) -> list[dict[str, Any]]:
+        record = session.get(EndpointObservationFact, endpoint_id)
+        if record is None:
+            return []
+        owned = set(session.scalars(select(ResourceAllocation.allocation_ref).where(
+            ResourceAllocation.endpoint_id == endpoint_id
+        )).all())
+        return [item for item in json_load(record.provider_allocations_json)
+                if item["allocation_ref"] not in owned]
+
+    def _allocations(self, session: Session, lease_id: str) -> list[ResourceAllocation]:
+        return list(session.scalars(select(ResourceAllocation).where(
+            ResourceAllocation.lease_id == lease_id
+        ).order_by(ResourceAllocation.endpoint_id)).all())
+
+    def _allocation_dict(self, allocation: ResourceAllocation, now: datetime) -> dict[str, Any]:
+        confirmed = _as_utc(allocation.confirmed_at)
+        workload_at = _as_utc(allocation.workload_observed_at)
+        window = stale_after_seconds(self.collector.interval_seconds)
+        return {
+            "id": allocation.id, "lease_id": allocation.lease_id,
+            "endpoint_id": allocation.endpoint_id, "provider_id": allocation.provider_id,
+            "allocation_ref": allocation.allocation_ref, "state": allocation.state,
+            "name": allocation.name, "owner": allocation.owner,
+            "accounting": json_load(allocation.accounting_json) if allocation.accounting_json else None,
+            "release_granularity": allocation.release_granularity,
+            "locations": json_load(allocation.locations_json),
+            "entry": json_load(allocation.entry_json) if allocation.entry_json else None,
+            "requested_duration_seconds": allocation.requested_duration_seconds,
+            "expires_at": _iso(allocation.expires_at), "confirmed_at": _iso(confirmed),
+            "fresh": confirmed is not None and 0 <= (now - confirmed).total_seconds() <= window,
+            "workload_observed_at": _iso(workload_at),
+            "workload_fresh": workload_at is not None and 0 <= (now - workload_at).total_seconds() <= window,
+            "last_error": allocation.last_error,
+        }
+
+    def _allocation_idle(self, allocation: ResourceAllocation, now: datetime) -> bool:
+        fact = self._allocation_dict(allocation, now)
+        expected = json_load(allocation.request_json)["constraints"].get("gpu_count", 1)
+        locations = fact["locations"]
+        return (allocation.state == "active" and fact["fresh"] and fact["workload_fresh"]
+                and sum(location["gpu_count"] for location in locations) == expected
+                and all(len(location["devices"]) == location["gpu_count"]
+                        and location.get("running_process_count") == 0
+                        and all(device.get("running_process_count") == 0 for device in location["devices"])
+                        for location in locations))
+
+    def _record_allocation_fact(self, allocation: ResourceAllocation, fact: dict[str, Any], now: datetime) -> None:
+        observed = _external_datetime(fact["observed_at"])
+        previous = _as_utc(allocation.confirmed_at)
+        if observed is None or observed > now + timedelta(seconds=5) or (previous and observed < previous):
+            return
+        allocation.name = fact.get("name")
+        allocation.owner = fact.get("owner")
+        allocation.accounting_json = json_dump(fact["accounting"]) if fact.get("accounting") else None
+        allocation.allocation_ref = fact["allocation_ref"]
+        # A live remote observation does not cancel the user's pending release.
+        if allocation.state != "release_pending" or fact["state"] in {"released", "expired", "failed"}:
+            allocation.state = "unconfirmed" if fact["state"] == "unknown" else fact["state"]
+        if fact["locations"] or not json_load(allocation.locations_json):
+            allocation.locations_json = json_dump(fact["locations"])
+        if fact["entry"] is not None:
+            allocation.entry_json = json_dump(fact["entry"])
+        allocation.expires_at = _external_datetime(fact["expires_at"])
+        allocation.confirmed_at = observed
+        allocation.workload_observed_at = _external_datetime(fact["workload_observed_at"])
+        allocation.updated_at = now
+        if allocation.state != "release_pending":
+            allocation.last_error = None
+
+    def _ingest_allocations(self, session: Session, endpoint: Endpoint, observation: EndpointObservation, now: datetime) -> None:
+        facts = [item.model_dump(mode="json") for item in observation.allocations]
+        nodes = {node.node_id: node for node in observation.nodes if node.observation_complete}
+        capacities = {node["name"]: node["total_gpus"] for node in (observation.scheduler or {}).get("nodes", [])}
+        for fact in facts:
+            complete = bool(fact["locations"]) and fact["state"] == "active"
+            for location in fact["locations"]:
+                node = nodes.get(location["node"])
+                # A whole-node GPU allocation identifies its device set without guessing GRES indices.
+                declared = {device["gpu_uuid"]: device for device in location["devices"]}
+                node_devices = {gpu.gpu_uuid: gpu for gpu in node.gpus} if node else {}
+                if not declared and node and len(node.gpus) == location["gpu_count"] and capacities.get(location["node"]) == location["gpu_count"]:
+                    declared = {uuid: {} for uuid in node_devices}
+                mapped = node is not None and len(declared) == location["gpu_count"] and declared.keys() <= node_devices.keys()
+                location["devices"] = []
+                location["running_process_count"] = None
+                if not mapped or fact["state"] != "active":
+                    location["devices"] = [{**device, "gpu_utilization_pct": None, "memory_used_mib": None,
+                                             "running_process_count": None} for device in declared.values() if device]
+                    complete = False
+                    continue
+                for uuid in declared:
+                    gpu = node_devices[uuid]
+                    pids = {process.pid for process in node.processes if process.gpu_uuid == gpu.gpu_uuid}
+                    location["devices"].append({"gpu_uuid": gpu.gpu_uuid, "physical_index": gpu.gpu_index,
+                        "device_selector": declared[uuid].get("device_selector"), "name": gpu.name, "total_vram_mib": gpu.total_vram_mib,
+                        "memory_used_mib": gpu.memory_used_mib, "gpu_utilization_pct": gpu.gpu_utilization_pct,
+                        "running_process_count": len(pids)})
+                location["running_process_count"] = len({process.pid for process in node.processes if process.gpu_uuid in declared})
+            fact["workload_observed_at"] = _iso(min(nodes[location["node"]].observed_at for location in fact["locations"])) if complete else None
+        self._observation_fact(session, endpoint.id, now=now).provider_allocations_json = json_dump(facts)
+        references = {item["allocation_ref"]: item for item in facts}
+        requests = {item["request_id"]: item for item in facts if item["request_id"]}
+        for allocation in session.scalars(select(ResourceAllocation).where(
+            ResourceAllocation.endpoint_id == endpoint.id,
+            ResourceAllocation.provider_id != "builtin",
+        )).all():
+            fact = references.get(allocation.allocation_ref) or requests.get(allocation.id)
+            if fact is None:
+                # An absent row is not evidence of job completion (query can be partial).
+                allocation.idle_since = None
+                continue
+            self._record_allocation_fact(allocation, fact, now)
+            if allocation.state in {"released", "expired", "failed"} and allocation.lease_id:
+                lease = session.get(Lease, allocation.lease_id)
+                if lease and lease.state in ACTIVE_LEASE_STATES:
+                    self._finish_provider_lease(session, lease, now, f"provider confirmed {allocation.state}")
+
+    def _finish_provider_lease(self, session: Session, lease: Lease, now: datetime, reason: str) -> None:
+        lease.state = "RELEASED"
+        lease.released_at = now
+        lease.release_reason = reason
+        for resource in session.scalars(select(LeaseResource).where(
+            LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+        )).all():
+            resource.active = False
+            resource.released_at = now
+        self._resolve_lease_alerts(session, lease.id, now)
+
+    async def claim_provider(
+        self, actor: ActorContext, request_data: RequestCreate, *,
+        idempotency_key: str | None, persistent_lease: bool,
+    ) -> dict[str, Any] | None:
+        """Apply outside the writer, with durable intent before any remote side effect."""
+        from serverpilot.plugins import PluginError, apply_plugin, get_plugin
+
+        self._require_role(actor, MUTATING_ROLES)
+        constraints = request_data.constraints
+        endpoints = await self.in_domain(self.collector_endpoints)
+        selected = [endpoint for endpoint in endpoints if (
+            (constraints.endpoint_ids == [endpoint.id]) or
+            (not constraints.endpoint_ids and len(constraints.server_group_ids) == 1
+             and endpoint.server_group_id == constraints.server_group_ids[0])
+        ) and endpoint.id not in constraints.deny_endpoint_ids
+          and set(constraints.endpoint_labels).issubset(endpoint.labels)]
+        candidates = []
+        for endpoint in selected:
+            plugin = await asyncio.to_thread(get_plugin, endpoint.observation_profile)
+            if plugin and "apply" in plugin.capabilities:
+                candidates.append((endpoint, plugin))
+        if not candidates:
+            return None
+        if len(candidates) != 1:
+            raise BrokerError("provider_selection_ambiguous", "该组包含多个分配提供方，当前无法唯一选择", status_code=409)
+        endpoint, plugin = candidates[0]
+        maximum = plugin.limits["max_lease_seconds"]
+        if maximum is not None and request_data.duration_seconds > maximum:
+            raise BrokerError("duration_exceeds_provider_limit", "任务时长超过提供方硬时限", status_code=422,
+                              details={"max_lease_seconds": maximum})
+        async with self._provider_operation_locks.setdefault(endpoint.id, asyncio.Lock()):
+            def prepare(session: Session) -> tuple[dict[str, Any] | None, str, bool]:
+                if idempotency_key:
+                    previous = self._idempotent(session, actor=actor, action="request.create", key=idempotency_key)
+                    if previous is not None:
+                        return previous, "", False
+                now = utcnow()
+                project = self._ensure_claim_project(session, request_data.project_id, now)
+                if not project.enabled:
+                    raise BrokerError("project_disabled", "project is disabled", status_code=409)
+                key = idempotency_key or f"task:{request_data.project_id}:{request_data.task_ref}"
+                existing = session.scalar(select(ResourceAllocation).where(
+                    ResourceAllocation.actor_id == actor.id,
+                    ResourceAllocation.request_key == key,
+                    ResourceAllocation.endpoint_id == endpoint.id,
+                ))
+                if existing is None:
+                    for candidate in session.scalars(select(ResourceAllocation).where(
+                        ResourceAllocation.actor_id == actor.id,
+                        ResourceAllocation.endpoint_id == endpoint.id,
+                        ResourceAllocation.state.in_(["applying", "unconfirmed", "active", "release_pending"]),
+                    )).all():
+                        requested = json_load(candidate.request_json)
+                        if (requested.get("project_id"), requested.get("task_ref")) == (request_data.project_id, request_data.task_ref):
+                            existing = candidate
+                            break
+                if existing:
+                    if json_load(existing.request_json) != request_data.model_dump(mode="json"):
+                        raise BrokerError("idempotency_conflict", "同一申请标识对应不同需求", status_code=409)
+                    if existing.lease_id:
+                        lease = session.get(Lease, existing.lease_id)
+                        return {"lease": self._lease_dict(session, lease), "snapshot_revision": self._revision(session)}, "", False
+                    if existing.state in {"failed", "released", "expired"}:
+                        raise BrokerError("allocation_attempt_ended", "这次申请已结束，请使用新的申请标识", status_code=409)
+                    return None, existing.id, False
+                gpu_usage, lease_usage = self._project_usage(session)
+                blocked = self._project_can_allocate(session, project, constraints, gpu_usage, lease_usage)
+                if blocked:
+                    raise BrokerError("no_capacity", blocked, status_code=409)
+                allocation = ResourceAllocation(
+                    id=secrets.token_hex(16), endpoint_id=endpoint.id, provider_id=plugin.plugin_id,
+                    actor_id=actor.id, request_key=key, request_json=json_dump(request_data.model_dump(mode="json")),
+                    state="applying", release_granularity=plugin.release_granularity,
+                    requested_duration_seconds=request_data.duration_seconds, created_at=now, updated_at=now,
+                )
+                session.add(allocation)
+                self._bump_revision(session, now)
+                return None, allocation.id, True
+            previous, allocation_id, first_attempt = await self.in_domain(self._write, prepare)
+            if previous is not None:
+                return previous
+            if not first_attempt:
+                # Look up the original remote outcome through the read-only verb.
+                from serverpilot.collector import parse_server_script_snapshot
+                from serverpilot.plugins import observe_plugin
+                try:
+                    raw = await asyncio.to_thread(observe_plugin, plugin.plugin_id)
+                    observed = parse_server_script_snapshot(raw, endpoint_id=endpoint.id, observed_at=utcnow())
+                    await self.in_domain(self.ingest_observation, observed)
+                except (PluginError, ValueError) as exc:
+                    raise BrokerError("allocation_unconfirmed", "原申请结果待确认，未再次申请", status_code=409,
+                                      details={"allocation_id": allocation_id}) from exc
+                def recovered(session: Session) -> dict[str, Any] | None:
+                    allocation = session.get(ResourceAllocation, allocation_id)
+                    if allocation and allocation.state == "active" and allocation.entry_json:
+                        return self._allocation_dict(allocation, utcnow())
+                    return None
+                fact = await self.in_domain(self._read, recovered)
+                if fact is None:
+                    raise BrokerError("allocation_unconfirmed", "原申请结果待确认，未再次申请", status_code=409,
+                                      details={"allocation_id": allocation_id})
+            else:
+                try:
+                    fact = await asyncio.to_thread(
+                        apply_plugin, plugin.plugin_id, gpu_count=constraints.gpu_count,
+                        task_ref=request_data.task_ref, duration_seconds=request_data.duration_seconds,
+                        request_id=allocation_id, requirements=constraints.model_dump(mode="json"),
+                    )
+                except PluginError as exc:
+                    error_text = str(exc)[:1500]
+                    rejected = exc.no_capacity or exc.code == "invalid_request"
+                    def failed(session: Session) -> None:
+                        allocation = session.get(ResourceAllocation, allocation_id)
+                        allocation.state = "failed" if rejected else "unconfirmed"
+                        allocation.last_error = error_text
+                        allocation.updated_at = utcnow()
+                        self._bump_revision(session, allocation.updated_at)
+                    await self.in_domain(self._write, failed)
+                    raise BrokerError("no_capacity" if exc.no_capacity else "invalid_request" if rejected else "allocation_unconfirmed", str(exc),
+                                      status_code=409, details={"allocation_id": allocation_id}) from exc
+                def remember(session: Session) -> None:
+                    self._record_allocation_fact(session.get(ResourceAllocation, allocation_id), fact, utcnow())
+                    self._bump_revision(session, utcnow())
+                await self.in_domain(self._write, remember)
+            def finish(session: Session) -> dict[str, Any]:
+                allocation = session.get(ResourceAllocation, allocation_id)
+                now = utcnow()
+                revision = self._bump_revision(session, now)
+                lease = Lease(
+                    id=secrets.token_hex(16), actor_id=actor.id, project_id=request_data.project_id,
+                    kind="workload", task_ref=request_data.task_ref, purpose=request_data.purpose,
+                    constraints_json=json_dump(constraints.model_dump(mode="json")),
+                    duration_seconds=request_data.duration_seconds, state="HELD", issued_at=now,
+                    expires_at=allocation.expires_at, last_heartbeat_at=now, issued_revision=revision,
+                )
+                session.add(lease)
+                session.flush()
+                allocation.lease_id = lease.id
+                session.flush()
+                event = self._audit(session, actor_id=actor.id, action="lease.issued", resource_type="lease",
+                                    resource_id=lease.id, result="success", after=self._lease_dict(session, lease),
+                                    summary={"allocation_id": allocation.id}, now=now)
+                result = {"event_id": event.id, "snapshot_revision": revision, "lease": self._lease_dict(session, lease),
+                          "authority": "分配已建立；请按分配的进入方式运行，ServerPilot 不启动任务。"}
+                if idempotency_key:
+                    self._remember_idempotency(session, actor=actor, action="request.create", key=idempotency_key,
+                                               response=result, now=now)
+                return result
+            return await self.in_domain(self._write, finish)
+
     @staticmethod
     def _lease_constraints(lease: Lease) -> ResourceConstraints:
-        payload = json_load(lease.constraints_json)
-        if isinstance(payload, dict):
-            payload = {key: value for key, value in payload.items() if key != "plugin_allocation"}
-        return ResourceConstraints.model_validate(payload)
+        return ResourceConstraints.model_validate(json_load(lease.constraints_json))
 
-    @staticmethod
-    def _plugin_allocation_payload(lease: Lease) -> dict[str, str] | None:
-        constraints = json_load(lease.constraints_json)
-        if not isinstance(constraints, dict):
+    def _plugin_allocation_payload(self, session: Session, lease: Lease) -> dict[str, str] | None:
+        allocation = session.scalar(select(ResourceAllocation).where(
+            ResourceAllocation.lease_id == lease.id, ResourceAllocation.provider_id != "builtin",
+        ))
+        if allocation is None or allocation.allocation_ref is None:
             return None
-        allocation = constraints.get("plugin_allocation")
-        if not isinstance(allocation, dict):
-            return None
-        plugin_id = allocation.get("plugin_id")
-        allocation_ref = allocation.get("allocation_ref")
-        if isinstance(plugin_id, str) and isinstance(allocation_ref, str):
-            return {"plugin_id": plugin_id, "allocation_ref": allocation_ref}
-        return None
+        return {"id": allocation.id, "plugin_id": allocation.provider_id,
+                "allocation_ref": allocation.allocation_ref}
 
     def _release_plugin_allocations(self, allocations: list[dict[str, str]]) -> None:
-        """Release cluster allocations, then record any the plugin would not give up.
-
-        This is the automatic path: idle reclaim and purging during observation,
-        where no caller is waiting to be told. An explicit release refuses with
-        ``plugin_release_failed`` instead, but reclaim cannot refuse, so a
-        failure here drops the last local reference to a job still running
-        against the user's cluster quota. There is no logger in this service, so
-        the audit trail is the only place a human or an agent can find the leak.
-
-        Every entry is still attempted: one uncooperative plugin must not keep
-        the other allocations alive.
-        """
-
         from serverpilot.plugins import PluginError, release_plugin
 
-        seen: set[tuple[str, str]] = set()
-        failures: list[tuple[str, str, str]] = []
-        for allocation in allocations:
-            plugin_id = allocation.get("plugin_id")
-            allocation_ref = allocation.get("allocation_ref")
-            if not isinstance(plugin_id, str) or not isinstance(allocation_ref, str):
-                continue
-            key = (plugin_id, allocation_ref)
-            if key in seen:
-                continue
-            seen.add(key)
+        for allocation in {item["id"]: item for item in allocations}.values():
+            error = None
             try:
-                release_plugin(plugin_id, allocation_ref=allocation_ref)
-            except PluginError as error:
-                failures.append((plugin_id, allocation_ref, str(error)))
-        if failures:
-            self._record_plugin_release_failures(failures)
-
-    def _record_plugin_release_failures(self, failures: list[tuple[str, str, str]]) -> None:
-        def operation(session: Session) -> None:
-            now = utcnow()
-            for plugin_id, allocation_ref, reason in failures:
-                self._audit(
-                    session,
-                    actor_id=SYSTEM_ACTOR_ID,
-                    action="plugin.release_failed",
-                    resource_type="cluster",
-                    resource_id=allocation_ref,
-                    result="failure",
-                    summary={"plugin_id": plugin_id, "reason": reason},
-                    now=now,
-                )
-
-        self._write(operation)
-
-    def _purge_unobserved_plugin_gpus(
-        self,
-        session: Session,
-        *,
-        endpoint: Endpoint,
-        observed_gpu_ids: set[str],
-        now: datetime,
-    ) -> int:
-        from serverpilot.plugins import get_plugin, is_plugin_profile
-
-        if not is_plugin_profile(endpoint.observation_profile):
-            return 0
-        plugin = get_plugin(endpoint.observation_profile)
-        if plugin is None or "apply" not in plugin.capabilities:
-            return 0
-        prior_gpus = session.scalars(
-            select(GPUDevice).where(GPUDevice.endpoint_id == endpoint.id)
-        ).all()
-        removed = 0
-        for gpu in prior_gpus:
-            if gpu.id in observed_gpu_ids:
-                continue
-            resources = session.scalars(
-                select(LeaseResource).where(LeaseResource.gpu_id == gpu.id)
-            ).all()
-            if any(resource.active for resource in resources):
-                if gpu.present:
-                    gpu.present = False
-                    gpu.absent_at = now
-                continue
-            for resource in resources:
-                session.delete(resource)
-            session.flush()
-            session.delete(gpu)
-            removed += 1
-        return removed
+                release_plugin(allocation["plugin_id"], allocation_ref=allocation["allocation_ref"])
+            except PluginError as exc:
+                error = str(exc)
+            def finish(session: Session, allocation=allocation, error=error) -> None:
+                record = session.get(ResourceAllocation, allocation["id"])
+                if record is None:
+                    return
+                now = utcnow()
+                record.updated_at = now
+                record.last_error = error
+                record.state = "release_pending" if error else "released"
+                if not error:
+                    record.confirmed_at = now
+                    lease = session.get(Lease, record.lease_id) if record.lease_id else None
+                    if lease and lease.state in ACTIVE_LEASE_STATES:
+                        self._finish_provider_lease(session, lease, now, "provider release confirmed")
+                self._bump_revision(session, now)
+                self._audit(session, actor_id=SYSTEM_ACTOR_ID, action="allocation.release",
+                            resource_type="allocation", resource_id=record.id,
+                            result="failure" if error else "success",
+                            summary={"state": record.state, "error": error}, now=now)
+            self._write(finish)
 
     @staticmethod
     def _endpoint_dict(
@@ -1703,6 +2034,40 @@ class BrokerService:
             scheduler_capacity=scheduler_capacity,
             server_groups=groups,
         )
+
+    def _sync_direct_allocations(self, session: Session, lease: Lease, gpus: list[GPUDevice], now: datetime) -> None:
+        existing = {item.endpoint_id: item for item in self._allocations(session, lease.id)
+                    if item.provider_id == "builtin"}
+        endpoint_ids = {gpu.endpoint_id for gpu in gpus}
+        for endpoint_id in endpoint_ids | set(existing):
+            endpoint = session.get(Endpoint, endpoint_id)
+            devices = [gpu for gpu in gpus if gpu.endpoint_id == endpoint_id]
+            allocation = existing.get(endpoint_id)
+            if allocation is None:
+                allocation = ResourceAllocation(
+                    id=secrets.token_hex(16), lease_id=lease.id, endpoint_id=endpoint_id,
+                    provider_id="builtin", actor_id=lease.actor_id, request_key=lease.id,
+                    allocation_ref=lease.id, release_granularity="device",
+                    requested_duration_seconds=lease.duration_seconds, created_at=now, updated_at=now,
+                    request_json=json_dump({"project_id": lease.project_id, "task_ref": lease.task_ref,
+                                            "duration_seconds": lease.duration_seconds,
+                                            "constraints": json_load(lease.constraints_json)}),
+                )
+                session.add(allocation)
+            allocation.state = "active" if devices else "released"
+            allocation.updated_at = now
+            allocation.confirmed_at = now
+            allocation.expires_at = lease.expires_at
+            allocation.locations_json = json_dump([{"node": endpoint.host, "gpu_count": len(devices), "devices": [
+                {"gpu_uuid": gpu.gpu_uuid, "physical_index": gpu.gpu_index,
+                 "device_selector": str(gpu.cuda_ordinal) if gpu.cuda_ordinal is not None else None,
+                 "name": gpu.name, "total_vram_mib": gpu.total_vram_mib} for gpu in devices
+            ]}]) if devices else "[]"
+            allocation.entry_json = json_dump({"kind": "ssh", "host": endpoint.host, "port": endpoint.port,
+                "user": endpoint.ssh_user, "workspace_path": self._endpoint_effective_workspace(session, endpoint),
+                "argv": [], "verified": True,
+                "instructions": "通过 SSH 进入主机和工作目录，按分配结果设置 CUDA_DEVICE_ORDER 与 CUDA_VISIBLE_DEVICES。"})
+        session.flush()
 
     def _lease_dict(
         self,
@@ -1808,29 +2173,40 @@ class BrokerService:
                         },
                     }
                 )
-        allocation = None
-        constraints = json_load(lease.constraints_json)
-        if isinstance(constraints, dict) and isinstance(
-            constraints.get("plugin_allocation"), dict
-        ):
-            allocation = constraints["plugin_allocation"]
-        if allocation:
-            ssh = allocation.get("ssh") if isinstance(allocation.get("ssh"), dict) else {}
-            for resource in executable_resources:
-                endpoint_payload = resource.get("endpoint")
-                if isinstance(endpoint_payload, dict):
-                    if isinstance(allocation.get("workspace_path"), str):
-                        endpoint_payload["workspace_path"] = allocation["workspace_path"]
-                    if isinstance(ssh.get("host"), str):
-                        endpoint_payload["host"] = ssh["host"]
-                    if type(ssh.get("port")) is int:
-                        endpoint_payload["port"] = ssh["port"]
-                    if isinstance(ssh.get("user"), str):
-                        endpoint_payload["ssh_user"] = ssh["user"]
-                if isinstance(allocation.get("cuda_visible_devices"), str):
-                    resource["cuda_visible_devices"] = allocation["cuda_visible_devices"]
+        allocations = [self._allocation_dict(item, utcnow()) for item in self._allocations(session, lease.id)]
+        for allocation in allocations:
+            if allocation["provider_id"] == "builtin":
+                allocation["state"] = "released" if lease.state in TERMINAL_LEASE_STATES else "active"
+                endpoint_id = allocation["endpoint_id"]
+                endpoint = session.get(Endpoint, endpoint_id)
+                held = [gpu for gpu in gpu_by_id.values() if gpu.endpoint_id == endpoint_id]
+                if not held:
+                    allocation["state"] = "released"
+                allocation["locations"] = [{"node": endpoint.host, "gpu_count": len(held), "devices": [
+                    {"gpu_uuid": gpu.gpu_uuid, "physical_index": gpu.gpu_index,
+                     "device_selector": str(gpu.cuda_ordinal) if gpu.cuda_ordinal is not None else None,
+                     "name": gpu.name, "total_vram_mib": gpu.total_vram_mib} for gpu in held
+                ]}] if endpoint and held else []
+                allocation["expires_at"] = _iso(lease.expires_at)
+                provider_state = session.scalar(select(ProviderState).where(
+                    ProviderState.endpoint_id == endpoint_id, ProviderState.provider == "raw-ssh"))
+                freshness = self._freshness(provider_state, utcnow())
+                allocation["fresh"] = freshness.fresh
+                allocation["confirmed_at"] = _iso(freshness.observed_at)
+                continue
+            entry = allocation["entry"]
+            executable_resources.append({
+                "endpoint": {"id": allocation["endpoint_id"],
+                             "host": entry["host"] if entry else None,
+                             "port": entry["port"] if entry else None,
+                             "ssh_user": entry["user"] if entry else None,
+                             "workspace_path": entry["workspace_path"] if entry else None},
+                "allocation_id": allocation["id"], "entry": entry,
+                "locations": allocation["locations"], "gpus": [],
+            })
         return {
             "id": lease.id,
+            "allocations": allocations,
             "actor_id": lease.actor_id,
             "project_id": lease.project_id,
             "kind": lease.kind,
@@ -1847,7 +2223,7 @@ class BrokerService:
             "issued_revision": lease.issued_revision,
             "task_ref": lease.task_ref,
             "purpose": lease.purpose,
-            "constraints": constraints,
+            "constraints": json_load(lease.constraints_json),
             "duration_seconds": lease.duration_seconds,
             "workloads": (
                 []
@@ -2070,11 +2446,21 @@ class BrokerService:
         *,
         observed_at: datetime,
         cpu_count: int,
+        cpu_total_ticks: int | None,
+        cpu_idle_ticks: int | None,
         cpu_usage_usec: int | None,
         cpu_quota_usec: int | None,
         cpu_period_usec: int | None,
     ) -> float | None:
         previous_observed_at = _as_utc(previous.observed_at) if previous is not None else None
+        if cpu_quota_usec is None and previous is not None:
+            values = (cpu_total_ticks, cpu_idle_ticks, previous.cpu_total_ticks, previous.cpu_idle_ticks)
+            if all(value is not None for value in values):
+                total = cpu_total_ticks - previous.cpu_total_ticks
+                idle = cpu_idle_ticks - previous.cpu_idle_ticks
+                if total > 0 and 0 <= idle <= total:
+                    return round(100 * (total - idle) / total, 2)
+                return None
         if (
             previous is None
             or previous_observed_at is None
@@ -2098,7 +2484,7 @@ class BrokerService:
         return round(used_cores / quota_cores * 100, 2)
 
     def _advance_process_absence(
-        self, session: Session, *, endpoint_id: str, complete: bool, now: datetime
+        self, session: Session, *, endpoint_id: str, node_id: str, complete: bool, now: datetime
     ) -> None:
         """Move this endpoint's absence clock, and retire what has run it out.
 
@@ -2117,8 +2503,9 @@ class BrokerService:
         """
 
         active = session.scalars(
-            select(ProcessObservation).where(
+            select(ProcessObservation).join(GPUDevice, GPUDevice.id == ProcessObservation.gpu_id).where(
                 ProcessObservation.endpoint_id == endpoint_id,
+                GPUDevice.node_id == node_id,
                 ProcessObservation.active.is_(True),
             )
         ).all()
@@ -2199,7 +2586,7 @@ class BrokerService:
         """Require one post-operation endpoint snapshot covering every leased GPU."""
 
         threshold = ensure_utc(observation_not_before)
-        host = session.get(EndpointTelemetryCurrent, endpoint_id)
+        host = session.get(EndpointTelemetryCurrent, (endpoint_id, "self"))
         host_observed_at = _as_utc(host.observed_at) if host is not None else None
         host_collected_at = _as_utc(host.collected_at) if host is not None else None
         provider_state = session.scalar(
@@ -2583,7 +2970,7 @@ class BrokerService:
 
     @staticmethod
     def _gpu_payload_is_publicly_available(gpu: dict[str, Any]) -> bool:
-        return gpu.get("state") in {"AVAILABLE", "KEEPALIVE"}
+        return gpu.get("allocation_kind") != "delegated" and gpu.get("state") in {"AVAILABLE", "KEEPALIVE"}
 
     @classmethod
     def _gpu_public_projection(
@@ -2613,6 +3000,8 @@ class BrokerService:
             status = "归属冲突"
         elif gpu.get("state") in {"BUSY_UNMANAGED", "ORPHANED_BUSY"}:
             status = "未归属占用"
+        elif gpu.get("state") == "SCHEDULER_MANAGED":
+            status = "需调度申请"
         elif gpu.get("state") == "RUNNING_MANAGED":
             status = "任务占用"
         elif gpu.get("state") in {"HELD", "LEASED_IDLE"}:
@@ -3452,7 +3841,14 @@ class BrokerService:
             .limit(1)
         )
 
+    def _node_observation_error(self, session: Session, gpu: GPUDevice) -> str | None:
+        state = session.get(NodeObservationState, (gpu.endpoint_id, gpu.node_id))
+        return state.message or state.error_code if state and state.error_code else None
+
     def _gpu_state(self, session: Session, gpu: GPUDevice, now: datetime) -> tuple[str, str | None]:
+        node_error = self._node_observation_error(session, gpu)
+        if node_error:
+            return "UNKNOWN_STALE", node_error
         if not gpu.present:
             return "UNKNOWN_STALE", "GPU absent from latest complete endpoint observation"
         telemetry = self._latest_telemetry(session, gpu.id)
@@ -3485,6 +3881,11 @@ class BrokerService:
             return "BUSY_UNMANAGED", "compute process observed; admission blocked"
         if lease is not None:
             return ("HELD" if lease.state == "HELD" else "LEASED_IDLE"), "exclusive lease active"
+        from serverpilot.plugins import get_plugin
+        endpoint = session.get(Endpoint, gpu.endpoint_id)
+        plugin = get_plugin(endpoint.observation_profile) if endpoint else None
+        if plugin is not None and "apply" in plugin.capabilities:
+            return "SCHEDULER_MANAGED", "resource admission is owned by the provider"
         return "AVAILABLE", None
 
     @staticmethod
@@ -3516,6 +3917,41 @@ class BrokerService:
             "data": data,
         }
 
+    def _resource_node_snapshots(self, session: Session, endpoint: Endpoint,
+                                 gpus: list[dict[str, Any]], now: datetime) -> list[dict[str, Any]]:
+        hosts = {host.node_id: host for host in session.scalars(select(EndpointTelemetryCurrent).where(
+            EndpointTelemetryCurrent.endpoint_id == endpoint.id)).all()}
+        states = {state.node_id: state for state in session.scalars(select(NodeObservationState).where(
+            NodeObservationState.endpoint_id == endpoint.id)).all()}
+        result = []
+        from serverpilot.plugins import get_plugin
+        plugin = get_plugin(endpoint.observation_profile)
+        delegated = plugin is not None and "apply" in plugin.capabilities
+        for node_id in sorted(set(hosts) | set(states)):
+            if delegated and node_id == "self":
+                continue
+            host, state = hosts.get(node_id), states.get(node_id)
+            at = _as_utc(state.last_success_at) if state else None
+            fresh = bool(at and 0 <= (now - at).total_seconds() <= self.collector.stale_after_seconds
+                         and state.error_code is None)
+            cards = [gpu for gpu in gpus if gpu["node_id"] == node_id and gpu["present"]]
+            sampled = [gpu for gpu in cards if gpu["telemetry"] is not None]
+            gpu_complete = fresh and len(sampled) == len(cards) and bool(cards)
+            utils = [gpu["telemetry"]["gpu_utilization_pct"] for gpu in sampled]
+            total_vram = sum(gpu["total_vram_mib"] for gpu in sampled)
+            usage = {
+                "gpu_utilization_pct": sum(utils) / len(utils) if gpu_complete and all(x is not None for x in utils) else None,
+                "gpu_memory_used_pct": 100 * sum(gpu["telemetry"]["memory_used_mib"] for gpu in sampled) / total_vram if gpu_complete and total_vram else None,
+                "cpu_utilization_pct": host.cpu_utilization_pct if fresh and host else None,
+                "memory_used_pct": self._host_memory_used_pct(host) if fresh and host else None,
+            }
+            result.append({"node_id": node_id, "observed_at": _iso(at), "fresh": fresh,
+                "last_attempt_at": _iso(_as_utc(state.last_attempt_at)) if state else None,
+                "error_code": state.error_code if state else None, "message": state.message if state else None,
+                "host_telemetry": self._host_telemetry_dict(host),
+                "gpu_ids": [gpu["id"] for gpu in cards], "usage": usage})
+        return result
+
     def snapshot(
         self,
         actor: ActorContext,
@@ -3529,6 +3965,9 @@ class BrokerService:
             now = utcnow()
             groups = self._server_groups_by_id(session)
             endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
+            from serverpilot.plugins import get_plugin
+            delegated_ids = {endpoint.id for endpoint in endpoints
+                if (plugin := get_plugin(endpoint.observation_profile)) is not None and "apply" in plugin.capabilities}
             provider_states = {
                 provider_state.endpoint_id: provider_state
                 for provider_state in session.scalars(
@@ -3547,7 +3986,8 @@ class BrokerService:
                     item.endpoint_id: item
                     for item in session.scalars(
                         select(EndpointTelemetryCurrent).where(
-                            EndpointTelemetryCurrent.endpoint_id.in_(visible_ids)
+                            EndpointTelemetryCurrent.endpoint_id.in_(visible_ids),
+                            EndpointTelemetryCurrent.node_id == "self",
                         )
                     ).all()
                 }
@@ -3563,6 +4003,7 @@ class BrokerService:
                     select(EndpointTelemetrySnapshot)
                     .where(
                         EndpointTelemetrySnapshot.endpoint_id.in_(visible_ids),
+                        EndpointTelemetrySnapshot.node_id == "self",
                         EndpointTelemetrySnapshot.observed_at >= recent_cutoff,
                     )
                     .order_by(
@@ -3709,6 +4150,9 @@ class BrokerService:
 
             def endpoint_snapshot(endpoint: Endpoint) -> dict[str, Any]:
                 provider_state = provider_states.get(endpoint.id)
+                capacity = self._decode_plugin_capacity(plugin_capacity_values.get(endpoint.id)) or {}
+                capacity_at = _external_datetime(capacity.get("observed_at"))
+                capacity_fresh = capacity_at is not None and 0 <= (now - capacity_at).total_seconds() <= self.collector.stale_after_seconds
                 freshness = self._freshness(provider_state, now)
                 if (
                     freshness.error_detail == "incomplete endpoint observation"
@@ -3722,7 +4166,7 @@ class BrokerService:
                     monitor_status = "ONLINE"
                 else:
                     monitor_status = freshness.status
-                host_telemetry = host_telemetry_by_endpoint.get(endpoint.id)
+                host_telemetry = host_telemetry_by_endpoint.get(endpoint.id) if endpoint.id not in delegated_ids else None
                 host_telemetry_payload = self._host_telemetry_dict(host_telemetry)
                 if host_telemetry_payload is not None:
                     host_telemetry_payload["recent_average"] = self._recent_host_telemetry_average(
@@ -3731,8 +4175,10 @@ class BrokerService:
                 return {
                     **self._endpoint_dict(
                         endpoint,
-                        scheduler_capacity=self._decode_plugin_capacity(
-                            plugin_capacity_values.get(endpoint.id)
+                        scheduler_capacity=(
+                            {key: value for key, value in capacity.items() if key != "nodes"}
+                            if freshness.fresh and capacity_fresh
+                            else None
                         ),
                         server_groups=groups,
                     ),
@@ -3740,6 +4186,10 @@ class BrokerService:
                     # busy sibling GPU never invalidates an independent
                     # keepalive worker.
                     "keepalive": self._keepalive_aggregate(endpoint, (), eligible_idle_gpu_count=0),
+                    "connection": self._connection_dict(session, endpoint),
+                    "nodes": [{**node, "gpu_name": capacity.get("gpu_name")} for node in capacity.get("nodes", [])],
+                    "nodes_observed_at": _iso(capacity_at),
+                    "external_allocations": self._external_allocations(session, endpoint.id),
                     "host_telemetry": host_telemetry_payload,
                     "monitor": {
                         "status": monitor_status,
@@ -3770,6 +4220,9 @@ class BrokerService:
             endpoint_payloads = [endpoint_snapshot(endpoint) for endpoint in visible_endpoints]
 
             def derive_state(gpu: GPUDevice) -> tuple[str, str | None]:
+                node_error = self._node_observation_error(session, gpu)
+                if node_error:
+                    return "UNKNOWN_STALE", node_error
                 if not gpu.present:
                     return "UNKNOWN_STALE", "GPU absent from latest complete endpoint observation"
                 telemetry = telemetry_by_gpu.get(gpu.id)
@@ -3806,6 +4259,8 @@ class BrokerService:
                     return (
                         "HELD" if lease.state == "HELD" else "LEASED_IDLE"
                     ), "exclusive lease active"
+                if gpu.endpoint_id in delegated_ids:
+                    return "SCHEDULER_MANAGED", "resource admission is owned by the provider"
                 return "AVAILABLE", None
 
             gpu_payloads: list[dict[str, Any]] = []
@@ -3848,11 +4303,13 @@ class BrokerService:
                 payload = {
                     "id": gpu.id,
                     "endpoint_id": gpu.endpoint_id,
+                    "node_id": gpu.node_id,
                     "gpu_uuid": gpu.gpu_uuid,
                     "gpu_index": gpu.gpu_index,
                     "cuda_ordinal": gpu.cuda_ordinal,
                     "name": gpu.name,
                     "total_vram_mib": gpu.total_vram_mib,
+                    "allocation_kind": "delegated" if endpoint.id in delegated_ids else "direct",
                     "labels": json_load(gpu.labels_json),
                     "health": gpu.health,
                     "present": gpu.present,
@@ -3902,6 +4359,8 @@ class BrokerService:
                 endpoint_gpu_payloads = [
                     item for item in gpu_payloads if item["endpoint_id"] == endpoint_id_value
                 ]
+                endpoint_payload["resource_nodes"] = self._resource_node_snapshots(
+                    session, endpoint, endpoint_gpu_payloads, now)
                 endpoint_payload["keepalive"] = self._keepalive_aggregate(
                     endpoint,
                     [
@@ -3997,6 +4456,12 @@ class BrokerService:
                 payload["runtime_state"] = (
                     "RUNNING" if lease_id in running_lease_ids else "ASSIGNED"
                 )
+                delegated = [item for item in payload["allocations"] if item["provider_id"] != "builtin"]
+                if delegated:
+                    known = all(item["workload_fresh"] for item in delegated)
+                    running = any(location.get("running_process_count", 0) for item in delegated
+                                  for location in item["locations"])
+                    payload["runtime_state"] = "UNKNOWN" if not known else "RUNNING" if running else "ASSIGNED"
                 payload["last_process_observed_at"] = _iso(last_process_by_lease[lease_id])
                 payload["manual_release"] = self._manual_release_verdict(
                     session,
@@ -4223,7 +4688,8 @@ class BrokerService:
                 if any(
                     resource.active and resource.gpu_id in visible_gpu_ids
                     for resource in resources_by_lease[lease.id]
-                )
+                ) or any(item["endpoint_id"] in visible_ids and item["provider_id"] != "builtin"
+                         for item in lease_payloads[lease.id]["allocations"])
             ]
             resource_usage_revision = str(self._revision(session))
             active_host_capacity = [
@@ -4340,6 +4806,13 @@ class BrokerService:
                 "gpus": gpu_payloads,
                 "absent_gpu_ids": absent_gpu_ids,
                 "leases": visible_lease_payloads,
+                "pending_allocations": [
+                    {**self._allocation_dict(item, now), "request": json_load(item.request_json)}
+                    for item in session.scalars(select(ResourceAllocation).where(
+                        ResourceAllocation.lease_id.is_(None),
+                        ResourceAllocation.state.in_(["applying", "unconfirmed", "active", "release_pending"]),
+                    )).all() if item.endpoint_id in visible_ids
+                ],
                 "alerts": alert_payloads,
                 "host_capacity": host_capacity_payloads,
                 "resource_usage_revision": resource_usage_revision,
@@ -4467,6 +4940,7 @@ class BrokerService:
                     select(EndpointTelemetrySnapshot)
                     .where(
                         EndpointTelemetrySnapshot.endpoint_id == endpoint_id,
+                        EndpointTelemetrySnapshot.node_id == "self",
                         EndpointTelemetrySnapshot.observed_at >= cutoff,
                     )
                     .order_by(
@@ -4475,7 +4949,7 @@ class BrokerService:
                     )
                 ).all()
             )
-            current = session.get(EndpointTelemetryCurrent, endpoint_id)
+            current = session.get(EndpointTelemetryCurrent, (endpoint_id, "self"))
             current_observed_at = _as_utc(current.observed_at) if current is not None else None
             if (
                 current is not None
@@ -4848,6 +5322,358 @@ class BrokerService:
             revision = self._bump_revision(session, now)
         return revision
 
+    def _ingest_node_observation(
+        self, session: Session, endpoint: Endpoint, observation: NodeObservation,
+        *, now: datetime, provider: str, revision: int,
+    ) -> dict[str, Any]:
+        observed_gpu_ids = {f"{endpoint.id}:{sample.gpu_uuid}" if observation.node_id == "self" else f"{endpoint.id}:{observation.node_id}:{sample.gpu_uuid}" for sample in observation.gpus}
+        observed_at = ensure_utc(observation.observed_at)
+        host_telemetry = session.get(EndpointTelemetryCurrent, (endpoint.id, observation.node_id))
+        current_observed_at = _as_utc(host_telemetry.observed_at) if host_telemetry else None
+        if current_observed_at is not None and observed_at < current_observed_at:
+            return {
+                "event_id": None,
+                "snapshot_revision": self._revision(session),
+                "endpoint_id": endpoint.id,
+                "gpu_count": len(observation.gpus),
+                "absent_gpu_count": 0,
+                "observation_complete": observation.observation_complete,
+                "process_count": len(observation.processes),
+                "history_points_written": 0,
+                "endpoint_history_points_written": 0,
+                "ignored": True,
+                "ignore_reason": "stale_observation",
+                "current_observed_at": _iso(current_observed_at),
+            }
+        if observation.gpu_probe_status == "cpu_only":
+            endpoint.resource_kind = "cpu_only"
+            endpoint.updated_at = now
+        elif observation.gpus:
+            endpoint.resource_kind = "gpu"
+            endpoint.updated_at = now
+        host_cpu_total_ticks = observation.host.cpu_total_ticks
+        host_cpu_idle_ticks = observation.host.cpu_idle_ticks
+        host_cpu_usage_usec = observation.host.cpu_usage_usec
+        host_cpu_quota_usec = observation.host.cpu_quota_usec
+        host_cpu_period_usec = observation.host.cpu_period_usec
+        host_cpu_utilization_pct = self._host_cpu_utilization_pct(
+            host_telemetry if host_telemetry and host_telemetry.boot_id == observation.boot_id else None,
+            cpu_total_ticks=host_cpu_total_ticks, cpu_idle_ticks=host_cpu_idle_ticks,
+            observed_at=observed_at,
+            cpu_count=observation.host.cpu_count,
+            cpu_usage_usec=host_cpu_usage_usec,
+            cpu_quota_usec=host_cpu_quota_usec,
+            cpu_period_usec=host_cpu_period_usec,
+        )
+        latest_endpoint_history_at = _as_utc(
+            session.scalar(
+                select(func.max(EndpointTelemetrySnapshot.observed_at)).where(
+                    EndpointTelemetrySnapshot.endpoint_id == endpoint.id,
+                    EndpointTelemetrySnapshot.node_id == observation.node_id,
+                )
+            )
+        )
+        endpoint_history_points_written = 0
+        if (
+            latest_endpoint_history_at is None
+            or (observed_at - latest_endpoint_history_at).total_seconds()
+            >= TELEMETRY_HISTORY_INTERVAL_SECONDS
+        ):
+            session.add(
+                EndpointTelemetrySnapshot(
+                    endpoint_id=endpoint.id, node_id=observation.node_id, boot_id=observation.boot_id,
+                    observed_at=observed_at,
+                    collected_at=now,
+                    cpu_count=observation.host.cpu_count,
+                    load_1m=observation.host.load_1m,
+                    cpu_total_ticks=host_cpu_total_ticks,
+                    cpu_idle_ticks=host_cpu_idle_ticks,
+                    cpu_usage_usec=host_cpu_usage_usec,
+                    cpu_quota_usec=host_cpu_quota_usec,
+                    cpu_period_usec=host_cpu_period_usec,
+                    cpu_utilization_pct=host_cpu_utilization_pct,
+                    memory_total_mib=observation.host.memory_total_mib,
+                    memory_available_mib=observation.host.memory_available_mib,
+                    memory_limit_mib=observation.host.memory_limit_mib,
+                    memory_current_mib=observation.host.memory_current_mib,
+                    provider=provider,
+                )
+            )
+            endpoint_history_points_written = 1
+        if host_telemetry is None:
+            host_telemetry = EndpointTelemetryCurrent(
+                endpoint_id=endpoint.id, node_id=observation.node_id, boot_id=observation.boot_id,
+                observed_at=observed_at,
+                collected_at=now,
+                cpu_count=observation.host.cpu_count,
+                load_1m=observation.host.load_1m,
+                cpu_total_ticks=host_cpu_total_ticks,
+                cpu_idle_ticks=host_cpu_idle_ticks,
+                cpu_usage_usec=host_cpu_usage_usec,
+                cpu_quota_usec=host_cpu_quota_usec,
+                cpu_period_usec=host_cpu_period_usec,
+                cpu_utilization_pct=host_cpu_utilization_pct,
+                memory_total_mib=observation.host.memory_total_mib,
+                memory_available_mib=observation.host.memory_available_mib,
+                memory_limit_mib=observation.host.memory_limit_mib,
+                memory_current_mib=observation.host.memory_current_mib,
+                provider=provider,
+            )
+            session.add(host_telemetry)
+        else:
+            host_telemetry.boot_id = observation.boot_id
+            host_telemetry.observed_at = observed_at
+            host_telemetry.collected_at = now
+            host_telemetry.cpu_count = observation.host.cpu_count
+            host_telemetry.load_1m = observation.host.load_1m
+            host_telemetry.cpu_total_ticks = host_cpu_total_ticks
+            host_telemetry.cpu_idle_ticks = host_cpu_idle_ticks
+            host_telemetry.cpu_usage_usec = host_cpu_usage_usec
+            host_telemetry.cpu_quota_usec = host_cpu_quota_usec
+            host_telemetry.cpu_period_usec = host_cpu_period_usec
+            host_telemetry.cpu_utilization_pct = host_cpu_utilization_pct
+            host_telemetry.memory_total_mib = observation.host.memory_total_mib
+            host_telemetry.memory_available_mib = observation.host.memory_available_mib
+            host_telemetry.memory_limit_mib = observation.host.memory_limit_mib
+            host_telemetry.memory_current_mib = observation.host.memory_current_mib
+            host_telemetry.provider = provider
+        gpu_ids = list(observed_gpu_ids)
+        existing_gpus = {
+            gpu.id: gpu
+            for gpu in session.scalars(select(GPUDevice).where(GPUDevice.id.in_(gpu_ids))).all()
+        }
+        current_telemetry = {
+            item.gpu_id: item
+            for item in session.scalars(
+                select(TelemetryCurrent).where(TelemetryCurrent.gpu_id.in_(gpu_ids))
+            ).all()
+        }
+        latest_history = {
+            gpu_id: _as_utc(latest_observed_at)
+            for gpu_id, latest_observed_at in session.execute(
+                select(TelemetrySnapshot.gpu_id, func.max(TelemetrySnapshot.observed_at))
+                .where(TelemetrySnapshot.gpu_id.in_(gpu_ids))
+                .group_by(TelemetrySnapshot.gpu_id)
+            ).all()
+        }
+        by_uuid: dict[str, GPUDevice] = {}
+        history_points_written = 0
+        for sample in observation.gpus:
+            gpu_id = f"{endpoint.id}:{sample.gpu_uuid}" if observation.node_id == "self" else f"{endpoint.id}:{observation.node_id}:{sample.gpu_uuid}"
+            gpu = existing_gpus.get(gpu_id)
+            if gpu is None:
+                gpu = GPUDevice(
+                    id=gpu_id,
+                    endpoint_id=endpoint.id,
+                    node_id=observation.node_id,
+                    gpu_uuid=sample.gpu_uuid,
+                    gpu_index=sample.gpu_index,
+                    cuda_ordinal=sample.cuda_ordinal,
+                    name=sample.name,
+                    total_vram_mib=sample.total_vram_mib,
+                    labels_json="[]",
+                    health=sample.health,
+                    present=True,
+                    first_seen_at=observed_at,
+                    last_seen_at=observed_at,
+                    absent_at=None,
+                )
+                session.add(gpu)
+            else:
+                gpu.gpu_index = sample.gpu_index
+                gpu.cuda_ordinal = sample.cuda_ordinal
+                gpu.name = sample.name
+                gpu.total_vram_mib = sample.total_vram_mib
+                gpu.health = sample.health
+                gpu.present = True
+                gpu.last_seen_at = observed_at
+                gpu.absent_at = None
+            by_uuid[sample.gpu_uuid] = gpu
+            current = current_telemetry.get(gpu_id)
+            if current is None:
+                current = TelemetryCurrent(
+                    gpu_id=gpu_id,
+                    observed_at=observed_at,
+                    collected_at=now,
+                    memory_used_mib=sample.memory_used_mib,
+                    memory_free_mib=sample.memory_free_mib,
+                    gpu_utilization_pct=sample.gpu_utilization_pct,
+                    memory_utilization_pct=sample.memory_utilization_pct,
+                    temperature_c=sample.temperature_c,
+                    power_watts=sample.power_watts,
+                    pstate=sample.pstate,
+                    health=sample.health,
+                    provider=provider,
+                )
+                session.add(current)
+            else:
+                current.observed_at = observed_at
+                current.collected_at = now
+                current.memory_used_mib = sample.memory_used_mib
+                current.memory_free_mib = sample.memory_free_mib
+                current.gpu_utilization_pct = sample.gpu_utilization_pct
+                current.memory_utilization_pct = sample.memory_utilization_pct
+                current.temperature_c = sample.temperature_c
+                current.power_watts = sample.power_watts
+                current.pstate = sample.pstate
+                current.health = sample.health
+                current.provider = provider
+            last_history_at = latest_history.get(gpu_id)
+            if (
+                last_history_at is None
+                or (observed_at - last_history_at).total_seconds()
+                >= TELEMETRY_HISTORY_INTERVAL_SECONDS
+            ):
+                session.add(
+                    TelemetrySnapshot(
+                        gpu_id=gpu_id,
+                        observed_at=observed_at,
+                        collected_at=now,
+                        memory_used_mib=sample.memory_used_mib,
+                        memory_free_mib=sample.memory_free_mib,
+                        gpu_utilization_pct=sample.gpu_utilization_pct,
+                        memory_utilization_pct=sample.memory_utilization_pct,
+                        temperature_c=sample.temperature_c,
+                        power_watts=sample.power_watts,
+                        pstate=sample.pstate,
+                        health=sample.health,
+                        provider=provider,
+                    )
+                )
+                history_points_written += 1
+        absent_gpu_count = 0
+        if observation.observation_complete:
+            handed_over = self._converge_gpu_uuid_ownership(
+                session,
+                endpoint_id=endpoint.id,
+                observed_uuids=by_uuid,
+                observed_at=observed_at,
+                now=now,
+            )
+            prior_gpus = session.scalars(
+                select(GPUDevice).where(GPUDevice.endpoint_id == endpoint.id, GPUDevice.node_id == observation.node_id)
+            ).all()
+            for gpu in prior_gpus:
+                if gpu.id not in observed_gpu_ids and gpu.present:
+                    gpu.present = False
+                    gpu.absent_at = observed_at
+                    absent_gpu_count += 1
+            session.flush()
+            revision = self._release_absent_keepalive_leases(
+                session,
+                endpoint_ids={endpoint.id, *handed_over},
+                now=now,
+                revision=revision,
+            )
+        session.flush()
+        for process in observation.processes:
+            gpu = by_uuid.get(process.gpu_uuid)
+            if gpu is None:
+                self._upsert_alert(
+                    session,
+                    alert_type="unknown_process_gpu",
+                    severity="warning",
+                    resource_type="endpoint",
+                    resource_id=endpoint.id,
+                    message="collector reported a compute process for an unobserved GPU UUID",
+                    now=now,
+                )
+                continue
+            started_at = ensure_utc(process.process_started_at)
+            current = session.scalar(
+                select(ProcessObservation).where(
+                    ProcessObservation.gpu_id == gpu.id,
+                    ProcessObservation.pid == process.pid,
+                    ProcessObservation.boot_id == observation.boot_id,
+                    ProcessObservation.process_started_at == started_at,
+                )
+            )
+            if current is None:
+                # `ps etimes` is intentionally used instead of a full
+                # process command line, but it makes the calculated
+                # start timestamp susceptible to a one-second boundary
+                # race. Reuse only the immediately-active identity for
+                # the same GPU/PID/boot when the derived times are very
+                # close; a materially different start time remains a
+                # new, fail-closed process identity.
+                candidate = session.scalar(
+                    select(ProcessObservation)
+                    .where(
+                        ProcessObservation.gpu_id == gpu.id,
+                        ProcessObservation.pid == process.pid,
+                        ProcessObservation.boot_id == observation.boot_id,
+                        ProcessObservation.active.is_(True),
+                    )
+                    .order_by(ProcessObservation.last_seen_at.desc())
+                )
+                candidate_started_at = (
+                    _as_utc(candidate.process_started_at) if candidate else None
+                )
+                # `nvidia-smi` can report a host PID that is not visible to
+                # the endpoint's `ps` namespace.  The sealed collector
+                # marks that case with a missing username and has no real
+                # start time, so its conservative fallback is the current
+                # observation time.  Reuse only the *currently active*
+                # GPU/PID/boot identity in that case.  If the process
+                # disappears for one complete observation the candidate is
+                # inactive and a reused PID becomes a new, fail-closed
+                # identity as intended.
+                process_identity_metadata_missing = process.username is None
+                if (
+                    candidate is not None
+                    and candidate_started_at is not None
+                    and (
+                        process_identity_metadata_missing
+                        or abs((candidate_started_at - started_at).total_seconds())
+                        <= PROCESS_START_TIME_JITTER_SECONDS
+                    )
+                ):
+                    current = candidate
+                    started_at = candidate_started_at
+            if current is None:
+                session.add(
+                    ProcessObservation(
+                        endpoint_id=endpoint.id,
+                        gpu_id=gpu.id,
+                        pid=process.pid,
+                        boot_id=observation.boot_id,
+                        process_started_at=started_at,
+                        username=process.username,
+                        executable=self._sanitize_executable(process.executable),
+                        used_memory_mib=process.used_memory_mib,
+                        first_seen_at=now,
+                        last_seen_at=now,
+                        observations=1,
+                        absent_since=None,
+                        active=True,
+                    )
+                )
+            else:
+                current.username = process.username
+                current.executable = self._sanitize_executable(process.executable)
+                current.used_memory_mib = process.used_memory_mib
+                current.last_seen_at = now
+                current.observations += 1
+                current.absent_since = None
+                current.active = True
+        session.flush()
+        self._advance_process_absence(
+            session,
+            endpoint_id=endpoint.id, node_id=observation.node_id,
+            complete=observation.observation_complete,
+            now=now,
+        )
+        state = session.get(NodeObservationState, (endpoint.id, observation.node_id))
+        if state is None:
+            state = NodeObservationState(endpoint_id=endpoint.id, node_id=observation.node_id)
+            session.add(state)
+        state.last_attempt_at = now
+        state.last_success_at = observed_at if observation.observation_complete else state.last_success_at
+        state.error_code = None if observation.observation_complete else "incomplete_observation"
+        state.message = None if observation.observation_complete else "GPU or process observation incomplete"
+        return {"absent_gpu_count": absent_gpu_count, "history_points_written": history_points_written,
+                "endpoint_history_points_written": endpoint_history_points_written}
+
     def ingest_observation(
         self,
         observation: EndpointObservation,
@@ -4874,375 +5700,56 @@ class BrokerService:
                 raise BrokerError(
                     "endpoint_not_found", "collector reported an unknown endpoint", status_code=404
                 )
-            observed_gpu_ids = {f"{endpoint.id}:{sample.gpu_uuid}" for sample in observation.gpus}
-            observed_at = ensure_utc(observation.observed_at)
-            host_telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
-            current_observed_at = _as_utc(host_telemetry.observed_at) if host_telemetry else None
-            if current_observed_at is not None and observed_at < current_observed_at:
-                return {
-                    "event_id": None,
-                    "snapshot_revision": self._revision(session),
-                    "endpoint_id": endpoint.id,
-                    "gpu_count": len(observation.gpus),
-                    "absent_gpu_count": 0,
-                    "observation_complete": observation.observation_complete,
-                    "process_count": len(observation.processes),
-                    "history_points_written": 0,
-                    "endpoint_history_points_written": 0,
-                    "ignored": True,
-                    "ignore_reason": "stale_observation",
-                    "current_observed_at": _iso(current_observed_at),
-                }
-            revision = self._bump_revision(session, now)
-            if observation.gpu_probe_status == "cpu_only":
-                endpoint.resource_kind = "cpu_only"
-                endpoint.updated_at = now
-            elif observation.gpus:
-                endpoint.resource_kind = "gpu"
-                endpoint.updated_at = now
-            self._persist_plugin_capacity(session, endpoint, observation.scheduler, now=now)
-            self._persist_collector_implementation_version(
-                session, endpoint.id, resolved_version, now=now
-            )
-            host_cpu_total_ticks = observation.host.cpu_total_ticks
-            host_cpu_idle_ticks = observation.host.cpu_idle_ticks
-            host_cpu_usage_usec = observation.host.cpu_usage_usec
-            host_cpu_quota_usec = observation.host.cpu_quota_usec
-            host_cpu_period_usec = observation.host.cpu_period_usec
-            host_cpu_utilization_pct = self._host_cpu_utilization_pct(
-                host_telemetry,
-                observed_at=observed_at,
-                cpu_count=observation.host.cpu_count,
-                cpu_usage_usec=host_cpu_usage_usec,
-                cpu_quota_usec=host_cpu_quota_usec,
-                cpu_period_usec=host_cpu_period_usec,
-            )
-            latest_endpoint_history_at = _as_utc(
-                session.scalar(
-                    select(func.max(EndpointTelemetrySnapshot.observed_at)).where(
-                        EndpointTelemetrySnapshot.endpoint_id == endpoint.id
-                    )
-                )
-            )
-            endpoint_history_points_written = 0
-            if (
-                latest_endpoint_history_at is None
-                or (observed_at - latest_endpoint_history_at).total_seconds()
-                >= TELEMETRY_HISTORY_INTERVAL_SECONDS
+            currents = [session.get(EndpointTelemetryCurrent, (endpoint.id, node.node_id)) for node in observation.nodes]
+            if observation.nodes and not observation.failures and all(
+                current is not None and node.observed_at < (_as_utc(current.observed_at) or node.observed_at)
+                for node, current in zip(observation.nodes, currents, strict=True)
             ):
-                session.add(
-                    EndpointTelemetrySnapshot(
-                        endpoint_id=endpoint.id,
-                        observed_at=observed_at,
-                        collected_at=now,
-                        cpu_count=observation.host.cpu_count,
-                        load_1m=observation.host.load_1m,
-                        cpu_total_ticks=host_cpu_total_ticks,
-                        cpu_idle_ticks=host_cpu_idle_ticks,
-                        cpu_usage_usec=host_cpu_usage_usec,
-                        cpu_quota_usec=host_cpu_quota_usec,
-                        cpu_period_usec=host_cpu_period_usec,
-                        cpu_utilization_pct=host_cpu_utilization_pct,
-                        memory_total_mib=observation.host.memory_total_mib,
-                        memory_available_mib=observation.host.memory_available_mib,
-                        memory_limit_mib=observation.host.memory_limit_mib,
-                        memory_current_mib=observation.host.memory_current_mib,
-                        provider=provider,
-                    )
-                )
-                endpoint_history_points_written = 1
-            if host_telemetry is None:
-                host_telemetry = EndpointTelemetryCurrent(
-                    endpoint_id=endpoint.id,
-                    observed_at=observed_at,
-                    collected_at=now,
-                    cpu_count=observation.host.cpu_count,
-                    load_1m=observation.host.load_1m,
-                    cpu_total_ticks=host_cpu_total_ticks,
-                    cpu_idle_ticks=host_cpu_idle_ticks,
-                    cpu_usage_usec=host_cpu_usage_usec,
-                    cpu_quota_usec=host_cpu_quota_usec,
-                    cpu_period_usec=host_cpu_period_usec,
-                    cpu_utilization_pct=host_cpu_utilization_pct,
-                    memory_total_mib=observation.host.memory_total_mib,
-                    memory_available_mib=observation.host.memory_available_mib,
-                    memory_limit_mib=observation.host.memory_limit_mib,
-                    memory_current_mib=observation.host.memory_current_mib,
-                    provider=provider,
-                )
-                session.add(host_telemetry)
-            else:
-                host_telemetry.observed_at = observed_at
-                host_telemetry.collected_at = now
-                host_telemetry.cpu_count = observation.host.cpu_count
-                host_telemetry.load_1m = observation.host.load_1m
-                host_telemetry.cpu_total_ticks = host_cpu_total_ticks
-                host_telemetry.cpu_idle_ticks = host_cpu_idle_ticks
-                host_telemetry.cpu_usage_usec = host_cpu_usage_usec
-                host_telemetry.cpu_quota_usec = host_cpu_quota_usec
-                host_telemetry.cpu_period_usec = host_cpu_period_usec
-                host_telemetry.cpu_utilization_pct = host_cpu_utilization_pct
-                host_telemetry.memory_total_mib = observation.host.memory_total_mib
-                host_telemetry.memory_available_mib = observation.host.memory_available_mib
-                host_telemetry.memory_limit_mib = observation.host.memory_limit_mib
-                host_telemetry.memory_current_mib = observation.host.memory_current_mib
-                host_telemetry.provider = provider
-            gpu_ids = list(observed_gpu_ids)
-            existing_gpus = {
-                gpu.id: gpu
-                for gpu in session.scalars(select(GPUDevice).where(GPUDevice.id.in_(gpu_ids))).all()
-            }
-            current_telemetry = {
-                item.gpu_id: item
-                for item in session.scalars(
-                    select(TelemetryCurrent).where(TelemetryCurrent.gpu_id.in_(gpu_ids))
-                ).all()
-            }
-            latest_history = {
-                gpu_id: _as_utc(latest_observed_at)
-                for gpu_id, latest_observed_at in session.execute(
-                    select(TelemetrySnapshot.gpu_id, func.max(TelemetrySnapshot.observed_at))
-                    .where(TelemetrySnapshot.gpu_id.in_(gpu_ids))
-                    .group_by(TelemetrySnapshot.gpu_id)
-                ).all()
-            }
-            by_uuid: dict[str, GPUDevice] = {}
-            history_points_written = 0
-            for sample in observation.gpus:
-                gpu_id = f"{endpoint.id}:{sample.gpu_uuid}"
-                gpu = existing_gpus.get(gpu_id)
-                if gpu is None:
-                    gpu = GPUDevice(
-                        id=gpu_id,
-                        endpoint_id=endpoint.id,
-                        gpu_uuid=sample.gpu_uuid,
-                        gpu_index=sample.gpu_index,
-                        cuda_ordinal=sample.cuda_ordinal,
-                        name=sample.name,
-                        total_vram_mib=sample.total_vram_mib,
-                        labels_json="[]",
-                        health=sample.health,
-                        present=True,
-                        first_seen_at=observed_at,
-                        last_seen_at=observed_at,
-                        absent_at=None,
-                    )
-                    session.add(gpu)
-                else:
-                    gpu.gpu_index = sample.gpu_index
-                    gpu.cuda_ordinal = sample.cuda_ordinal
-                    gpu.name = sample.name
-                    gpu.total_vram_mib = sample.total_vram_mib
-                    gpu.health = sample.health
-                    gpu.present = True
-                    gpu.last_seen_at = observed_at
-                    gpu.absent_at = None
-                by_uuid[sample.gpu_uuid] = gpu
-                current = current_telemetry.get(gpu_id)
-                if current is None:
-                    current = TelemetryCurrent(
-                        gpu_id=gpu_id,
-                        observed_at=observed_at,
-                        collected_at=now,
-                        memory_used_mib=sample.memory_used_mib,
-                        memory_free_mib=sample.memory_free_mib,
-                        gpu_utilization_pct=sample.gpu_utilization_pct,
-                        memory_utilization_pct=sample.memory_utilization_pct,
-                        temperature_c=sample.temperature_c,
-                        power_watts=sample.power_watts,
-                        pstate=sample.pstate,
-                        health=sample.health,
-                        provider=provider,
-                    )
-                    session.add(current)
-                else:
-                    current.observed_at = observed_at
-                    current.collected_at = now
-                    current.memory_used_mib = sample.memory_used_mib
-                    current.memory_free_mib = sample.memory_free_mib
-                    current.gpu_utilization_pct = sample.gpu_utilization_pct
-                    current.memory_utilization_pct = sample.memory_utilization_pct
-                    current.temperature_c = sample.temperature_c
-                    current.power_watts = sample.power_watts
-                    current.pstate = sample.pstate
-                    current.health = sample.health
-                    current.provider = provider
-                last_history_at = latest_history.get(gpu_id)
-                if (
-                    last_history_at is None
-                    or (observed_at - last_history_at).total_seconds()
-                    >= TELEMETRY_HISTORY_INTERVAL_SECONDS
-                ):
-                    session.add(
-                        TelemetrySnapshot(
-                            gpu_id=gpu_id,
-                            observed_at=observed_at,
-                            collected_at=now,
-                            memory_used_mib=sample.memory_used_mib,
-                            memory_free_mib=sample.memory_free_mib,
-                            gpu_utilization_pct=sample.gpu_utilization_pct,
-                            memory_utilization_pct=sample.memory_utilization_pct,
-                            temperature_c=sample.temperature_c,
-                            power_watts=sample.power_watts,
-                            pstate=sample.pstate,
-                            health=sample.health,
-                            provider=provider,
-                        )
-                    )
-                    history_points_written += 1
-            absent_gpu_count = 0
-            if observation.observation_complete:
-                handed_over = self._converge_gpu_uuid_ownership(
-                    session,
-                    endpoint_id=endpoint.id,
-                    observed_uuids=by_uuid,
-                    observed_at=observed_at,
-                    now=now,
-                )
-                purged = self._purge_unobserved_plugin_gpus(
-                    session,
-                    endpoint=endpoint,
-                    observed_gpu_ids=observed_gpu_ids,
-                    now=observed_at,
-                )
-                prior_gpus = session.scalars(
-                    select(GPUDevice).where(GPUDevice.endpoint_id == endpoint.id)
-                ).all()
-                for gpu in prior_gpus:
-                    if gpu.id not in observed_gpu_ids and gpu.present:
-                        gpu.present = False
-                        gpu.absent_at = observed_at
-                        absent_gpu_count += 1
-                session.flush()
-                revision = self._release_absent_keepalive_leases(
-                    session,
-                    endpoint_ids={endpoint.id, *handed_over},
-                    now=now,
-                    revision=revision,
-                )
-                if purged:
-                    session.flush()
-            session.flush()
-            for process in observation.processes:
-                gpu = by_uuid.get(process.gpu_uuid)
-                if gpu is None:
-                    self._upsert_alert(
-                        session,
-                        alert_type="unknown_process_gpu",
-                        severity="warning",
-                        resource_type="endpoint",
-                        resource_id=endpoint.id,
-                        message="collector reported a compute process for an unobserved GPU UUID",
-                        now=now,
-                    )
-                    continue
-                started_at = ensure_utc(process.process_started_at)
-                current = session.scalar(
-                    select(ProcessObservation).where(
-                        ProcessObservation.gpu_id == gpu.id,
-                        ProcessObservation.pid == process.pid,
-                        ProcessObservation.boot_id == observation.boot_id,
-                        ProcessObservation.process_started_at == started_at,
-                    )
-                )
-                if current is None:
-                    # `ps etimes` is intentionally used instead of a full
-                    # process command line, but it makes the calculated
-                    # start timestamp susceptible to a one-second boundary
-                    # race. Reuse only the immediately-active identity for
-                    # the same GPU/PID/boot when the derived times are very
-                    # close; a materially different start time remains a
-                    # new, fail-closed process identity.
-                    candidate = session.scalar(
-                        select(ProcessObservation)
-                        .where(
-                            ProcessObservation.gpu_id == gpu.id,
-                            ProcessObservation.pid == process.pid,
-                            ProcessObservation.boot_id == observation.boot_id,
-                            ProcessObservation.active.is_(True),
-                        )
-                        .order_by(ProcessObservation.last_seen_at.desc())
-                    )
-                    candidate_started_at = (
-                        _as_utc(candidate.process_started_at) if candidate else None
-                    )
-                    # `nvidia-smi` can report a host PID that is not visible to
-                    # the endpoint's `ps` namespace.  The sealed collector
-                    # marks that case with a missing username and has no real
-                    # start time, so its conservative fallback is the current
-                    # observation time.  Reuse only the *currently active*
-                    # GPU/PID/boot identity in that case.  If the process
-                    # disappears for one complete observation the candidate is
-                    # inactive and a reused PID becomes a new, fail-closed
-                    # identity as intended.
-                    process_identity_metadata_missing = process.username is None
-                    if (
-                        candidate is not None
-                        and candidate_started_at is not None
-                        and (
-                            process_identity_metadata_missing
-                            or abs((candidate_started_at - started_at).total_seconds())
-                            <= PROCESS_START_TIME_JITTER_SECONDS
-                        )
-                    ):
-                        current = candidate
-                        started_at = candidate_started_at
-                if current is None:
-                    session.add(
-                        ProcessObservation(
-                            endpoint_id=endpoint.id,
-                            gpu_id=gpu.id,
-                            pid=process.pid,
-                            boot_id=observation.boot_id,
-                            process_started_at=started_at,
-                            username=process.username,
-                            executable=self._sanitize_executable(process.executable),
-                            used_memory_mib=process.used_memory_mib,
-                            first_seen_at=now,
-                            last_seen_at=now,
-                            observations=1,
-                            absent_since=None,
-                            active=True,
-                        )
-                    )
-                else:
-                    current.username = process.username
-                    current.executable = self._sanitize_executable(process.executable)
-                    current.used_memory_mib = process.used_memory_mib
-                    current.last_seen_at = now
-                    current.observations += 1
-                    current.absent_since = None
-                    current.active = True
-            session.flush()
-            self._advance_process_absence(
-                session,
-                endpoint_id=endpoint.id,
-                complete=observation.observation_complete,
-                now=now,
-            )
+                return {"ignored": True, "ignore_reason": "stale_observation", "snapshot_revision": self._revision(session),
+                        "current_observed_at": _iso(max(_as_utc(current.observed_at) for current in currents))}
+            revision = self._bump_revision(session, now)
+            self._persist_plugin_capacity(session, endpoint, observation.scheduler, now=now)
+            self._persist_collector_implementation_version(session, endpoint.id, resolved_version, now=now)
+            node_results = [self._ingest_node_observation(session, endpoint, node, now=now,
+                            provider=provider, revision=revision) for node in observation.nodes]
+            for failure in observation.failures:
+                state = session.get(NodeObservationState, (endpoint.id, failure.node_id))
+                if state is None:
+                    state = NodeObservationState(endpoint_id=endpoint.id, node_id=failure.node_id)
+                    session.add(state)
+                state.last_attempt_at = now
+                state.error_code = failure.error_code
+                state.message = failure.message
+                self._advance_process_absence(session, endpoint_id=endpoint.id,
+                    node_id=failure.node_id, complete=False, now=now)
+            self._ingest_allocations(session, endpoint, observation, now)
+            absent_gpu_count = sum(item.get("absent_gpu_count", 0) for item in node_results)
+            history_points_written = sum(item.get("history_points_written", 0) for item in node_results)
+            endpoint_history_points_written = sum(item.get("endpoint_history_points_written", 0) for item in node_results)
             provider_state = session.scalar(
                 select(ProviderState).where(
                     ProviderState.provider == provider, ProviderState.endpoint_id == endpoint.id
                 )
             )
+            transport_complete = observation.scheduler is not None or observation.observation_complete
             recovered = (
-                observation.observation_complete
+                transport_complete
                 and provider_state is not None
                 and provider_state.last_error is not None
             )
             incomplete_error = (
-                None if observation.observation_complete else "incomplete endpoint observation"
+                None if transport_complete else "incomplete endpoint observation"
             )
             # The code travels with the text it describes. Clearing one and not
             # the other would leave a recovered host carrying the name of a
             # failure it no longer has, and every consumer reads the code.
-            incomplete_error_code = None if observation.observation_complete else "parse_error"
+            incomplete_error_code = None if transport_complete else "parse_error"
             if provider_state is None:
                 session.add(
                     ProviderState(
                         provider=provider,
                         endpoint_id=endpoint.id,
-                        last_success_at=now if observation.observation_complete else None,
+                        last_success_at=now if transport_complete else None,
                         last_attempt_at=now,
                         last_error=incomplete_error,
                         last_error_code=incomplete_error_code,
@@ -5250,7 +5757,7 @@ class BrokerService:
                     )
                 )
             else:
-                if observation.observation_complete:
+                if transport_complete:
                     provider_state.last_success_at = now
                 provider_state.last_attempt_at = now
                 provider_state.last_error = incomplete_error
@@ -5454,6 +5961,10 @@ class BrokerService:
                 raise BrokerError(
                     "endpoint_not_found", "collector reported an unknown endpoint", status_code=404
                 )
+            for allocation in session.scalars(select(ResourceAllocation).where(
+                ResourceAllocation.endpoint_id == endpoint_id
+            )).all():
+                allocation.idle_since = None
             revision = self._bump_revision(session, now)
             state = session.scalar(
                 select(ProviderState).where(
@@ -5465,9 +5976,11 @@ class BrokerService:
             # A failed attempt breaks the evidence chain the absence clock is
             # made of, so every process this endpoint still owns starts its
             # absence over rather than aging through the outage.
-            self._advance_process_absence(
-                session, endpoint_id=endpoint_id, complete=False, now=now
-            )
+            for node_id in session.scalars(select(GPUDevice.node_id).where(
+                GPUDevice.endpoint_id == endpoint_id).distinct()).all():
+                self._advance_process_absence(
+                    session, endpoint_id=endpoint_id, node_id=node_id, complete=False, now=now
+                )
             if state is None:
                 session.add(
                     ProviderState(
@@ -5572,6 +6085,22 @@ class BrokerService:
                     )
                 ).all()
             )
+            for allocation in self._allocations(session, lease.id):
+                if allocation.provider_id != "builtin":
+                    # Legacy resources were counted above; new delegated leases need no synthetic GPUs.
+                    count = sum(item["gpu_count"] for item in json_load(allocation.locations_json))
+                    old_count = len(session.scalars(select(LeaseResource).where(
+                        LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+                    )).all())
+                    gpu_usage[lease.project_id] += max(0, count - old_count)
+        for pending in session.scalars(select(ResourceAllocation).where(
+            ResourceAllocation.lease_id.is_(None),
+            ResourceAllocation.state.in_(["applying", "unconfirmed", "active", "release_pending"]),
+        )).all():
+            requested = json_load(pending.request_json)
+            project_id = requested["project_id"]
+            gpu_usage[project_id] += requested["constraints"]["gpu_count"]
+            lease_usage[project_id] += 1
         return gpu_usage, lease_usage
 
     def _project_can_allocate(
@@ -5688,6 +6217,9 @@ class BrokerService:
             if endpoint is None:
                 excluded["missing_endpoint"] += 1
                 continue
+            if endpoint.observation_profile != "linux":
+                excluded["provider_managed"] += 1
+                continue
             if selected_group_ids:
                 if endpoint.server_group_id not in selected_group_ids:
                     excluded["server_group"] += 1
@@ -5698,7 +6230,7 @@ class BrokerService:
             if endpoint.id in constraints.deny_endpoint_ids:
                 excluded["endpoint_denylist"] += 1
                 continue
-            host_telemetry = session.get(EndpointTelemetryCurrent, endpoint.id)
+            host_telemetry = session.get(EndpointTelemetryCurrent, (endpoint.id, "self"))
             # The allocator admits against the same figures the interface shows.
             # A container endpoint owns its cgroup budget, not the node's cores,
             # so `_host_capacity` is the authority on both sides.
@@ -6063,6 +6595,8 @@ class BrokerService:
                     created_at=now,
                 )
             )
+        self._sync_direct_allocations(session, lease, resources, now)
+        session.flush()
         event = self._audit(
             session,
             actor_id=actor_id,
@@ -6098,10 +6632,9 @@ class BrokerService:
         session: Session,
         constraints: ResourceConstraints,
         *,
-        plugin_allocation: dict[str, Any] | None,
         now: datetime,
     ) -> None:
-        if plugin_allocation is not None or constraints.gpu_count <= 0:
+        if constraints.gpu_count <= 0:
             return
         selected_groups = list(constraints.server_group_ids)
         if selected_groups:
@@ -6206,7 +6739,6 @@ class BrokerService:
         idempotency_action: str,
         persistent_lease: bool = False,
         idempotency_checked: bool = False,
-        plugin_allocation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not idempotency_checked and idempotency_key is not None:
             existing = self._idempotent(
@@ -6221,13 +6753,10 @@ class BrokerService:
         self._enforce_direct_group_selection(
             session,
             request_data.constraints,
-            plugin_allocation=plugin_allocation,
             now=now,
         )
         revision = self._bump_revision(session, now)
         constraints_payload = request_data.constraints.model_dump(mode="json")
-        if plugin_allocation is not None:
-            constraints_payload["plugin_allocation"] = plugin_allocation
         lease, event = self._issue_lease(
             session,
             actor.id,
@@ -6272,17 +6801,30 @@ class BrokerService:
                 return None
             if not self._can_manage_lease(actor, lease) and not operator_override:
                 return None
-            return self._plugin_allocation_payload(lease)
+            return self._plugin_allocation_payload(session, lease)
 
         allocation = self._read(operation)
         if allocation is None:
             return
         from serverpilot.plugins import PluginError, release_plugin
 
+        def mark(session: Session, state: str, error: str | None) -> None:
+            record = session.get(ResourceAllocation, allocation["id"])
+            record.state = state
+            record.last_error = error
+            record.updated_at = utcnow()
+            if state == "released":
+                record.confirmed_at = record.updated_at
+            self._bump_revision(session, record.updated_at)
+        self._write(lambda session: mark(session, "release_pending", None))
         try:
             release_plugin(allocation["plugin_id"], allocation_ref=allocation["allocation_ref"])
         except PluginError as exc:
-            raise BrokerError("plugin_release_failed", str(exc), status_code=409) from exc
+            error_text = str(exc)
+            self._write(lambda session: mark(session, "release_pending", error_text))
+            raise BrokerError("plugin_release_failed", "归还结果待确认，分配仍保留。", status_code=409,
+                              details={"allocation_id": allocation["id"]}) from exc
+        self._write(lambda session: mark(session, "released", None))
 
     def create_request(
         self,
@@ -6291,7 +6833,6 @@ class BrokerService:
         *,
         idempotency_key: str | None,
         persistent_lease: bool = False,
-        plugin_allocation: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         self._require_role(actor, MUTATING_ROLES)
 
@@ -6303,8 +6844,7 @@ class BrokerService:
                 idempotency_key=idempotency_key,
                 idempotency_action="request.create",
                 persistent_lease=persistent_lease,
-                plugin_allocation=plugin_allocation,
-            )
+                )
 
         return self._write(operation)
 
@@ -6393,6 +6933,8 @@ class BrokerService:
                     "当前状态不能续期这个 GPU 租约",
                     status_code=409,
                 )
+            if any(item.provider_id != "builtin" for item in self._allocations(session, lease.id)):
+                raise BrokerError("provider_deadline_not_extendable", "本机续租不能延长提供方时限；请遵守实际截止时间。", status_code=409)
             now = utcnow()
             revision = self._bump_revision(session, now)
             before = self._lease_dict(session, lease)
@@ -6521,6 +7063,8 @@ class BrokerService:
             ).all():
                 resource.active = False
                 resource.released_at = now
+            if not self._plugin_allocation_payload(session, lease):
+                self._sync_direct_allocations(session, lease, [], now)
             self._resolve_lease_alerts(session, lease.id, now)
             event = self._audit(
                 session,
@@ -6575,6 +7119,8 @@ class BrokerService:
                 "only a current workload assignment can be moved",
                 status_code=409,
             )
+        if self._plugin_allocation_payload(session, lease):
+            raise BrokerError("allocation_release_required", "该提供方按整个分配管理资源，不能逐卡改派", status_code=409)
         current_resources = session.scalars(
             select(LeaseResource).where(
                 LeaseResource.lease_id == lease.id,
@@ -6747,6 +7293,7 @@ class BrokerService:
                     }
                 ).model_dump(mode="json")
             )
+            self._sync_direct_allocations(session, lease, target_gpus, now)
             revision = self._bump_revision(session, now)
             session.flush()
             event = self._audit(
@@ -6839,6 +7386,18 @@ class BrokerService:
                 "message": "只有仍持有 GPU 的工作租约或占卡租约可以在这里清理。",
                 "details": {"lease_kind": lease.kind, "lease_state": lease.state},
             }
+        allocated = [item for item in self._allocations(session, lease.id) if item.release_granularity == "allocation"]
+        if allocated:
+            for item in allocated:
+                idle = self._allocation_idle(item, now)
+                if not idle:
+                    return {"allowed": False, "blocked_reason": "allocation_not_confirmed_idle",
+                            "message": "尚未确认整个分配持续空闲。", "details": {}}
+            lost_for = (now - (_as_utc(lease.last_heartbeat_at) or now)).total_seconds()
+            idle_for = min((now - (_as_utc(item.idle_since) or now)).total_seconds() for item in allocated)
+            allowed = min(lost_for, idle_for) >= self.inventory.idle_lease_alert_seconds
+            return {"allowed": allowed, "blocked_reason": None if allowed else "lease_recently_live",
+                    "message": "可归还整个分配。" if allowed else "任务仍有心跳或空闲时间不足。", "details": {}}
         if not active:
             return {
                 "allowed": False,
@@ -6952,7 +7511,7 @@ class BrokerService:
             now = utcnow()
             unreachable = self._endpoint_is_unreachable(session, endpoint_id, now)
             cutoff = now - timedelta(seconds=self.collector.stale_after_seconds)
-            host = session.get(EndpointTelemetryCurrent, endpoint_id)
+            host = session.get(EndpointTelemetryCurrent, (endpoint_id, "self"))
             provider_state = session.scalar(
                 select(ProviderState).where(
                     ProviderState.provider == "raw-ssh",
@@ -7544,6 +8103,7 @@ class BrokerService:
             lease.released_at = now
             lease.release_reason = "idle without observed process"
             lease.idle_since = None
+        self._sync_direct_allocations(session, lease, [session.get(GPUDevice, item.gpu_id) for item in remaining], now)
         self._resolve_idle_lease_alert(session, lease.id, now)
         self._audit(
             session,
@@ -7568,7 +8128,7 @@ class BrokerService:
         lease: Lease,
         releases: list[dict[str, str]],
     ) -> None:
-        payload = self._plugin_allocation_payload(lease)
+        payload = self._plugin_allocation_payload(session, lease)
         if payload is not None:
             releases.append(payload)
 
@@ -7587,6 +8147,25 @@ class BrokerService:
                 # workload. Current worker liveness is projected separately as
                 # ON/OFF/ERROR and the endpoint policy drives reconciliation.
                 lease.expires_at = None
+                continue
+            allocation = session.scalar(select(ResourceAllocation).where(
+                ResourceAllocation.lease_id == lease.id, ResourceAllocation.release_granularity == "allocation",
+            ))
+            if allocation is not None:
+                if allocation.state == "release_pending":
+                    continue
+                idle = self._allocation_idle(allocation, now)
+                if not idle:
+                    allocation.idle_since = None
+                    continue
+                if allocation.idle_since is None:
+                    allocation.idle_since = now
+                duration = (now - (_as_utc(allocation.idle_since) or now)).total_seconds()
+                alive = (now - (_as_utc(lease.last_heartbeat_at) or now)).total_seconds()
+                if (duration >= self.inventory.idle_lease_reclaim_seconds
+                        and alive >= self.inventory.idle_lease_reclaim_seconds):
+                    allocation.state = "release_pending"
+                    self._remember_plugin_release(session, lease, plugin_releases)
                 continue
             resources = session.scalars(
                 select(LeaseResource).where(
@@ -7913,6 +8492,13 @@ class BrokerService:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
             now = utcnow()
+            unresolved = session.scalar(select(ResourceAllocation.id).where(
+                ResourceAllocation.endpoint_id == endpoint.id,
+                ResourceAllocation.provider_id != "builtin",
+                ResourceAllocation.state.not_in(["released", "expired", "failed"]),
+            ).limit(1))
+            if unresolved is not None:
+                raise BrokerError("endpoint_has_active_allocations", "仍有未确认归还的远端分配，不能删除其连接信息。", status_code=409)
             unreachable = self._endpoint_is_unreachable(session, endpoint.id, now)
             if not unreachable and self._endpoint_has_active_leases(session, endpoint.id):
                 raise BrokerError(

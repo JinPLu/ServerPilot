@@ -65,7 +65,7 @@ AGENT_TOOLS: tuple[AgentTool, ...] = (
     AgentTool("gpu_status", ("server_id?", "lease_id?")),
     AgentTool(
         "gpu_apply",
-        ("server_group_id?", "server_id?", "gpu_count=1", "task?"),
+        ("duration_seconds", "server_group_id?", "server_id?", "gpu_count=1", "task?"),
         "picks the cards itself and keeps one lease on one server "
         "(task=what this lease is for, never the client UI title)",
     ),
@@ -93,10 +93,11 @@ _COUNT_WORDS = ("", "One", "Two", "Three", "Four", "Five", "Six")
 STANDING_RULES: tuple[str, ...] = (
     "Call gpu_status before allocating; capacity and busy_gpus change between calls. Assess group workspace/environment/data-weight notes, capacity and limits first; choose server_group_id for grouped hosts; the broker best-fits within that group. server_id is for ungrouped compatibility and must not pin a grouped host.",
     "Connection and working directory are projected once per server: ssh=how to connect; workspace.path (workspace_path)=the cwd to enter; code_location=not_provided means workspace_path is never a code repository. Allocation gpus[] point back with server_id.",
-    "cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Never put a UUID in CUDA_VISIBLE_DEVICES.",
+    "For direct SSH entries, cuda_device_order=PCI_BUS_ID; cuda_visible_devices=the whole lease, gpu_cuda_visible_devices=one card. Allocation entries require entering the existing provider allocation first; follow entry.argv and its verification status. Physical indexes and in-allocation device selectors are distinct; never guess missing mappings.",
     "gpu_status gives grouped allocatable capacity (name/vram_mib/total_count/available_count), allocation/limits and busy_gpus; server_id narrows to one server. Delegated clusters sit in their server_group; largest_allocatable_block is one apply's max cards.",
-    "Telemetry is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now. Load on a free card is ServerPilot's own hold, stopped before allocation, not evidence it is taken.",
-    "no_capacity is an answer, not a failure, and nothing is queued; group_selection_required is the same kind of answer; free cards spread across servers also give no_capacity. Call gpu_release the moment a task ends or fails, and confirm released. gpu_status lists open_leases: every lease still holding cards on this machine, with the lease_id gpu_release needs and running_gpu_count. Read it before you claim and release any whose running_gpu_count is 0 — a finished lease that still holds cards is what makes the next apply answer no_capacity. gpu_status(lease_id=...) is also your heartbeat: keep calling it through a task's quiet phases and the claim you ask about is never reclaimed as abandoned, though while any of its cards is computing the idle ones still come back one by one. Idle reclaim is a backstop, not how a card comes back.",
+    "gpu_status returns resource_nodes for direct hosts and provider compute nodes with the same GPU/process and CPU/memory fields, sample times and freshness. Node utilization describes the node or declared container scope, not a job's exclusive contribution. Provider allocation counts are scheduling facts, never measured utilization. Job accounting RSS and CPU time are separate from node telemetry. Do not infer availability from idle provider GPUs; allocation still goes through the provider. A node GPU's state=KEEPALIVE is ServerPilot's own hold on a card nobody has claimed: it counts as available capacity and is stopped before allocation, so its processes, memory and utilization are never another caller's work.",
+    "Telemetry for workload tuning is only meaningful on cards you hold: gpu_status(lease_id=...) returns leased_gpus with recent_average per card plus a lease summary (min_memory_free_mib, slowest_gpu) for tuning batch size and parallelism. Covers your hold only: null until your work is observed; current reads the card now.",
+    "Declare duration_seconds when applying. no_capacity and group_selection_required are answers; nothing queues. allocation_unconfirmed means reconcile the original request, never create a replacement allocation. Read open_leases before applying. Release when your task ends or fails and confirm released; zero running GPUs alone does not mean a task is finished. gpu_status(lease_id=...) is your heartbeat during preparation and quiet phases. Whole-allocation providers reclaim only after lost heartbeats and continuously observed idle resources; stale data cannot prove idle. Respect the provider deadline: local renewal cannot extend it.",
     "busy_gpus[]: task=who holds the card, status=whether it is working — running (a compute process under that lease), busy_unmanaged (a process ServerPilot does not own), held_idle (held, nothing computing: ask the holder or pick elsewhere), ownership_conflict (holder unverifiable). Only running and busy_unmanaged mean work is on the card.",
     "ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease.",
 )
@@ -104,8 +105,9 @@ STANDING_RULES: tuple[str, ...] = (
 # What the contract costs an agent is paid every turn, so it stays bounded.
 # The bound has moved fifteen times, always because a caller that is not told
 # something re-derives it wrongly: per-GPU idle reclaim (or it over-claims),
-# lease-scoped telemetry (or it reads a free card's load -- ServerPilot's own
-# hold -- as taken), grouped capacity and server_group_id (or two 4-GPU hosts
+# lease-scoped telemetry and state=KEEPALIVE named as the token a caller
+# actually reads (or it reads a free card's load -- ServerPilot's own hold --
+# as taken), grouped capacity and server_group_id (or two 4-GPU hosts
 # read as one 8-GPU menu), the five-tool surface, largest_allocatable_block as
 # one apply's ceiling, open_leases (a caller that cannot name its lease cannot
 # release it, so reclaim read as the mechanism), the busy_gpus status
@@ -115,7 +117,8 @@ STANDING_RULES: tuple[str, ...] = (
 # text became English, longer in characters and cheaper in tokens.  Contract
 # sentences are never cut to fit this bound; when the contract needs more
 # words, this number moves and the reason is written here.
-MCP_INSTRUCTION_BUDGET_CHARS = 3000
+# Node-scope telemetry and provider lifecycle are now part of the common surface.
+MCP_INSTRUCTION_BUDGET_CHARS = 4200
 
 POLICY_TITLE = "# ServerPilot — Agent MCP Rules"
 POLICY_INTRO = "Use the local `serverpilot` MCP."

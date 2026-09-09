@@ -65,7 +65,7 @@ struct DashboardView: View {
         }) else { return notice }
 
         let task = runningLease.taskReference ?? runningLease.purpose ?? "未命名任务"
-        return "任务占用：\(runningLease.projectID) · \(task) · \(runningLease.gpuIDs.count) GPU。"
+        return "任务占用：\(runningLease.projectID) · \(task) · \(runningLease.gpuCount) GPU。"
     }
 }
 

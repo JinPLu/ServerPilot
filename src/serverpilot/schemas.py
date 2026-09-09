@@ -13,6 +13,35 @@ from serverpilot.config import (
     absolute_single_line_path,
     plain_text,
 )
+from serverpilot.provider_contract import AllocationFact
+
+
+class SchedulerNode(BaseModel):
+    """A scheduler node within one endpoint; never a physical GPU identity."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    name: str = Field(min_length=1, max_length=255)
+    state: str = Field(min_length=1, max_length=100)
+    total_gpus: int = Field(ge=0, le=100_000)
+    allocated_gpus: int = Field(ge=0, le=100_000)
+    schedulable: bool
+
+    @model_validator(mode="after")
+    def validate_allocation(self) -> SchedulerNode:
+        if self.allocated_gpus > self.total_gpus:
+            raise ValueError("allocated GPUs exceed node total")
+        return self
+
+
+def scheduler_nodes(value: Any) -> list[dict[str, Any]]:
+    if not isinstance(value, list):
+        raise ValueError("scheduler.nodes must be a list")
+    nodes = [SchedulerNode.model_validate(item).model_dump() for item in value]
+    names = [node["name"] for node in nodes]
+    if len(set(names)) != len(names):
+        raise ValueError("scheduler node names must be unique within an endpoint")
+    return nodes
 
 DEFAULT_LEASE_WINDOW_SECONDS = 8 * 60 * 60
 
@@ -423,8 +452,10 @@ class HostTelemetryInput(StrictModel):
         return self
 
 
-class EndpointObservation(StrictModel):
-    endpoint_id: str = Field(min_length=1, max_length=128)
+
+
+class NodeObservation(StrictModel):
+    node_id: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
     observed_at: datetime
     boot_id: str = Field(min_length=1, max_length=120)
     host: HostTelemetryInput
@@ -434,7 +465,6 @@ class EndpointObservation(StrictModel):
     # ``cpu_only`` is a positive hardware discovery result. ``unknown`` keeps
     # a failed NVIDIA probe fail-closed without overwriting earlier GPU facts.
     gpu_probe_status: Literal["gpu", "cpu_only", "unknown"] = "unknown"
-    scheduler: dict[str, Any] | None = None
 
     @field_validator("observed_at")
     @classmethod
@@ -444,7 +474,7 @@ class EndpointObservation(StrictModel):
         return value
 
     @model_validator(mode="after")
-    def gpu_identity_is_unique(self) -> EndpointObservation:
+    def gpu_identity_is_unique(self) -> NodeObservation:
         gpu_uuids = [gpu.gpu_uuid for gpu in self.gpus]
         if len(gpu_uuids) != len(set(gpu_uuids)):
             raise ValueError("observation gpus must contain unique gpu_uuid values")
@@ -457,3 +487,44 @@ class EndpointObservation(StrictModel):
         return self
 
 
+
+
+class NodeFailure(StrictModel):
+    node_id: str = Field(min_length=1, max_length=253, pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]*$")
+    error_code: str = Field(min_length=1, max_length=64)
+    message: str = Field(max_length=500)
+
+
+class EndpointObservation(StrictModel):
+    endpoint_id: str = Field(min_length=1, max_length=128)
+    observed_at: datetime
+    nodes: list[NodeObservation]
+    failures: list[NodeFailure] = Field(default_factory=list)
+    scheduler: dict[str, Any] | None = None
+    allocations: list[AllocationFact] = Field(default_factory=list, max_length=10000)
+
+    @field_validator("observed_at")
+    @classmethod
+    def timezone_required(cls, value: datetime) -> datetime:
+        if value.tzinfo is None:
+            raise ValueError("observed_at must include a timezone")
+        return value
+
+    @model_validator(mode="after")
+    def unique_nodes(self) -> EndpointObservation:
+        ids = [node.node_id for node in self.nodes] + [node.node_id for node in self.failures]
+        if len(ids) != len(set(ids)):
+            raise ValueError("node identities must be unique within an endpoint observation")
+        return self
+
+    @property
+    def observation_complete(self) -> bool:
+        return not self.failures and all(node.observation_complete for node in self.nodes)
+
+    @property
+    def gpus(self) -> list[TelemetryInput]:
+        return [gpu for node in self.nodes for gpu in node.gpus]
+
+    @property
+    def processes(self) -> list[ProcessInput]:
+        return [process for node in self.nodes for process in node.processes]

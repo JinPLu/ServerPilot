@@ -56,13 +56,13 @@ private struct ResourceUsageGroup: Identifiable {
 
     var assignedQuantities: ResourceQuantityRecord {
         ResourceQuantityRecord(
-            gpuCount: assignedLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
+            gpuCount: assignedLegacyLeases.reduce(0) { $0 + $1.gpuCount }
         )
     }
 
     var runningQuantities: ResourceQuantityRecord {
         ResourceQuantityRecord(
-            gpuCount: runningLegacyLeases.reduce(0) { $0 + $1.gpuIDs.count }
+            gpuCount: runningLegacyLeases.reduce(0) { $0 + $1.gpuCount }
         )
     }
 
@@ -115,12 +115,12 @@ private struct ResourceUsageProjection {
         assignedQuantities = ResourceQuantityRecord(
             gpuCount: snapshot.leases
                 .filter { $0.runtimeState != "RUNNING" }
-                .reduce(0) { $0 + $1.gpuIDs.count }
+                .reduce(0) { $0 + $1.gpuCount }
         )
         runningQuantities = ResourceQuantityRecord(
             gpuCount: snapshot.leases
                 .filter { $0.runtimeState == "RUNNING" }
-                .reduce(0) { $0 + $1.gpuIDs.count }
+                .reduce(0) { $0 + $1.gpuCount }
         )
         groupsByScope = [scope: makeResourceUsageGroups(snapshot: snapshot, scope: scope)]
     }
@@ -562,7 +562,7 @@ private struct ResourceLeaseDetailRow: View {
                         .lineLimit(1)
                 }
                 Spacer(minLength: 10)
-                Text("\(lease.gpuIDs.count) GPU")
+                Text("\(lease.gpuCount) GPU")
                     .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                 Button {
@@ -584,7 +584,10 @@ private struct ResourceLeaseDetailRow: View {
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
                 .disabled(!store.allowsMutations || store.releasingLeaseIDs.contains(lease.id))
-                .help(store.allowsMutations ? "释放 GPU；不会停止任务" : store.mutationUnavailableReason)
+                .help(store.allowsMutations ? (lease.allocations.contains { $0.releaseGranularity == "allocation" } ? "归还整个分配，提供方可能终止其中的程序" : "释放 GPU；不会停止任务") : store.mutationUnavailableReason)
+            }
+            ForEach(lease.allocations.filter { $0.releaseGranularity == "allocation" }) { allocation in
+                AllocationFactsView(allocation: allocation)
             }
         }
         .accessibilityElement(children: .contain)
@@ -617,7 +620,7 @@ private struct LeaseReassignmentSheet: View {
     }
 
     private var selectionIsComplete: Bool {
-        selectedGPUIDs.count == lease.gpuIDs.count
+        selectedGPUIDs.count == lease.gpuCount
     }
 
     private var selectionChanged: Bool {
@@ -647,7 +650,7 @@ private struct LeaseReassignmentSheet: View {
                 }
             }
 
-            Text("选择 \(lease.gpuIDs.count) 块目标 GPU。应用后，请让对应 Agent 按新分配的 CVD 重启任务。")
+            Text("选择 \(lease.gpuCount) 块目标 GPU。应用后，请让对应 Agent 按新分配的 CVD 重启任务。")
                 .font(.callout.weight(.medium))
                 .foregroundStyle(DesignTokens.ink)
                 .fixedSize(horizontal: false, vertical: true)
@@ -663,7 +666,7 @@ private struct LeaseReassignmentSheet: View {
             .frame(minHeight: 180, maxHeight: 360)
 
             if !selectionIsComplete {
-                Text("还需选择 \(lease.gpuIDs.count - selectedGPUIDs.count) 块 GPU。")
+                Text("还需选择 \(lease.gpuCount - selectedGPUIDs.count) 块 GPU。")
                     .font(.subheadline.weight(.semibold))
                     .foregroundStyle(DesignTokens.warning)
             }
@@ -723,7 +726,7 @@ private struct LeaseReassignmentSheet: View {
             resultMessage = nil
             if selected {
                 selectedGPUIDs.remove(gpu.id)
-            } else if selectedGPUIDs.count < lease.gpuIDs.count {
+            } else if selectedGPUIDs.count < lease.gpuCount {
                 selectedGPUIDs.insert(gpu.id)
             }
         } label: {

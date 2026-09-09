@@ -172,12 +172,13 @@ def test_routine_tool_parameter_names_are_unchanged() -> None:
 
     apply_schema = by_name["gpu_apply"].inputSchema
     assert set(apply_schema["properties"]) == {
+        "duration_seconds",
         "server_group_id",
         "server_id",
         "gpu_count",
         "task",
     }
-    assert "required" not in apply_schema
+    assert apply_schema["required"] == ["duration_seconds"]
     assert apply_schema["properties"]["gpu_count"]["default"] == 1
 
     release_schema = by_name["gpu_release"].inputSchema

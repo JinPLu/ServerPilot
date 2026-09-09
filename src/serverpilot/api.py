@@ -32,6 +32,7 @@ from serverpilot.config import Settings, load_inventory, project_root_override
 from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
+from serverpilot.provider_contract import ProviderConnectionUpdate
 from serverpilot.schemas import (
     CollectorSettingsUpdate,
     ControlPlaneSnapshot,
@@ -905,109 +906,6 @@ def create_app(
         async with keepalive_endpoint_locks(endpoint_ids):
             return await execute_locked()
 
-    async def apply_plugin_for_claim(
-        actor: ActorContext,
-        request_data: RequestCreate,
-        *,
-        idempotency_key: str | None,
-        persistent_lease: bool,
-    ) -> dict[str, Any] | None:
-        from serverpilot.plugins import (
-            PluginError,
-            apply_plugin,
-            get_plugin,
-            release_plugin,
-        )
-
-        async def plugin_for(profile: str):  # type: ignore[no-untyped-def]
-            """Resolve a profile to its plugin without blocking the event loop.
-
-            Resolution is discovery, and discovery forks each candidate's `info`
-            with a multi-second timeout. Called straight from this coroutine it
-            stopped every other request and every endpoint's probe for as long
-            as the slowest candidate took to answer.
-            """
-
-            return await asyncio.to_thread(get_plugin, profile)
-
-        endpoint_ids = request_data.constraints.endpoint_ids
-        group_ids = request_data.constraints.server_group_ids
-        endpoint = None
-        if len(endpoint_ids) == 1:
-            try:
-                endpoint = await service.in_domain(service.collector_endpoint, endpoint_ids[0])
-            except BrokerError:
-                return None
-        elif not endpoint_ids and len(group_ids) == 1:
-            matches = []
-            for item in await service.in_domain(service.collector_endpoints):
-                if item.server_group_id != group_ids[0]:
-                    continue
-                candidate = await plugin_for(item.observation_profile)
-                if candidate is not None and "apply" in candidate.capabilities:
-                    matches.append(item)
-            if len(matches) != 1:
-                return None
-            endpoint = matches[0]
-        else:
-            return None
-        if endpoint is None:
-            return None
-        plugin = await plugin_for(endpoint.observation_profile)
-        if plugin is None or "apply" not in plugin.capabilities:
-            return None
-        try:
-            # The cluster's own apply budget is seconds to minutes. Keeping it
-            # off the event loop is what lets the GUI and other claims stay
-            # responsive while one delegated cluster is deciding.
-            overlay = await asyncio.to_thread(
-                apply_plugin,
-                plugin.plugin_id,
-                gpu_count=request_data.constraints.gpu_count,
-                task_ref=request_data.task_ref,
-            )
-        except PluginError as exc:
-            if exc.no_capacity:
-                return None
-            raise BrokerError("plugin_apply_failed", str(exc), status_code=409) from exc
-        try:
-            await collect_keepalive_endpoint(endpoint)
-        except BrokerError:
-            with contextlib.suppress(PluginError):
-                await asyncio.to_thread(
-                    release_plugin,
-                    plugin.plugin_id,
-                    allocation_ref=str(overlay["allocation_ref"]),
-                )
-            raise
-        gpu_ids = _plugin_overlay_gpu_ids(endpoint.id, overlay)
-        retry_data = request_data
-        if gpu_ids and len(gpu_ids) == request_data.constraints.gpu_count:
-            retry_data = request_data.model_copy(
-                update={
-                    "constraints": request_data.constraints.model_copy(
-                        update={"gpu_ids": gpu_ids, "placement": "exact"}
-                    )
-                }
-            )
-        try:
-            return await service.in_domain(
-                service.create_request,
-                actor,
-                retry_data,
-                idempotency_key=idempotency_key,
-                persistent_lease=persistent_lease,
-                plugin_allocation=overlay,
-            )
-        except Exception:
-            with contextlib.suppress(PluginError):
-                await asyncio.to_thread(
-                    release_plugin,
-                    plugin.plugin_id,
-                    allocation_ref=str(overlay["allocation_ref"]),
-                )
-            raise
-
     async def claim_request_now(
         actor: ActorContext,
         request_data: RequestCreate,
@@ -1053,7 +951,7 @@ def create_app(
                 )
                 if claimed is not None:
                     return claimed
-                claimed = await apply_plugin_for_claim(
+                claimed = await service.claim_provider(
                     actor,
                     request_data,
                     idempotency_key=idempotency_key,
@@ -1155,6 +1053,14 @@ def create_app(
                 task.cancel()
             await asyncio.gather(*tasks.values(), return_exceptions=True)
 
+    async def connection_supervisor() -> None:
+        while True:
+            try:
+                await service.maintain_connections()
+            except Exception:
+                logging.getLogger(__name__).exception("connection state maintenance failed")
+            await asyncio.sleep(COLLECTOR_SUPERVISOR_INTERVAL_SECONDS)
+
     @contextlib.asynccontextmanager
     async def lifespan(application: FastAPI):
         task = None
@@ -1166,9 +1072,13 @@ def create_app(
                 clear_control_sockets(shared_collector.control_dir)
             task = asyncio.create_task(collector_supervisor(), name="serverpilot-collector")
         application.state.collector_task = task
+        connection_task = asyncio.create_task(connection_supervisor(), name="serverpilot-connections")
         try:
             yield
         finally:
+            connection_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await connection_task
             if task is not None:
                 task.cancel()
                 with contextlib.suppress(asyncio.CancelledError):
@@ -1675,6 +1585,16 @@ def create_app(
             group_id,
             idempotency_key=_idempotency_key(idempotency_key),
         )
+
+    @app.get("/api/v1/endpoints/{endpoint_id}/connection")
+    def endpoint_connection(endpoint_id: str, actor: ApiActor) -> dict[str, Any]:
+        return service.connection_status(actor, endpoint_id)
+
+    @app.put("/api/v1/endpoints/{endpoint_id}/connection")
+    async def update_endpoint_connection(
+        endpoint_id: str, update: ProviderConnectionUpdate, actor: ApiActor,
+    ) -> dict[str, Any]:
+        return await service.set_connection(actor, endpoint_id, enabled=update.enabled)
 
     @app.patch("/api/v1/endpoints/{endpoint_id}")
     def update_endpoint(

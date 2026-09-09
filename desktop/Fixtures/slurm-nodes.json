@@ -1,0 +1,1334 @@
+{
+  "schema_version": "v1",
+  "snapshot_revision": 301,
+  "server_time": "2026-08-27T00:00:00Z",
+  "data": {
+    "current": {
+      "summary": {
+        "online_servers": 21,
+        "total_servers": 21,
+        "total_gpus": 20,
+        "available_gpus": 20,
+        "busy_gpus": 0,
+        "claimed_gpus": 0,
+        "abnormal_gpus": 0
+      },
+      "server_groups": [
+        {
+          "id": "hanhai-fixture",
+          "display_name": "瀚海 22",
+          "workspace_path": "/srv/hanhai",
+          "allocation": "delegated",
+          "largest_allocatable_block": 8
+        },
+        {
+          "id": "direct-fixture",
+          "display_name": "百度百舸",
+          "workspace_path": "/srv/direct",
+          "allocation": "direct"
+        }
+      ],
+      "endpoints": [
+        {
+          "id": "cluster-login",
+          "host": "cluster.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "hanhai-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "observation_profile": "slurm-immediate",
+          "resource_kind": "cpu_only",
+          "scheduler_capacity": {
+            "free_gpu_count": 67,
+            "gpu_name": "NVIDIA A100-SXM4-80GB",
+            "largest_free_block": 8
+          },
+          "keepalive": null,
+          "nodes": [
+            {
+              "name": "gnode01",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode02",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode03",
+              "state": "idle",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode04",
+              "state": "alloc",
+              "total_gpus": 8,
+              "allocated_gpus": 8,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode05",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode06",
+              "state": "idle",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode07",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode08",
+              "state": "alloc",
+              "total_gpus": 8,
+              "allocated_gpus": 8,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode09",
+              "state": "idle",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode10",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode11",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode12",
+              "state": "alloc",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode13",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode14",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode15",
+              "state": "idle",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode16",
+              "state": "alloc",
+              "total_gpus": 8,
+              "allocated_gpus": 8,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode17",
+              "state": "mix",
+              "total_gpus": 8,
+              "allocated_gpus": 5,
+              "schedulable": true,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            },
+            {
+              "name": "gnode18",
+              "state": "drain",
+              "total_gpus": 8,
+              "allocated_gpus": 0,
+              "schedulable": false,
+              "gpu_name": "NVIDIA A100-SXM4-80GB"
+            }
+          ]
+        },
+        {
+          "id": "lab-01",
+          "host": "lab-01.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-02",
+          "host": "lab-02.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-03",
+          "host": "lab-03.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-04",
+          "host": "lab-04.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-05",
+          "host": "lab-05.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-06",
+          "host": "lab-06.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-07",
+          "host": "lab-07.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-08",
+          "host": "lab-08.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-09",
+          "host": "lab-09.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-10",
+          "host": "lab-10.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-11",
+          "host": "lab-11.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-12",
+          "host": "lab-12.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-13",
+          "host": "lab-13.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-14",
+          "host": "lab-14.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-15",
+          "host": "lab-15.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-16",
+          "host": "lab-16.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-17",
+          "host": "lab-17.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-18",
+          "host": "lab-18.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-19",
+          "host": "lab-19.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        },
+        {
+          "id": "lab-20",
+          "host": "lab-20.example.test",
+          "port": 2221,
+          "ssh_user": "gpu",
+          "server_group_id": "direct-fixture",
+          "workspace_path": "/srv/serverpilot-fixtures",
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "storage_group": "fixture",
+          "expected_gpu_count": 1,
+          "expected_gpu_total_vram_mib": 81920,
+          "owner_project_id": null,
+          "monitor": {
+            "status": "ONLINE"
+          },
+          "host_telemetry": {
+            "cpu_count": 64,
+            "load_1m": 7.0,
+            "memory_total_mib": 262144,
+            "memory_available_mib": 188743,
+            "capacity": {
+              "cpu_scope": "host",
+              "cpu_cores": 64.0,
+              "cpu_available_cores": 57.0,
+              "memory_scope": "host",
+              "memory_total_mib": 262144,
+              "memory_used_mib": 73401,
+              "memory_available_mib": 188743
+            }
+          },
+          "scheduler_capacity": null
+        }
+      ],
+      "gpus": [
+        {
+          "id": "gpu-01",
+          "endpoint_id": "lab-01",
+          "gpu_uuid": "GPU-fixture-1",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-02",
+          "endpoint_id": "lab-02",
+          "gpu_uuid": "GPU-fixture-2",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-03",
+          "endpoint_id": "lab-03",
+          "gpu_uuid": "GPU-fixture-3",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-04",
+          "endpoint_id": "lab-04",
+          "gpu_uuid": "GPU-fixture-4",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-05",
+          "endpoint_id": "lab-05",
+          "gpu_uuid": "GPU-fixture-5",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-06",
+          "endpoint_id": "lab-06",
+          "gpu_uuid": "GPU-fixture-6",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-07",
+          "endpoint_id": "lab-07",
+          "gpu_uuid": "GPU-fixture-7",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-08",
+          "endpoint_id": "lab-08",
+          "gpu_uuid": "GPU-fixture-8",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-09",
+          "endpoint_id": "lab-09",
+          "gpu_uuid": "GPU-fixture-9",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-10",
+          "endpoint_id": "lab-10",
+          "gpu_uuid": "GPU-fixture-10",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-11",
+          "endpoint_id": "lab-11",
+          "gpu_uuid": "GPU-fixture-11",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-12",
+          "endpoint_id": "lab-12",
+          "gpu_uuid": "GPU-fixture-12",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-13",
+          "endpoint_id": "lab-13",
+          "gpu_uuid": "GPU-fixture-13",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-14",
+          "endpoint_id": "lab-14",
+          "gpu_uuid": "GPU-fixture-14",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-15",
+          "endpoint_id": "lab-15",
+          "gpu_uuid": "GPU-fixture-15",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-16",
+          "endpoint_id": "lab-16",
+          "gpu_uuid": "GPU-fixture-16",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-17",
+          "endpoint_id": "lab-17",
+          "gpu_uuid": "GPU-fixture-17",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-18",
+          "endpoint_id": "lab-18",
+          "gpu_uuid": "GPU-fixture-18",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-19",
+          "endpoint_id": "lab-19",
+          "gpu_uuid": "GPU-fixture-19",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        },
+        {
+          "id": "gpu-20",
+          "endpoint_id": "lab-20",
+          "gpu_uuid": "GPU-fixture-20",
+          "gpu_index": 0,
+          "name": "Fixture GPU",
+          "total_vram_mib": 81920,
+          "labels": {
+            "fixture": "true",
+            "surface": "desktop-ui"
+          },
+          "health": "OK",
+          "state": "AVAILABLE",
+          "telemetry": {
+            "memory_used_mib": 1024,
+            "gpu_utilization_pct": 4,
+            "temperature_c": 34
+          },
+          "processes": []
+        }
+      ],
+      "leases": [],
+      "data_age_seconds": 2,
+      "reservations": [],
+      "freshness_seconds": 30,
+      "admission_boundary": "Fixture: allocation only.",
+      "absent_gpu_ids": [],
+      "maintenance": [],
+      "alerts": []
+    },
+    "history": {}
+  }
+}

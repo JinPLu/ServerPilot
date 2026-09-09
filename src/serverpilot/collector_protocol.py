@@ -9,7 +9,7 @@ plugin. What survives is the JSON contract itself, because a plugin's
 
 from __future__ import annotations
 
-SERVER_SCRIPT_SCHEMA_VERSION = 2
+SERVER_SCRIPT_SCHEMA_VERSION = 3
 
 # Optional snapshot field. Schema admission stays on ``schema_version``; a
 # missing implementation version must not reject an otherwise valid collector.

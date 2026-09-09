@@ -36,7 +36,13 @@ from serverpilot.collector_protocol import (
     remember_collector_implementation_version,
 )
 from serverpilot.config import EndpointConfig, InventoryConfig, default_control_dir
-from serverpilot.schemas import EndpointObservation, ProcessInput, TelemetryInput
+from serverpilot.schemas import (
+    EndpointObservation,
+    NodeObservation,
+    ProcessInput,
+    TelemetryInput,
+    scheduler_nodes,
+)
 from serverpilot.service import BrokerService
 from serverpilot.timeutil import utcnow
 
@@ -111,7 +117,7 @@ def classify_failure(exc: BaseException) -> str:
     if isinstance(exc, TimeoutError):
         return "command_timeout"
     if isinstance(exc, PluginError):
-        return "plugin_error"
+        return exc.code
     if isinstance(exc, ProbeFailed):
         if exc.reached_remote:
             return "remote_error"
@@ -240,308 +246,37 @@ def _timestamp(value: Any, *, label: str) -> datetime:
     return parsed
 
 
-def parse_server_script_snapshot(
-    raw: str,
-    *,
-    endpoint_id: str,
-    observed_at: datetime,
-) -> EndpointObservation:
-    """Validate a schema-v1 server-script snapshot before building domain input.
-
-    This accepts one JSON object only.  It rejects duplicate object keys,
-    unknown fields, type coercion, unbounded collections, duplicate GPU/process
-    identities, and GPU/process relationships that the broker cannot safely
-    attribute to one endpoint.
-    """
-
-    try:
-        encoded = raw.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise CollectionError("server collector stdout is not valid Unicode") from exc
-    if len(encoded) > MAX_SERVER_SCRIPT_SNAPSHOT_BYTES:
+def parse_server_script_snapshot(raw: str, *, endpoint_id: str, observed_at: datetime) -> EndpointObservation:
+    """Decode transport results; every successful node uses the same sealed parser."""
+    if len(raw.encode("utf-8")) > MAX_SERVER_SCRIPT_SNAPSHOT_BYTES:
         raise CollectionError("server collector snapshot exceeded the stdout limit")
     try:
-        decoded = json.loads(
-            raw,
-            object_pairs_hook=_no_duplicate_json_object,
-            parse_constant=_reject_json_constant,
-        )
-    except (json.JSONDecodeError, CollectionError) as exc:
-        raise CollectionError(f"server collector returned invalid JSON: {exc}") from exc
-    snapshot = _mapping(
-        decoded,
-        label="snapshot",
-        keys={"schema_version", "identity", "host", "gpu_probe_available", "gpus", "processes"},
-        optional_keys={"gpu_probe_status", "scheduler", "implementation_version"},
-    )
-    if (
-        type(snapshot["schema_version"]) is not int
-        or snapshot["schema_version"] != SERVER_SCRIPT_SCHEMA_VERSION
-    ):
-        raise CollectionError(
-            f"server collector schema_version must be {SERVER_SCRIPT_SCHEMA_VERSION}"
-        )
-    implementation_version = _optional_implementation_version(snapshot.get("implementation_version"))
-    if type(snapshot["gpu_probe_available"]) is not bool:
-        raise CollectionError("server collector gpu_probe_available must be a boolean")
-    gpu_probe_status = snapshot.get("gpu_probe_status")
-    if gpu_probe_status is None:
-        gpu_probe_status = "gpu" if snapshot["gpu_probe_available"] else "unknown"
-    if gpu_probe_status not in {"gpu", "cpu_only", "unknown"}:
-        raise CollectionError("server collector gpu_probe_status is invalid")
-
-    identity = _mapping(snapshot["identity"], label="identity", keys={"hostname", "boot_id"})
-    _text(identity["hostname"], label="identity.hostname", maximum=253)
-    boot_id = _text(identity["boot_id"], label="identity.boot_id", maximum=120)
-    assert boot_id is not None
-    host = _mapping(
-        snapshot["host"],
-        label="host",
-        keys={
-            "cpu_count",
-            "load_1m",
-            "cpu_total_ticks",
-            "cpu_idle_ticks",
-            "memory_total_mib",
-            "memory_available_mib",
-        },
-        optional_keys={
-            "cpu_usage_usec",
-            "cpu_quota_usec",
-            "cpu_period_usec",
-            "memory_limit_mib",
-            "memory_current_mib",
-        },
-    )
-    cpu_count = _integer(host["cpu_count"], label="host.cpu_count", minimum=1, maximum=1_048_576)
-    load_1m = _number(host["load_1m"], label="host.load_1m", minimum=0)
-    cpu_total_ticks = _integer(
-        host["cpu_total_ticks"], label="host.cpu_total_ticks", minimum=0
-    )
-    cpu_idle_ticks = _integer(host["cpu_idle_ticks"], label="host.cpu_idle_ticks", minimum=0)
-    cpu_usage_usec = _integer(
-        host.get("cpu_usage_usec"), label="host.cpu_usage_usec", minimum=0, nullable=True
-    )
-    cpu_quota_usec = _integer(
-        host.get("cpu_quota_usec"), label="host.cpu_quota_usec", minimum=0, nullable=True
-    )
-    cpu_period_usec = _integer(
-        host.get("cpu_period_usec"), label="host.cpu_period_usec", minimum=1, nullable=True
-    )
-    memory_total_mib = _integer(
-        host["memory_total_mib"], label="host.memory_total_mib", minimum=1
-    )
-    memory_available_mib = _integer(
-        host["memory_available_mib"], label="host.memory_available_mib", minimum=0
-    )
-    memory_limit_mib = _integer(
-        host.get("memory_limit_mib"), label="host.memory_limit_mib", minimum=1, nullable=True
-    )
-    memory_current_mib = _integer(
-        host.get("memory_current_mib"),
-        label="host.memory_current_mib",
-        minimum=0,
-        nullable=True,
-    )
-    assert (
-        cpu_count is not None
-        and load_1m is not None
-        and cpu_total_ticks is not None
-        and cpu_idle_ticks is not None
-        and memory_total_mib is not None
-        and memory_available_mib is not None
-    )
-    if cpu_idle_ticks > cpu_total_ticks or memory_available_mib > memory_total_mib:
-        raise CollectionError("server collector host telemetry is internally inconsistent")
-
-    gpus: list[TelemetryInput] = []
-    gpu_uuids: set[str] = set()
-    gpu_indexes: set[int] = set()
-    cuda_ordinals: set[int] = set()
-    gpu_totals: dict[str, int] = {}
-    for position, value in enumerate(
-        _list(snapshot["gpus"], label="gpus", maximum=MAX_SERVER_SCRIPT_GPU_COUNT)
-    ):
-        gpu = _mapping(
-            value,
-            label=f"gpus[{position}]",
-            keys={
-                "gpu_index",
-                "cuda_ordinal",
-                "gpu_uuid",
-                "name",
-                "total_vram_mib",
-                "memory_used_mib",
-                "memory_free_mib",
-                "gpu_utilization_pct",
-                "memory_utilization_pct",
-                "temperature_c",
-                "power_watts",
-                "pstate",
-                "health",
-            },
-        )
-        gpu_index = _integer(gpu["gpu_index"], label=f"gpus[{position}].gpu_index", minimum=0, maximum=1024)
-        cuda_ordinal = _integer(
-            gpu["cuda_ordinal"],
-            label=f"gpus[{position}].cuda_ordinal",
-            minimum=0,
-            maximum=1024,
-        )
-        gpu_uuid = _text(gpu["gpu_uuid"], label=f"gpus[{position}].gpu_uuid", maximum=160)
-        name = _text(gpu["name"], label=f"gpus[{position}].name", maximum=255)
-        total = _integer(gpu["total_vram_mib"], label=f"gpus[{position}].total_vram_mib", minimum=1)
-        used = _integer(gpu["memory_used_mib"], label=f"gpus[{position}].memory_used_mib", minimum=0)
-        free = _integer(gpu["memory_free_mib"], label=f"gpus[{position}].memory_free_mib", minimum=0)
-        gpu_utilization = _integer(
-            gpu["gpu_utilization_pct"],
-            label=f"gpus[{position}].gpu_utilization_pct",
-            minimum=0,
-            maximum=100,
-            nullable=True,
-        )
-        memory_utilization = _integer(
-            gpu["memory_utilization_pct"],
-            label=f"gpus[{position}].memory_utilization_pct",
-            minimum=0,
-            maximum=100,
-            nullable=True,
-        )
-        temperature = _integer(
-            gpu["temperature_c"],
-            label=f"gpus[{position}].temperature_c",
-            minimum=-100,
-            maximum=300,
-            nullable=True,
-        )
-        power = _number(
-            gpu["power_watts"], label=f"gpus[{position}].power_watts", minimum=0, nullable=True
-        )
-        pstate = _text(gpu["pstate"], label=f"gpus[{position}].pstate", maximum=32, nullable=True)
-        health = _text(gpu["health"], label=f"gpus[{position}].health", maximum=32)
-        assert (
-            gpu_index is not None
-            and cuda_ordinal is not None
-            and gpu_uuid is not None
-            and name is not None
-            and total is not None
-            and used is not None
-            and free is not None
-            and health is not None
-        )
-        if (
-            gpu_uuid in gpu_uuids
-            or gpu_index in gpu_indexes
-            or cuda_ordinal in cuda_ordinals
-        ):
-            raise CollectionError("server collector snapshot contains duplicate GPU identities")
-        if used > total or free > total:
-            raise CollectionError("server collector GPU memory telemetry is internally inconsistent")
-        gpu_uuids.add(gpu_uuid)
-        gpu_indexes.add(gpu_index)
-        cuda_ordinals.add(cuda_ordinal)
-        gpu_totals[gpu_uuid] = total
-        gpus.append(
-            TelemetryInput(
-                gpu_index=gpu_index,
-                cuda_ordinal=cuda_ordinal,
-                gpu_uuid=gpu_uuid,
-                name=name,
-                total_vram_mib=total,
-                memory_used_mib=used,
-                memory_free_mib=free,
-                gpu_utilization_pct=gpu_utilization,
-                memory_utilization_pct=memory_utilization,
-                temperature_c=temperature,
-                power_watts=power,
-                pstate=pstate,
-                health=health,
-            )
-        )
-
-    processes: list[ProcessInput] = []
-    process_identities: set[tuple[str, int]] = set()
-    for position, value in enumerate(
-        _list(snapshot["processes"], label="processes", maximum=MAX_SERVER_SCRIPT_PROCESS_COUNT)
-    ):
-        process = _mapping(
-            value,
-            label=f"processes[{position}]",
-            keys={
-                "gpu_uuid",
-                "pid",
-                "used_memory_mib",
-                "executable",
-                "username",
-                "process_started_at",
-            },
-        )
-        gpu_uuid = _text(process["gpu_uuid"], label=f"processes[{position}].gpu_uuid", maximum=160)
-        pid = _integer(process["pid"], label=f"processes[{position}].pid", minimum=1, maximum=2**31 - 1)
-        used_memory_mib = _integer(
-            process["used_memory_mib"], label=f"processes[{position}].used_memory_mib", minimum=0
-        )
-        executable = _text(process["executable"], label=f"processes[{position}].executable", maximum=255)
-        username = _text(
-            process["username"], label=f"processes[{position}].username", maximum=120, nullable=True
-        )
-        process_started_at = _timestamp(
-            process["process_started_at"], label=f"processes[{position}].process_started_at"
-        )
-        assert gpu_uuid is not None and pid is not None and used_memory_mib is not None and executable is not None
-        identity_key = (gpu_uuid, pid)
-        if (
-            gpu_uuid not in gpu_uuids
-            or identity_key in process_identities
-            or used_memory_mib > gpu_totals[gpu_uuid]
-        ):
-            raise CollectionError("server collector snapshot contains invalid or duplicate process identities")
-        process_identities.add(identity_key)
-        processes.append(
-            ProcessInput(
-                gpu_uuid=gpu_uuid,
-                pid=pid,
-                used_memory_mib=used_memory_mib,
-                executable=executable,
-                username=username,
-                process_started_at=process_started_at,
-            )
-        )
-
-    gpu_probe_available = snapshot["gpu_probe_available"]
-    if not gpu_probe_available and (gpus or processes):
-        raise CollectionError("server collector marked GPU probe unavailable but returned GPU data")
-    if gpu_probe_available and not gpus:
-        raise CollectionError("server collector marked GPU probe available but returned no GPUs")
-    if gpu_probe_status == "gpu" and not gpu_probe_available:
-        raise CollectionError("server collector marked GPU status without GPU telemetry")
-    if gpu_probe_status != "gpu" and gpu_probe_available:
-        raise CollectionError("server collector GPU probe status conflicts with telemetry")
-    observation = EndpointObservation(
-        endpoint_id=endpoint_id,
-        observed_at=observed_at,
-        boot_id=boot_id,
-        host={
-            "cpu_count": cpu_count,
-            "load_1m": load_1m,
-            "cpu_total_ticks": cpu_total_ticks,
-            "cpu_idle_ticks": cpu_idle_ticks,
-            "cpu_usage_usec": cpu_usage_usec,
-            "cpu_quota_usec": cpu_quota_usec,
-            "cpu_period_usec": cpu_period_usec,
-            "memory_total_mib": memory_total_mib,
-            "memory_available_mib": memory_available_mib,
-            "memory_limit_mib": memory_limit_mib,
-            "memory_current_mib": memory_current_mib,
-        },
-        gpus=gpus,
-        processes=processes,
-        observation_complete=gpu_probe_status != "unknown",
-        gpu_probe_status=gpu_probe_status,
-        scheduler=_scheduler_capacity(snapshot.get("scheduler")),
-    )
-    remember_collector_implementation_version(observation, implementation_version)
-    return observation
+        payload = json.loads(raw, object_pairs_hook=_no_duplicate_json_object,
+                             parse_constant=_reject_json_constant)
+        snapshot = _mapping(payload, label="snapshot",
+            keys={"schema_version", "nodes", "scheduler", "allocations"},
+            optional_keys={"implementation_version"})
+        if type(snapshot["schema_version"]) is not int or snapshot["schema_version"] != SERVER_SCRIPT_SCHEMA_VERSION:
+            raise CollectionError(f"server collector schema_version must be {SERVER_SCRIPT_SCHEMA_VERSION}")
+        nodes, failures = [], []
+        for raw_node in _list(snapshot["nodes"], label="nodes", maximum=1024):
+            node = _mapping(raw_node, label="node", keys={"node_id", "observed_at", "output", "error_code", "message"})
+            if node["error_code"] is not None:
+                if node["output"] is not None:
+                    raise CollectionError("failed node must not contain a successful probe")
+                failures.append({"node_id": node["node_id"], "error_code": node["error_code"], "message": node["message"]})
+                continue
+            try:
+                nodes.append(parse_raw_node_probe(node["output"], node_id=node["node_id"], observed_at=_timestamp(node["observed_at"], label="node.observed_at")))
+            except (ValueError, CollectionError) as exc:
+                failures.append({"node_id": node["node_id"], "error_code": "parse_error", "message": str(exc)[:500]})
+        observation = EndpointObservation(endpoint_id=endpoint_id, observed_at=observed_at,
+            nodes=nodes, failures=failures, scheduler=_scheduler_capacity(snapshot["scheduler"]),
+            allocations=snapshot["allocations"])
+        remember_collector_implementation_version(observation, _optional_implementation_version(snapshot.get("implementation_version")))
+        return observation
+    except (ValueError, TypeError, KeyError) as exc:
+        raise CollectionError(f"invalid node observation: {exc}") from exc
 
 
 def _optional_implementation_version(value: Any) -> str | None:
@@ -564,6 +299,7 @@ def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
             "max_gpus_per_lease",
             "cpu_cores_per_gpu",
             "memory_mib_per_gpu",
+            "nodes", "observed_at",
         },
     )
     free_gpu_count = _integer(
@@ -573,6 +309,15 @@ def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
     note = _text(scheduler.get("note"), label="scheduler.note", maximum=200, nullable=True)
     assert free_gpu_count is not None and gpu_name is not None
     payload: dict[str, Any] = {"free_gpu_count": free_gpu_count, "gpu_name": gpu_name}
+    if "observed_at" in scheduler:
+        value = scheduler["observed_at"]
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                raise ValueError("timezone missing")
+        except (ValueError, AttributeError, TypeError) as exc:
+            raise CollectionError("scheduler.observed_at must include a timezone") from exc
+        payload["observed_at"] = value
     if "largest_free_block" in scheduler:
         largest_free_block = _integer(
             scheduler["largest_free_block"],
@@ -617,6 +362,11 @@ def _scheduler_capacity(value: Any) -> dict[str, Any] | None:
         )
         assert memory_mib_per_gpu is not None
         payload["memory_mib_per_gpu"] = memory_mib_per_gpu
+    if "nodes" in scheduler:
+        try:
+            payload["nodes"] = scheduler_nodes(scheduler["nodes"])
+        except ValueError as exc:
+            raise CollectionError(f"invalid scheduler nodes: {exc}") from exc
     if note is not None:
         payload["note"] = note
     return payload
@@ -954,6 +704,65 @@ async def default_runner(
     return result.stdout
 
 
+def parse_raw_node_probe(raw: str, *, node_id: str, observed_at: datetime) -> NodeObservation:
+    gpu_raw, process_raw, process_details_raw, identity_raw, host_raw = parse_combined_probe(raw)
+    # CPU-only is a positive discovery result: the NVIDIA runtime is
+    # absent, or it successfully reports no rows. A failed query remains
+    # unknown and cannot overwrite earlier GPU facts.
+    gpu_probe_status = (
+        "cpu_only"
+        if GPU_CPU_ONLY in gpu_raw.splitlines()
+        else "unknown"
+        if GPU_UNAVAILABLE in gpu_raw.splitlines()
+        else "gpu"
+    )
+    gpu_probe_available = gpu_probe_status == "gpu"
+    gpus = parse_gpu_csv(gpu_raw) if gpu_probe_available else []
+    apps = parse_process_csv(process_raw) if gpu_probe_available else []
+    _hostname, boot_id = parse_identity(identity_raw)
+    host_snapshot = parse_host_resource_snapshot(host_raw)
+    details = parse_ps_output(process_details_raw, observed_at)
+    processes = []
+    for app in apps:
+        username, started_at, executable = details.get(
+            app.pid, (None, observed_at, app.process_name)
+        )
+        processes.append(
+            ProcessInput(
+                gpu_uuid=app.gpu_uuid,
+                pid=app.pid,
+                used_memory_mib=app.used_memory_mib,
+                executable=executable,
+                username=username,
+                process_started_at=started_at,
+            )
+        )
+    return NodeObservation(
+        node_id=node_id,
+        observed_at=observed_at,
+        boot_id=boot_id,
+        host={
+            "cpu_count": host_snapshot.cpu_count,
+            "load_1m": host_snapshot.load_1m,
+            "cpu_total_ticks": host_snapshot.cpu_total_ticks,
+            "cpu_idle_ticks": host_snapshot.cpu_idle_ticks,
+            "cpu_usage_usec": host_snapshot.cpu_usage_usec,
+            "cpu_quota_usec": host_snapshot.cpu_quota_usec,
+            "cpu_period_usec": host_snapshot.cpu_period_usec,
+            "memory_total_mib": host_snapshot.memory_total_mib,
+            "memory_available_mib": host_snapshot.memory_available_mib,
+            "memory_limit_mib": host_snapshot.memory_limit_mib,
+            "memory_current_mib": host_snapshot.memory_current_mib,
+        },
+        gpus=gpus,
+        processes=processes,
+        # An unknown NVIDIA probe does not mark previously known GPUs
+        # absent. A confirmed CPU-only endpoint is a complete host result.
+        observation_complete=gpu_probe_status != "unknown",
+        gpu_probe_status=gpu_probe_status,
+    )
+
+
 class SSHCollector:
     def __init__(
         self,
@@ -998,64 +807,11 @@ class SSHCollector:
                 endpoint_id=endpoint.id,
                 observed_at=observed_at,
             )
-        gpu_raw, process_raw, process_details_raw, identity_raw, host_raw = parse_combined_probe(
-            await self._run(endpoint, probe="endpoint-telemetry")
+        node = parse_raw_node_probe(
+            await self._run(endpoint, probe="endpoint-telemetry"),
+            node_id="self", observed_at=observed_at,
         )
-        # CPU-only is a positive discovery result: the NVIDIA runtime is
-        # absent, or it successfully reports no rows. A failed query remains
-        # unknown and cannot overwrite earlier GPU facts.
-        gpu_probe_status = (
-            "cpu_only"
-            if GPU_CPU_ONLY in gpu_raw.splitlines()
-            else "unknown"
-            if GPU_UNAVAILABLE in gpu_raw.splitlines()
-            else "gpu"
-        )
-        gpu_probe_available = gpu_probe_status == "gpu"
-        gpus = parse_gpu_csv(gpu_raw) if gpu_probe_available else []
-        apps = parse_process_csv(process_raw) if gpu_probe_available else []
-        _hostname, boot_id = parse_identity(identity_raw)
-        host_snapshot = parse_host_resource_snapshot(host_raw)
-        details = parse_ps_output(process_details_raw, observed_at)
-        processes = []
-        for app in apps:
-            username, started_at, executable = details.get(
-                app.pid, (None, observed_at, app.process_name)
-            )
-            processes.append(
-                ProcessInput(
-                    gpu_uuid=app.gpu_uuid,
-                    pid=app.pid,
-                    used_memory_mib=app.used_memory_mib,
-                    executable=executable,
-                    username=username,
-                    process_started_at=started_at,
-                )
-            )
-        return EndpointObservation(
-            endpoint_id=endpoint.id,
-            observed_at=observed_at,
-            boot_id=boot_id,
-            host={
-                "cpu_count": host_snapshot.cpu_count,
-                "load_1m": host_snapshot.load_1m,
-                "cpu_total_ticks": host_snapshot.cpu_total_ticks,
-                "cpu_idle_ticks": host_snapshot.cpu_idle_ticks,
-                "cpu_usage_usec": host_snapshot.cpu_usage_usec,
-                "cpu_quota_usec": host_snapshot.cpu_quota_usec,
-                "cpu_period_usec": host_snapshot.cpu_period_usec,
-                "memory_total_mib": host_snapshot.memory_total_mib,
-                "memory_available_mib": host_snapshot.memory_available_mib,
-                "memory_limit_mib": host_snapshot.memory_limit_mib,
-                "memory_current_mib": host_snapshot.memory_current_mib,
-            },
-            gpus=gpus,
-            processes=processes,
-            # An unknown NVIDIA probe does not mark previously known GPUs
-            # absent. A confirmed CPU-only endpoint is a complete host result.
-            observation_complete=gpu_probe_status != "unknown",
-            gpu_probe_status=gpu_probe_status,
-        )
+        return EndpointObservation(endpoint_id=endpoint.id, observed_at=observed_at, nodes=[node])
 
     async def observe_and_ingest(
         self, service: BrokerService, endpoint: EndpointConfig

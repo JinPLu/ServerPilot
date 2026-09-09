@@ -1,6 +1,8 @@
 #!/bin/zsh
 set -euo pipefail
 
+python3 "${0:A:h}/../src/serverpilot/observation_probe.py"
+
 script_dir=${0:A:h}
 project_root=${script_dir:h}
 final_app_bundle="${project_root}/ServerPilot.app"

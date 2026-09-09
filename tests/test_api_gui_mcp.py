@@ -701,8 +701,8 @@ def test_mcp_exposes_required_tools() -> None:
     ):
         assert retired_routine_tool not in names
     apply_schema = by_name["gpu_apply"].inputSchema
-    assert "required" not in apply_schema
-    assert {"server_group_id", "server_id", "gpu_count", "task"} == set(apply_schema["properties"])
+    assert apply_schema["required"] == ["duration_seconds"]
+    assert {"duration_seconds", "server_group_id", "server_id", "gpu_count", "task"} == set(apply_schema["properties"])
     assert apply_schema["properties"]["gpu_count"]["default"] == 1
     assert "project_id" not in apply_schema["properties"]
     assert "idempotency_key" not in apply_schema["properties"]
@@ -871,7 +871,7 @@ def test_mcp_common_tools_do_not_preflight_health(monkeypatch) -> None:  # type:
         "_routine_client",
         lambda: FakeClient(),
     )
-    result = tools.gpu_apply(server_id="server-a", gpu_count=2, task="训练")
+    result = tools.gpu_apply(duration_seconds=3600, server_id="server-a", gpu_count=2, task="训练")
     workspace = {
         "path": "/srv/server-a",
         "kind": "working_directory",
@@ -1579,7 +1579,7 @@ def test_mcp_reads_distinguish_internal_keepalive_from_available_capacity(
     # that is ServerPilot's own bookkeeping.  A routine caller can act only on
     # whether the card can be claimed, and both can, so the mechanism stays
     # inside: no keepalive field, no telemetry carrying its hold.
-    rendered = json.dumps(status)
+    rendered = json.dumps(status.get("ungrouped_servers", []))
     assert "keepalive" not in rendered
     assert "GPU-endpoint-a-0" not in rendered
     # The GUI still sees the distinction on its own path.

@@ -41,7 +41,7 @@ def test_a_full_cluster_comes_back_as_a_result_not_an_error(
         ),
     )
 
-    result = tools.gpu_apply(gpu_count=8, task="probe")
+    result = tools.gpu_apply(duration_seconds=3600, gpu_count=8, task="probe")
 
     assert set(result) == {"no_capacity"}
     assert result["no_capacity"]["gpu_count"] == 8
@@ -57,7 +57,7 @@ def test_the_narrowed_server_is_echoed_back(monkeypatch: pytest.MonkeyPatch) -> 
         BrokerClientError("broker HTTP 409: no_capacity: none", code="no_capacity"),
     )
 
-    result = tools.gpu_apply(server_id="server-a", gpu_count=2, task="probe")
+    result = tools.gpu_apply(duration_seconds=3600, server_id="server-a", gpu_count=2, task="probe")
 
     assert result["no_capacity"]["server_id"] == "server-a"
     assert result["no_capacity"]["gpu_count"] == 2
@@ -76,7 +76,7 @@ def test_other_broker_errors_still_surface_as_failures(
     )
 
     with pytest.raises(BrokerClientError):
-        tools.gpu_apply(gpu_count=1, task="probe")
+        tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="probe")
 
 
 def test_a_transport_failure_is_retried_once_with_the_same_key(
@@ -88,7 +88,7 @@ def test_a_transport_failure_is_retried_once_with_the_same_key(
     )
 
     with pytest.raises(BrokerClientError):
-        tools.gpu_apply(gpu_count=1, task="probe")
+        tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="probe")
 
     assert client.calls == 2
 
@@ -103,7 +103,7 @@ def test_a_read_timeout_is_not_replayed(monkeypatch: pytest.MonkeyPatch) -> None
     client = _install(monkeypatch, BrokerClientError("broker request failed: ReadTimeout"))
 
     with pytest.raises(BrokerClientError, match="ReadTimeout"):
-        tools.gpu_apply(gpu_count=1, task="probe")
+        tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="probe")
 
     assert client.calls == 1
 
@@ -129,7 +129,7 @@ def test_a_full_cluster_found_on_the_retry_is_still_data(
     client = Retrying()
     monkeypatch.setattr(mcp_server, "_routine_client", lambda: client)
 
-    result = tools.gpu_apply(gpu_count=1, task="probe")
+    result = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="probe")
 
     assert set(result) == {"no_capacity"}
     assert client.calls == 2
@@ -239,7 +239,7 @@ def test_no_capacity_carries_the_leases_the_caller_could_release(
     client = RefusingButReadable()
     monkeypatch.setattr(mcp_server, "_routine_client", lambda: client)
 
-    result = tools.gpu_apply(gpu_count=1, task="needs a card")
+    result = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="needs a card")
 
     assert set(result) == {"no_capacity"}
     assert result["no_capacity"]["open_leases"] == [

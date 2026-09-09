@@ -30,6 +30,7 @@ from serverpilot.collector_protocol import (
 )
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.importer import import_servers_files, parse_ssh_command
+from tests.helpers import probe_bundle
 
 
 def test_gpu_and_process_csv_parser() -> None:
@@ -286,9 +287,9 @@ def test_collector_keeps_unconfirmed_gpu_probe_online_for_host_telemetry(
     assert observation.gpus == []
     assert observation.processes == []
     assert observation.observation_complete is False
-    assert observation.gpu_probe_status == "unknown"
-    assert observation.host.cpu_count == 32
-    assert observation.host.memory_available_mib == 98304
+    assert observation.nodes[0].gpu_probe_status == "unknown"
+    assert observation.nodes[0].host.cpu_count == 32
+    assert observation.nodes[0].host.memory_available_mib == 98304
 
     result = service.ingest_observation(observation)
     assert result["gpu_count"] == 0
@@ -323,9 +324,9 @@ def test_collector_keeps_cpu_only_endpoint_online_when_nvidia_smi_returns_no_row
     assert observation.gpus == []
     assert observation.processes == []
     assert observation.observation_complete is True
-    assert observation.gpu_probe_status == "cpu_only"
-    assert observation.host.cpu_count == 16
-    assert observation.host.memory_available_mib == 49152
+    assert observation.nodes[0].gpu_probe_status == "cpu_only"
+    assert observation.nodes[0].host.cpu_count == 16
+    assert observation.nodes[0].host.memory_available_mib == 49152
 
     service.ingest_observation(observation)
     snapshot = service.snapshot(service.local_actor("human"))["data"]
@@ -404,13 +405,13 @@ def test_raw_ssh_host_snapshot_forwards_cgroup_line(inventory: InventoryConfig) 
         SSHCollector(inventory, runner=fake_runner).observe_endpoint(inventory.endpoints[0])
     )
 
-    assert observation.host.cpu_total_ticks == 20_695_902_555
-    assert observation.host.cpu_idle_ticks == 10_347_951_278
-    assert observation.host.cpu_usage_usec == 1_600_000
-    assert observation.host.cpu_quota_usec == 3_000_000
-    assert observation.host.cpu_period_usec == 100_000
-    assert observation.host.memory_limit_mib == 249_856
-    assert observation.host.memory_current_mib == 51_200
+    assert observation.nodes[0].host.cpu_total_ticks == 20_695_902_555
+    assert observation.nodes[0].host.cpu_idle_ticks == 10_347_951_278
+    assert observation.nodes[0].host.cpu_usage_usec == 1_600_000
+    assert observation.nodes[0].host.cpu_quota_usec == 3_000_000
+    assert observation.nodes[0].host.cpu_period_usec == 100_000
+    assert observation.nodes[0].host.memory_limit_mib == 249_856
+    assert observation.nodes[0].host.memory_current_mib == 51_200
 
 
 def test_server_script_parser_accepts_optional_cgroup_fields() -> None:
@@ -420,25 +421,25 @@ def test_server_script_parser_accepts_optional_cgroup_fields() -> None:
     snapshot["host"]["cpu_period_usec"] = 100_000
     observed_at = datetime(2026, 8, 10, tzinfo=UTC)
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="endpoint-a",
         observed_at=observed_at,
     )
-    assert observation.host.cpu_usage_usec == 1_600_000
-    assert observation.host.cpu_quota_usec == 3_000_000
-    assert observation.host.cpu_period_usec == 100_000
+    assert observation.nodes[0].host.cpu_usage_usec == 1_600_000
+    assert observation.nodes[0].host.cpu_quota_usec == 3_000_000
+    assert observation.nodes[0].host.cpu_period_usec == 100_000
 
     snapshot["host"]["cpu_quota_usec"] = None
     snapshot["host"]["memory_limit_mib"] = 249_856
     snapshot["host"]["memory_current_mib"] = 51_200
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="endpoint-a",
         observed_at=observed_at,
     )
-    assert observation.host.cpu_quota_usec is None
-    assert observation.host.memory_limit_mib == 249_856
-    assert observation.host.memory_current_mib == 51_200
+    assert observation.nodes[0].host.cpu_quota_usec is None
+    assert observation.nodes[0].host.memory_limit_mib == 249_856
+    assert observation.nodes[0].host.memory_current_mib == 51_200
 
 
 def test_server_script_parser_accepts_optional_scheduler_capacity() -> None:
@@ -450,12 +451,12 @@ def test_server_script_parser_accepts_optional_scheduler_capacity() -> None:
         "note": "request on demand; nothing is queued",
     }
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="slurm-login-p22",
         observed_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
     assert observation.gpus == []
-    assert observation.gpu_probe_status == "cpu_only"
+    assert observation.nodes[0].gpu_probe_status == "cpu_only"
     assert observation.scheduler == {
         "free_gpu_count": 30,
         "gpu_name": "NVIDIA A100-SXM4-80GB",
@@ -477,7 +478,7 @@ def test_server_script_parser_accepts_optional_scheduler_block_fields() -> None:
         "note": "按需申请，不排队",
     }
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="slurm-login-p22",
         observed_at=datetime(2026, 8, 10, tzinfo=UTC),
     )
@@ -494,7 +495,7 @@ def test_server_script_parser_rejects_largest_free_block_above_free_count() -> N
     }
     with pytest.raises(CollectionError):
         parse_server_script_snapshot(
-            json.dumps(snapshot),
+            json.dumps(probe_bundle(snapshot)),
             endpoint_id="slurm-login-p22",
             observed_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
@@ -504,7 +505,7 @@ def test_server_script_parser_accepts_optional_implementation_version() -> None:
     snapshot = _server_script_snapshot()
     observed_at = datetime(2026, 8, 10, tzinfo=UTC)
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="endpoint-a",
         observed_at=observed_at,
     )
@@ -512,7 +513,7 @@ def test_server_script_parser_accepts_optional_implementation_version() -> None:
 
     snapshot["implementation_version"] = __version__
     observation = parse_server_script_snapshot(
-        json.dumps(snapshot),
+        json.dumps(probe_bundle(snapshot)),
         endpoint_id="endpoint-a",
         observed_at=observed_at,
     )
@@ -525,7 +526,7 @@ def test_server_script_parser_rejects_non_string_implementation_version() -> Non
     snapshot["implementation_version"] = 2
     with pytest.raises(CollectionError, match="implementation_version"):
         parse_server_script_snapshot(
-            json.dumps(snapshot),
+            json.dumps(probe_bundle(snapshot)),
             endpoint_id="endpoint-a",
             observed_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
@@ -541,7 +542,7 @@ def test_server_script_parser_rejects_unknown_scheduler_fields() -> None:
     }
     with pytest.raises(CollectionError):
         parse_server_script_snapshot(
-            json.dumps(snapshot),
+            json.dumps(probe_bundle(snapshot)),
             endpoint_id="slurm-login-p22",
             observed_at=datetime(2026, 8, 10, tzinfo=UTC),
         )
@@ -578,12 +579,9 @@ def test_server_script_parser_rejects_oversized_or_duplicate_gpu_identities() ->
     gpus = duplicate["gpus"]
     assert isinstance(gpus, list)
     gpus.append(dict(gpus[0]))
-    with pytest.raises(CollectionError, match="duplicate GPU"):
-        parse_server_script_snapshot(
-            json.dumps(duplicate),
-            endpoint_id="endpoint-a",
-            observed_at=datetime.now(UTC),
-        )
+    parsed = parse_server_script_snapshot(json.dumps(probe_bundle(duplicate)), endpoint_id="endpoint-a", observed_at=datetime.now(UTC))
+    assert not parsed.nodes
+    assert parsed.failures[0].error_code == "parse_error"
 
 
 def test_importer_keeps_same_ip_different_ports_distinct(tmp_path: Path) -> None:

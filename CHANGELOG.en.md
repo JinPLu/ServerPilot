@@ -4,6 +4,17 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- Ordinary servers and plugin compute nodes share GPU, CPU, memory and process observations. Node tables show current resource usage; job accounting stays separate and missing samples include a reason.
+
+- Allocation results now include task ownership, node/device locations, provider deadlines and entry instructions. Unconfirmed releases retain ownership; explicitly enabled connections are maintained automatically. Plugins must upgrade to protocol v5.
+
+- Show host:port in the connection column; sort rows by displayed values, keep missing metrics last, and return each group to the top when sorting changes.
+- Show all GPU-partition nodes for Slurm server groups in the existing table, with four visible rows per group and vertical scrolling for additional rows.
+- Fix Slurm collection failures on `IDX:N/A`; stale cluster capacity is no longer presented as currently allocatable GPUs.
+- The agent contract now says what `state=KEEPALIVE` on a node GPU means: it is ServerPilot's own idle hold, the card counts as available capacity, the hold steps aside when you apply, and its processes and memory are not another caller's work. Agents previously saw only the bare state and a high memory reading, and skipped allocatable cards as if somebody else held them.
+
 ## 3.0.0 - 2026-09-03
 
 - **Installing the agent rules is now `serverpilot mcp policy`** instead of a script in the repository. The rule text is rendered from one source inside the package rather than hand-copied into six places. `--check` only means something inside a source checkout, and says so plainly when run from an installed copy.

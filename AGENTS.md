@@ -8,7 +8,7 @@
 
 - `service.py` 拥有调度、租约、队列、状态和审计；`api.py` 组合接口；持久化契约在 `database.py`、`models.py`、`src/serverpilot/migrations/`。CLI 的运营命令和 MCP 必须走 REST；仅 `init`、`serve`、`backup`、`restore`、`collect once` 等本地维护入口可直接组合领域服务，不得直连 SQLite 或复制领域规则。
 - `daemon reclaim`、`keepalive inspect`、`keepalive stop` 是控制面不可用时的人工恢复入口。它们只读控制面数据库取端点连接事实，其余一律经密封 adapter 与只读采集；不得写库，也不得复制领域规则。只能由人或 Agent 显式调用，不得成为后台策略。
-- Collector 对内置 profile 只能执行固定只读 SSH 探针；对已发现插件只调用 `observe`。插件的四个固定动词按调用方分工：发现流程调 `info`，Collector 调 `observe`，`service.py` 在分配与归还时调 `apply`、`release`（后两者仅在插件声明对应能力时）。不得接收 shell、读取私钥、完整命令或环境。插件是本机可执行文件，密封的是调用契约而不是实现来源。
+- Collector 对内置 profile 只能执行固定只读 SSH 探针；对已发现插件只调用 `observe`。插件 v5 的固定动词按调用方分工：发现流程调 `info`，Collector 调 `observe`，`service.py` 在分配与归还时调 `apply`、`release`（后两者仅在插件声明对应能力时）；daemon 的单一连接协调器调用可选 `connect`、`disconnect`，这两个动词只管理连接，不触碰分配和用户程序。不得接收 shell、读取私钥、完整命令或环境。插件是本机可执行文件，密封的是调用契约而不是实现来源。
 - GPU UUID 与 endpoint `id` 是身份边界；同 IP 不同端口不可合并。telemetry/采集异常、非托管进程、维护或冲突一律 fail closed；这是对采集所报告事实的本机校验，SSH 用户与远端采集入口被假定为受信。
 - `project_id + task_ref` 是工作任务的稳定身份。面向 Agent 的五工具契约只有一个源：`src/serverpilot/agent_contract.py`；MCP instructions、`docs/AGENT_MCP_policy.en.md` 和 `.cursor/rules/serverpilot.mdc` 都由它渲染，后两个是生成物，`serverpilot mcp policy --check` 校验。改契约改这个模块并重新生成，不要在别处再写一份。ServerPilot 不实现浏览器 GUI。
 - 控制面无认证：`X-ServerPilot-Actor` 是审计标签，同一用户下的本机进程都相当于操作者。非 loopback、访问控制、远端运行时或自动 allocator 的开放须单独批准。

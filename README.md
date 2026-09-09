@@ -210,10 +210,10 @@ macOS-only. Full per-client notes are in the
 ## 🤖 How an agent uses it
 
 ```text
-gpu_status → gpu_apply(server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
+gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
 ```
 
-- Routine apply is `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`.
+- Routine apply is `gpu_apply(duration_seconds, server_group_id?, server_id?, gpu_count=1, task?)`.
   Agents never pass GPU IDs; `gpu_apply` picks the cards, and one lease always
   lands on a single server. `gpu_count` is exact job parallelism from the launch
   script or config. The safe default is 1. Never infer it from free capacity.
@@ -277,8 +277,8 @@ new selector.
   matching cluster allocation on request and release.
 - Server state comes from fixed collection: the built-in `linux` SSH probe (a
   fixed read-only query, nothing installed on the remote), or a local plugin's
-  `observe`. The plugin calling contract is four fixed verbs — `info`,
-  `observe`, `apply`, `release`. No arbitrary remote command is accepted, and no
+  `observe`. The plugin calling contract is fixed v5 verbs — `info`,
+  `observe`, `apply`, `release`, and optional `connect` / `disconnect`. No arbitrary remote command is accepted, and no
   password or private key is provided. See [OBSERVATION_zh.md](https://github.com/JinPLu/ServerPilot/blob/master/docs/OBSERVATION_zh.md).
 - Stale collection, connection errors, unknown processes, and resource conflicts
   all refuse allocation locally. That holds for what collection **reports**:

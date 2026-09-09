@@ -12,6 +12,7 @@ struct ClaimSheet: View {
     @State private var projectID = ""
     @State private var taskReference = ""
     @State private var gpuCountText = "1"
+    @State private var durationMinutesText = ""
     @State private var serverGroupID: String
     @State private var endpointID: String
     @State private var validationMessage: String?
@@ -61,6 +62,7 @@ struct ClaimSheet: View {
                     .textFieldStyle(.roundedBorder)
                     .frame(width: 110)
             }
+            LabeledField(label: "预计使用时长（分钟）", placeholder: "例如 240", text: $durationMinutesText)
             if usesGroupedClaim {
                 VStack(alignment: .leading, spacing: 8) {
                     Text("服务器组")
@@ -103,6 +105,13 @@ struct ClaimSheet: View {
             }
             if let submissionResult {
                 InlineResult(message: submissionResult.message, allocated: submissionResult.allocated)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(submissionResult.allocations) { allocation in
+                            AllocationFactsView(allocation: allocation)
+                        }
+                    }
+                }.frame(maxHeight: 230)
             }
             HStack {
                 Spacer()
@@ -129,6 +138,10 @@ struct ClaimSheet: View {
     private func submit() {
         guard let gpuCount = Int(gpuCountText), gpuCount > 0 else {
             validationMessage = "GPU 数量必须是大于 0 的整数。"
+            return
+        }
+        guard let durationMinutes = Int(durationMinutesText), (1...43200).contains(durationMinutes) else {
+            validationMessage = "请填写预计使用时长，范围为 1 分钟至 30 天；还需满足服务器组的时限。"
             return
         }
         let project = projectID.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -164,6 +177,7 @@ struct ClaimSheet: View {
                 taskReference: task,
                 purpose: task,
                 gpuCount: gpuCount,
+                durationSeconds: durationMinutes * 60,
                 endpointID: selectedEndpointID,
                 serverGroupID: selectedGroupID,
                 minimumCPUCores: nil,

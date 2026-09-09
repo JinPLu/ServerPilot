@@ -64,7 +64,7 @@ def test_routine_mutations_use_a_harness_neutral_actor(
         return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    tools.gpu_apply(task="训练任务")
+    tools.gpu_apply(duration_seconds=3600, task="训练任务")
     tools.gpu_release("lease-a")
 
     apply_headers = calls[0]["headers"]
@@ -88,7 +88,7 @@ def test_gpu_apply_maps_the_mcp_request_id_to_an_internal_replay_key(
         request_id = "json-rpc-call-17"
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    tools.gpu_apply(task="训练任务", context=FakeContext())  # type: ignore[arg-type]
+    tools.gpu_apply(duration_seconds=3600, task="训练任务", context=FakeContext())  # type: ignore[arg-type]
 
     headers = calls[0]["headers"]
     assert isinstance(headers, dict)
@@ -128,7 +128,7 @@ def test_gpu_apply_retries_one_unsent_request_with_the_same_key(
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
 
-    assert tools.gpu_apply(task="训练任务")["lease_id"] == "lease-a"
+    assert tools.gpu_apply(duration_seconds=3600, task="训练任务")["lease_id"] == "lease-a"
     assert len(calls) == 2
     assert calls[0]["headers"] == calls[1]["headers"]
 
@@ -281,11 +281,11 @@ def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
     monkeypatch.setattr(mcp_server, "_routine_client", RoutineClient)
 
     with pytest.raises(BrokerClientError, match=r"no_capacity"):
-        tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
+        tools.gpu_apply(duration_seconds=3600, server_id="endpoint-a", gpu_count=2, task="双卡训练")
     assert app.state.service.list_leases(app.state.service.local_actor("agent"))["data"] == []
 
     app.state.service.ingest_observation(observation(count=2))
-    claimed = tools.gpu_apply(server_id="endpoint-a", gpu_count=2, task="双卡训练")
+    claimed = tools.gpu_apply(duration_seconds=3600, server_id="endpoint-a", gpu_count=2, task="双卡训练")
 
     assert claimed["lease_id"]
     assert len(claimed["gpus"]) == 2
@@ -345,7 +345,7 @@ def test_routine_apply_rejects_invalid_daily_inputs_before_contacting_broker(
     monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
 
     with pytest.raises(ValueError, match=message):
-        tools.gpu_apply(server_id=server_id, gpu_count=gpu_count, task="训练")
+        tools.gpu_apply(duration_seconds=3600, server_id=server_id, gpu_count=gpu_count, task="训练")
 
 
 @pytest.mark.parametrize(

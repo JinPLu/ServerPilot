@@ -49,6 +49,11 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
 
 `serverpilot-mcp` 的行为约束（instructions 与随包安装的规则文本）由 `src/serverpilot/agent_contract.py` 一处渲染；每个工具的参数及其说明写在 `src/serverpilot/mcp_server.py` 的工具 schema 里，改参数说明去那里。两者由 `tests/test_agent_policy.py` 交叉校验，确保契约里提到的参数确实存在。默认配置不需要 `enabled_tools` 白名单。
 
+申请需显式提供 `duration_seconds`（任务预计使用秒数）。普通 SSH 分配使用返回的 CUDA 选择器；
+`entry.kind=allocation` 时先按提供方指引进入已有分配，注意 `verified` 状态和实际截止时间。
+物理卡号与环境内设备编号不能互换；未知映射不猜测。`allocation_unconfirmed` 要核对原申请，
+`release_pending` 表示仍保留占有。
+
 ## 日常 GPU 路径
 
 ```text

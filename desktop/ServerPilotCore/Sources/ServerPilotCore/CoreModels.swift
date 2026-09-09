@@ -433,6 +433,31 @@ public struct ServerGroupLimits: Equatable, Sendable {
     }
 }
 
+public struct SchedulerNodeRecord: Identifiable, Equatable, Sendable {
+    public let name: String
+    public let gpuName: String?
+    public let state: String
+    public let totalGPUs: Int
+    public let allocatedGPUs: Int
+    public let schedulable: Bool
+    public var id: String { name }
+    public var freeGPUs: Int { totalGPUs - allocatedGPUs }
+
+    public init?(raw: [String: Any]) {
+        guard let name = raw.string("name"), !name.isEmpty,
+              let state = raw.string("state"), !state.isEmpty,
+              let total = raw.optionalInt("total_gpus"), total >= 0,
+              let allocated = raw.optionalInt("allocated_gpus"), allocated >= 0, allocated <= total,
+              let schedulable = raw["schedulable"] as? Bool else { return nil }
+        self.gpuName = raw.string("gpu_name")
+        self.name = name
+        self.state = state
+        totalGPUs = total
+        allocatedGPUs = allocated
+        self.schedulable = schedulable
+    }
+}
+
 public struct SchedulerCapacity: Equatable, Sendable {
     public let freeGPUCount: Int
     public let gpuName: String
@@ -538,6 +563,32 @@ public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
     }
 }
 
+public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let fresh: Bool
+    public let observedAt: String?
+    public let message: String?
+    public let gpuIDs: [String]
+    public let gpuUtilizationFraction: Double?
+    public let gpuMemoryFraction: Double?
+    public let cpuUtilizationFraction: Double?
+    public let memoryFraction: Double?
+
+    public init?(raw: [String: Any]) {
+        guard let id = raw.string("node_id") else { return nil }
+        self.id = id
+        fresh = raw["fresh"] as? Bool ?? false
+        observedAt = raw.string("observed_at")
+        message = raw.string("message")
+        gpuIDs = raw["gpu_ids"] as? [String] ?? []
+        let usage = raw["usage"] as? [String: Any] ?? [:]
+        gpuUtilizationFraction = fresh ? usage.optionalPercent("gpu_utilization_pct") : nil
+        gpuMemoryFraction = fresh ? usage.optionalPercent("gpu_memory_used_pct") : nil
+        cpuUtilizationFraction = fresh ? usage.optionalPercent("cpu_utilization_pct") : nil
+        memoryFraction = fresh ? usage.optionalPercent("memory_used_pct") : nil
+    }
+}
+
 public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let id: String
     public let host: String
@@ -577,6 +628,10 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
     public let memoryAvailableMiB: Int?
     public let recentTelemetryAverage: HostTelemetryRecentAverage?
     public let schedulerCapacity: SchedulerCapacity?
+    public let resourceNodes: [ResourceNodeRecord]
+    public let nodes: [SchedulerNodeRecord]
+    public let connection: ProviderConnectionRecord
+    public let externalAllocations: [ExternalAllocationRecord]
 
     public init?(raw: [String: Any]) {
         guard let id = raw.string("id"), let host = raw.string("host"), let sshUser = raw.string("ssh_user") else {
@@ -606,6 +661,7 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.monitorLastSuccessAgeSeconds = monitor.optionalDouble("last_success_age_seconds")
         self.monitorLastSuccessAt = monitor.string("last_success_at")
         self.monitorLastAttemptAt = monitor.string("last_attempt_at")
+        resourceNodes = (raw["resource_nodes"] as? [[String: Any]] ?? []).compactMap(ResourceNodeRecord.init)
         let hostTelemetry = raw["host_telemetry"] as? [String: Any] ?? [:]
         self.cpuUtilizationFraction = hostTelemetry.optionalPercent("cpu_utilization_pct")
         let capacity = hostTelemetry["capacity"] as? [String: Any] ?? [:]
@@ -619,11 +675,19 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         self.recentTelemetryAverage = HostTelemetryRecentAverage(
             raw: hostTelemetry["recent_average"] as? [String: Any] ?? [:]
         )
+        self.nodes = (raw["nodes"] as? [[String: Any]] ?? []).compactMap(SchedulerNodeRecord.init).sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
+        self.connection = ProviderConnectionRecord(raw: raw["connection"] as? [String: Any] ?? [:])
+        self.externalAllocations = (raw["external_allocations"] as? [[String: Any]] ?? []).compactMap(ExternalAllocationRecord.init)
         if let payload = raw["scheduler_capacity"] as? [String: Any] {
             self.schedulerCapacity = SchedulerCapacity(raw: payload)
         } else {
             self.schedulerCapacity = nil
         }
+    }
+
+    public var connectionAddress: String {
+        let address = host.contains(":") && !host.hasPrefix("[") ? "[\(host)]" : host
+        return "\(address):\(port)"
     }
 
     public var sshCommand: String {
@@ -705,6 +769,8 @@ public struct EndpointRecord: Identifiable, Equatable, Sendable {
         case "command_timeout": return "服务器响应过慢 · 检查服务器负载"
         case "remote_error": return "服务器上的采集命令失败 · 检查 nvidia-smi 与权限"
         case "parse_error": return "服务器返回的数据无法解析"
+        case "session_missing": return "登录连接已失效 · 需要恢复连接"
+        case "connection_failed": return "连接恢复已停止 · 需要检查连接"
         case "plugin_error": return "插件无法连接该集群 · 按插件说明手动建立连接"
         case "ssh_failed": return "无法连接服务器 · 检查 SSH"
         case "local_error": return "本机采集出错 · 见 ServerPilot 日志"
@@ -760,13 +826,31 @@ public struct GPURecentTelemetryAverage: Equatable, Sendable {
     }
 }
 
+public struct GPUProcessRecord: Identifiable, Equatable, Sendable {
+    public let id: String
+    public let pid: Int
+    public let username: String?
+    public let executable: String
+    public let memoryMiB: Int?
+    public init?(raw: [String: Any]) {
+        guard let pid = raw.optionalInt("pid"), let executable = raw.string("executable") else { return nil }
+        self.pid = pid
+        self.executable = executable
+        id = raw.string("process_key") ?? String(pid)
+        username = raw.string("username")
+        memoryMiB = raw.optionalInt("used_memory_mib")
+    }
+}
+
 public struct GPURecord: Identifiable, Equatable, Sendable {
     /// The states the broker projects as allocatable capacity.
     static let allocatableStates: Set<String> = ["AVAILABLE", "KEEPALIVE"]
     /// The prefix a projected status carries when it claims the card is free.
     static let availableStatusPrefix = "可用"
 
+    public let processes: [GPUProcessRecord]
     public let id: String
+    public let nodeID: String
     public let endpointID: String
     public let gpuUUID: String?
     public let index: Int
@@ -794,6 +878,8 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
         else {
             return nil
         }
+        processes = (raw["processes"] as? [[String: Any]] ?? []).compactMap(GPUProcessRecord.init)
+        nodeID = raw.string("node_id") ?? "self"
         let uuid = raw.string("gpu_uuid")
         if let suppliedID = raw.string("id"), !suppliedID.isEmpty {
             self.id = suppliedID
@@ -1036,6 +1122,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
     public var serverGroups: [ServerGroupRecord]
     public var gpus: [GPURecord]
     public var leases: [LeaseRecord]
+    public var pendingAllocations: [ResourceAllocationRecord] = []
     public var reservations: [ReservationRecord]
     public var history: BrokerStateHistory
     public var dataAgeSeconds: Double?
@@ -1094,6 +1181,7 @@ public struct BrokerSnapshot: Equatable, Sendable {
         self.history = history
         summary = ResourceSummary(raw: payload["summary"] as? [String: Any] ?? [:])
         endpoints = (payload["endpoints"] as? [[String: Any]] ?? []).compactMap(EndpointRecord.init)
+        pendingAllocations = (payload["pending_allocations"] as? [[String: Any]] ?? []).compactMap(ResourceAllocationRecord.init)
         serverGroups = (payload["server_groups"] as? [[String: Any]] ?? []).compactMap(ServerGroupRecord.init)
         gpus = (payload["gpus"] as? [[String: Any]] ?? []).compactMap(GPURecord.init)
         let operationalEndpointIDs = Set(endpoints.map(\.id))
@@ -1270,6 +1358,7 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
     public let state: String
     public let runtimeState: String
     public let gpuIDs: [String]
+    public let allocations: [ResourceAllocationRecord]
     public let issuedAt: String?
     public let expiresAt: String?
     /// When a compute process was last seen on this lease's own cards. Read-only:
@@ -1298,12 +1387,18 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         self.state = (raw.string("state") ?? "UNKNOWN").uppercased()
         self.runtimeState = (raw.string("runtime_state") ?? "ASSIGNED").uppercased()
         self.gpuIDs = raw["gpu_ids"] as? [String] ?? []
+        self.allocations = (raw["allocations"] as? [[String: Any]] ?? []).compactMap(ResourceAllocationRecord.init)
         self.issuedAt = raw.string("issued_at")
         self.expiresAt = raw.string("expires_at")
         self.lastProcessObservedAt = raw.string("last_process_observed_at")
         self.manualRelease = ManualRelease(raw: raw["manual_release"])
         self.taskReference = raw.string("task_ref")
         self.purpose = raw.string("purpose")
+    }
+
+    public var gpuCount: Int {
+        let delegated = allocations.filter { $0.releaseGranularity == "allocation" }
+        return delegated.isEmpty ? gpuIDs.count : delegated.flatMap(\.locations).reduce(0) { $0 + $1.gpuCount }
     }
 
     public var stateLabel: String {
@@ -1322,10 +1417,12 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
 public struct ClaimSubmissionResult: Equatable, Sendable {
     public let allocated: Bool
     public let message: String
+    public let allocations: [ResourceAllocationRecord]
 
-    public init(allocated: Bool, message: String) {
+    public init(allocated: Bool, message: String, allocations: [ResourceAllocationRecord]) {
         self.allocated = allocated
         self.message = message
+        self.allocations = allocations
     }
 }
 
@@ -1334,6 +1431,7 @@ public struct ClaimDraft: Equatable, Sendable {
     public var taskReference: String
     public var purpose: String
     public var gpuCount: Int
+    public var durationSeconds: Int
     public var endpointID: String
     public var serverGroupID: String?
     public var minimumCPUCores: Double?
@@ -1346,6 +1444,7 @@ public struct ClaimDraft: Equatable, Sendable {
         taskReference: String,
         purpose: String,
         gpuCount: Int,
+        durationSeconds: Int,
         endpointID: String,
         serverGroupID: String? = nil,
         minimumCPUCores: Double? = nil,
@@ -1357,6 +1456,7 @@ public struct ClaimDraft: Equatable, Sendable {
         self.taskReference = taskReference
         self.purpose = purpose
         self.gpuCount = gpuCount
+        self.durationSeconds = durationSeconds
         self.endpointID = endpointID
         self.serverGroupID = serverGroupID
         self.minimumCPUCores = minimumCPUCores

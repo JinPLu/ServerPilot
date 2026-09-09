@@ -103,6 +103,11 @@ def _create_retired_request_tables() -> None:
 
 def upgrade() -> None:
     Base.metadata.create_all(bind=op.get_bind(), tables=_initial_tables(), checkfirst=False)
+    # Node scoping is introduced in 0040, not in the original schema.
+    with op.batch_alter_table("gpu_devices") as batch:
+        batch.drop_constraint("uq_endpoint_node_gpu_uuid", type_="unique")
+        batch.drop_column("node_id")
+        batch.create_unique_constraint("uq_endpoint_gpu_uuid", ["endpoint_id", "gpu_uuid"])
     for table, column in _RETIRED_COLUMNS:
         op.add_column(
             table,

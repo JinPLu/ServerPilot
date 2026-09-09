@@ -22,7 +22,7 @@ endpoint 的 `observation_profile` 只能取两种值：内置的 `linux`，或�
   `cpu.max` / `cpu.stat` / `memory.max` / `memory.current`，用于把容器化主机的容量算成
   它实际拿到的份额而不是整机。
 
-以上查询的具体命令行由代码固定（`src/serverpilot/adapters.py` 的 `GPU_QUERY`、
+以上查询的具体命令行由代码固定（`src/serverpilot/observation_probe.py` 的 `GPU_QUERY`、
 `PROCESS_QUERY`、`IDENTITY_QUERY`、`HOST_RESOURCES_QUERY`），endpoint 配置、REST/MCP
 输入和 Agent 都不能替换或追加参数。没有 NVIDIA runtime 或没有 GPU 的主机仍然可以登记：
 这类主机的 CPU/内存观测正常可用，只是不参与 GPU 分配。
@@ -31,121 +31,72 @@ endpoint 的 `observation_profile` 只能取两种值：内置的 `linux`，或�
 主机的观测。到期仍没有新观测时，ServerPilot 把该主机视为连接或采集问题，停止分配它的
 资源，不会拿旧数据冒充当前状态。
 
-## 插件契约：`info` / `observe` / `apply` / `release`
+## 共用节点观测
 
-插件是放在已知目录里的可执行文件，用于内置 `linux` 探针覆盖不了的场景——主要是共享调度器
-集群（Slurm / LSF / PBS）：内置探针会把整个集群当成一台裸机，也分不清哪几张卡是别人作业
-占的。普通服务器 / 自建节点不需要插件，直接登记 `linux` profile 即可。
+普通 SSH 端点使用节点 `self`；插件端点使用计算节点标识。身份键为端点＋节点，GPU
+再按 UUID 关联，PID 和显示序号不会跨节点合并。迁移保留普通服务器的 GPU ID 和租约关系。
 
-ServerPilot 只用四个固定动词调用插件，不把用户或 Agent 的字符串拼进 shell，也不把
-`BrokerService`、数据库或租约状态交给插件：
+两种入口执行 `observation_probe.py` 中同一份固定 Linux/NVIDIA 探针，并由 Collector
+同一解析器校验。独立插件内的探针字面量由 `python -m serverpilot.observation_probe` 生成。
+Slurm 插件只发现本人作业节点并关联分配；每节点每轮只读 SSH 采一次，不创建 srun 步骤，
+不启动远端采集服务，不拿登录节点冒充计算资源。无法验证主机密钥或无法登录时保留分配事实，
+实时使用量为未知并附原因。
 
-| 动词 | 谁调用 | 作用 | 输出 |
-| --- | --- | --- | --- |
-| `info` | 发现 / `plugin list` | 自述 | `{plugin_id, display_name, schema_version, capabilities, limits}`，可选 `description` |
-| `observe` | 采集器 | 读取当前用户可见容量 | 固定字段的 JSON：身份、主机资源、GPU、进程，可选一个顶层 `scheduler` 提示 |
-| `apply --gpu-count N --task-ref REF` | `BrokerService` 在分配前 | 立即申请 | `{allocation_ref, gpus[], ssh{host,port,user}, workspace_path, cuda_visible_devices}` |
-| `release --allocation-ref REF` | `BrokerService` 在释放租约时 | 释放该次分配 | `{state: "released"}` |
+REST `resource_nodes` 提供统一的节点身份、新鲜度、失败原因、GPU 关联和当前用量；
+CLI、MCP、桌面消费同一投影。CPU 采用相邻 `/proc/stat` 差分；有明确 cgroup 限额时
+沿用该范围，重启或计数回退清空基线。GPU 利用率按节点完整样本求平均，显存按容量加权。
+部分节点失败不污染兄弟节点，失败和过期指标不填零。Slurm 节点即使观测空闲也必须经调度申请。
 
-`info.schema_version` 必须是 `3`（`PLUGIN_SCHEMA_VERSION`）。`plugin_id` 必须匹配
-`^[a-z][a-z0-9-]{1,39}$`，并与文件名一致。`capabilities` 取 `observe` / `apply` / `release`
-的子集，声明了的动词才会被调用；排队式集群做不到「立即拿到」时只声明 `observe`。
+作业 CPU 时间与 RSS 保留为独立 accounting，不能充当节点使用率；整卡指标也不代表某进程
+独占用量。分配设备只能用明确 UUID 或已验证的整节点分配关联，未知映射保留未知。
 
-### `observe` 的 JSON 合同
+## 插件契约 v5
 
-顶层对象必须且只能包含（`schema_version` 恒为 `2`）：
+普通服务器使用内置 `linux` 只读探针；集群使用本机可执行插件。核心按能力处理，
+不按站点、调度器名称或 GPU 型号分支。插件文件名必须等于 `plugin_id`。
 
-```json
-{
-  "schema_version": 2,
-  "identity": {"hostname": "node-a", "boot_id": "..."},
-  "host": {
-    "cpu_count": 64,
-    "load_1m": 1.25,
-    "cpu_total_ticks": 1000,
-    "cpu_idle_ticks": 750,
-    "memory_total_mib": 262144,
-    "memory_available_mib": 196608
-  },
-  "gpu_probe_available": true,
-  "gpus": [{"gpu_index": 7, "cuda_ordinal": 0, "gpu_uuid": "GPU-...", "name": "...", "total_vram_mib": 81920, "memory_used_mib": 0, "memory_free_mib": 81920, "gpu_utilization_pct": 0, "memory_utilization_pct": 0, "temperature_c": 35, "power_watts": 100.0, "pstate": "P0", "health": "OK"}],
-  "processes": [{"gpu_uuid": "GPU-...", "pid": 123, "used_memory_mib": 1024, "executable": "python", "username": "gpu", "process_started_at": "2026-08-10T00:00:00+00:00"}]
-}
-```
-
-可以多一个顶层 `scheduler` 对象，只表达「这个 endpoint 能按需申请、现在大约有多少空闲」，
-不进入 GPU 账本，直到真正申请时才入账：
-
-```json
-{"scheduler": {"free_gpu_count": 30, "gpu_name": "NVIDIA A100-SXM4-80GB", "note": "按需申请，不排队"}}
-```
-
-`free_gpu_count` 和 `gpu_name` 必填，`note` 可选，只允许这三个字段。`gpu_index` 保留
-`nvidia-smi index` 供界面识别；`cuda_ordinal` 固定表示设置
-`CUDA_DEVICE_ORDER=PCI_BUS_ID` 之后的执行 selector，由插件按 `pci.bus_id` 排序算出，
-两者不得混用。`identity`、`host`、每个 GPU 和每个 process 的字段集合是固定的，不能
-扩展。数值必须是 JSON number（不能用字符串、NaN 或 Infinity），字符串不能含控制字符，
-`process_started_at` 必须带时区。GPU UUID、index 和 CUDA ordinal 各自不得重复；process
-的 `(gpu_uuid, pid)` 不得重复，且必须指向本快照里的 GPU。
-
-没有 NVIDIA runtime 或没有 GPU 的机器，应返回 `gpu_probe_available: false` 和空的
-`gpus`、`processes`，这样 CPU/内存观测仍然可用，同时这一轮不算完整 GPU 观测。
-
-坏输出、超时或超长 stdout 一律失败，不降级。`apply` 失败时释放掉已拿到的部分。
-「集群此刻没有空闲」与「出错了」靠退出码区分，不靠错误文字：`apply` 在确实没有可立即
-分配的卡时退出码 **3**，落到普通的 `no_capacity`；其余任何失败（配额被拒、节点故障、
-SSH 不通、插件自身异常）退出非零的其它值，作为 `plugin_apply_failed` 报给调用方。
-
-### `info.limits`
-
-v3 的 `info` **必须**带 `limits` 对象，四键齐全、不许多键；缺块、缺键、多未知键，都和
-错误的 `schema_version` 一样让 `probe_plugin` 失败：
-
-| 字段 | 含义 | 取值 |
+| 动词 | 调用方 | 契约 |
 | --- | --- | --- |
-| `lease_ends` | 这次分配怎么结束：集群到点杀作业，和持有到调用方 `release`，对同一实验不可互换，必须声明，不能靠推断 | `on_release` 或 `hard_kill_at_time_limit` |
-| `max_lease_seconds` | 硬时限秒数。`hard_kill_at_time_limit` 时必填正整数（1–2592000，最多 30 天）；`on_release` 时必须是 `null` | 正整数或 `null` |
-| `apply_max_seconds` | 这次 `apply` 最多等多久——强制超时，不是说明：超过它就被终止并按失败处理。上限 180 秒（`client.CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS` 是另一半，两者被测试钉在一起）。不声明等待窗口就写 `null`，回落到通用变更超时。声明超过 180 会让 `info` 校验失败，插件在发现阶段静默消失 | 正整数（1–180）或 `null` |
-| `queues` | 当前契约不接受排队 | 必须是 `false` |
+| `info` | 发现流程 | `schema_version=5`，声明能力、`limits`、`release_granularity`、`entry_kind` |
+| `observe` | Collector | 只读返回 schema 3 节点原始探针输出、节点容量、分配事实；不认证 |
+| `apply` | service | 接收卡数、任务、预计秒数、稳定 `request_id` 和需求 JSON；返回完整分配 |
+| `release` | service | 按远端引用归还；只有确认结束才返回 `state=released` |
+| `connect / disconnect` | daemon 连接协调器 | 可选、必须成对声明；只管理连接，不碰分配或用户程序 |
 
-内置 `linux` profile 等价于 `on_release`、`max_lease_seconds: null`、`queues: false`，
-且不声明 `apply_max_seconds`：直连申请的成本不由 profile 公布，而是由一次申请实际花掉的
-adapter 与采集超时推导，由所属服务器分组投影出来。随包参考插件 `slurm-immediate` 声明
-`hard_kill_at_time_limit`、`max_lease_seconds: 3600`、`apply_max_seconds: 33`、
-`queues: false`。
+`apply / release` 必须成对声明，当前外部插件声明 `release_granularity=allocation`；
+普通主机内置实现为 `device`。`entry_kind` 为 `ssh` 或 `allocation`。
+`limits` 四键为 `lease_ends`、`max_lease_seconds`、`apply_max_seconds`、`queues=false`；
+硬时限提供方必须返回实际截止时间。最长请求 30 天，站点可配置更小的上限。
+发现失败及旧版插件在插件列表显示需要修复，不保留旧版执行协议。
 
-已经放进插件目录、但仍返回 `schema_version: 2` 或缺少合法 `limits` 的可执行文件，
-**不会在发现时打出错误**：`discover_plugins` 对 `probe_plugin` 的失败直接跳过，
-`plugin list` 里看不到它，控制面当它不存在，文件还在目录里，人容易以为「已经装好了」。
-`serverpilot doctor` 会把这类失败明确列出来；`serverpilot plugin add` 走同一套校验，
-会当场拒绝并报错，坑只在已经就位、只靠发现的那条路径。
+分配正式保存在 `resource_allocations`，包含端点、提供方、远端引用、租约、位置、
+进入信息、请求时长、实际截止时间、状态及确认时间。位置分别表达节点、真实 GPU UUID、
+物理卡号和环境内设备编号；未知字段为空，未知设备列表为空，不伪造 GPU 或计算进程。
+进入信息是结构化 `entry`：登录 host/port/user、workspace、显示用 argv、说明与 verified。
+控制面不执行 entry.argv；GUI、CLI、MCP 消费同一结果。
 
-`info` 是子进程，发现会发生在每一轮采集和每一次申请上，所以它的结论按文件内容缓存：
-目录每次都重新列，同一个文件不变就不再重新 fork，改写文件即失效。
+`scheduler.observed_at` 是容量采样时间，`allocations[].observed_at` 是分配确认时间，
+`workload_observed_at` 是计算活动采样时间。读取旧文件不能刷新时间。缺少容量时间时不展示
+当前可申请容量；断连保留已知节点与分配位置并标注过期。外部同账号作业只展示，不绑定任务。
 
-### 目录与安装
+申请先持久化稳定标识，再调用远端；重复标识必须查询原申请，不能新建第二份分配。
+结果不明返回 `allocation_unconfirmed`，再次调用先只读核对。只有专用退出码 3 表示
+`no_capacity`，退出码 2 表示需求无效；其他错误不能当作资源不足。
+归还失败保留占有和 `release_pending`，重新观测确认终态后才结束本机租约。
+整份回收要求任务心跳失效且全部资源连续新鲜观测为空闲；运行、未知或观测中断都不满足。
 
-发现按下面顺序搜索，同名时后出现的覆盖前面的：
+用户显式开启连接后，daemon 持久化维持意图并在重启后继续；每端点最多一个连接操作。
+认证失败或原因不明停止恢复，等待再次显式操作；明确网络不可达时等待网络恢复。
+连接诊断只保存阶段、时间和脱敏信息，不保存认证会话、密码或动态码。
 
-1. 发行版内置：安装包内的 `bundled_plugins/`（源码在 `src/serverpilot/bundled_plugins/`）
-2. 仓库检出目录：仓库根目录 `plugins/`（若存在；给本地开发用，不随发行版分发）
-3. 用户目录：macOS `~/Library/Application Support/ServerPilot/plugins`，
-   Windows `%LOCALAPPDATA%\ServerPilot\plugins`
+### 安装参考插件
 
-```bash
-serverpilot plugin list
-serverpilot plugin add ./my-plugin
-```
+搜索目录依次是随包 `bundled_plugins/`、检出目录 `plugins/` 和用户插件目录；同名用户插件优先。
+macOS 用户目录为 `~/Library/Application Support/ServerPilot/plugins`。
+`serverpilot plugin list` 查看发现结果，`serverpilot plugin add ./my-plugin` 校验并安装可执行文件。
+站点配置独立放在可执行文件旁的同名 `.json` 文件；不随插件复制。
 
-`plugin add` 只做校验和复制，不签名，也不接远程仓库；站点配置不会随 `plugin add`
-一起复制，要自己放在插件旁边。本机插件以当前用户权限运行，放进插件目录的脚本由用户
-自己负责。
-
-### 参考插件：`slurm-immediate`
-
-`info` 不读配置。`observe` / `apply` / `release` 只从插件可执行文件旁边的
-`slurm-immediate.json` 读取集群参数，文件不存在或缺必填字段时立即失败，并指出要写
-哪个文件：
+`slurm-immediate` 可复制并改成站点名独立安装，运行时不依赖其他项目。示例：
 
 ```json
 {
@@ -156,37 +107,23 @@ serverpilot plugin add ./my-plugin
   "gpus_per_node": 8,
   "cpus_per_gpu": 8,
   "mem_gib_per_gpu": 16,
-  "qos": "gpu",
-  "account": "myaccount",
+  "max_lease_seconds": 86400,
   "ssh_port": 22,
-  "control_path": "/path/to/controlmaster/%C",
-  "workspace_path": "/home/alice/work"
+  "workspace_path": "/home/alice/work",
+  "entry_verified": false
 }
 ```
 
-必填：`ssh_host`、`partition`、`gpu_name`、`vram_mib`、`gpus_per_node`、`cpus_per_gpu`、
-`mem_gib_per_gpu`。可选：`qos`、`account`、`ssh_port`、`control_path`、`workspace_path`
-（未写时用远端家目录）。行为：
+前八项必填。可选 `qos`、`account`、`control_path`、`credential_path`。
+`info` 可读非敏感配置、不能读取凭据；未配置仍可发现。
+只有 `connect` 读取配置指向的 600 权限凭据文件（PASSWORD/SECRET），也支持已有 SSH 密钥。
+`observe/apply/release` 仅复用现有 ControlMaster。显式连接命令：
+`serverpilot endpoint connect ENDPOINT_ID`，停止维持加 `--disconnect`。
 
-- 复用已有 OpenSSH ControlMaster（`ssh -O check`）；master 不在时报错退出，绝不认证、
-  不弹密码、不消耗 TOTP。
-- `observe` 只报告当前用户自己的作业；没有本用户作业时返回 0 张卡，另带集群空闲提示
-  （不进 GPU 账本）。
-- `apply` 用 `srun --immediate`：作业不能马上启动则失败，不排队。
-- `release` 对这次分配的 Slurm job id 调用 `scancel`。
-- 计算节点上的 CUDA 只在该 Slurm 作业里有效，登录节点本身没有 GPU。
-
-不要把站点拓扑写进仓库，或写进随发行版分发的插件文件。
-
-### 写一个插件
-
-`info` 必须先能跑通，且不依赖站点配置。`observe` 必须打印固定字段集合的 JSON（同上）。
-插件若还声明 `apply` / `release`，输出必须符合上表，ServerPilot 才会用它申请和回收。
-
-插件只负责「怎么连这台、怎么读、怎么申请/释放」，ServerPilot 仍负责账本、分配、空闲
-回收和展示：真实 GPU 用真实 NVIDIA UUID；`apply` 要能立即拿到，拿不到就失败
-（`no_capacity`），不要排队；`release` 只释放自己的那次分配；生命周期（空闲回收、
-到期清空、租约展示）由 ServerPilot 管，插件不重复实现。
+Slurm 申请将任务秒数向上取整为分钟传入 `srun --time`，使用立即申请窗口而不排队。
+返回的进入方式使用已有 job id；`entry_verified=false` 表示该站点现场进入路径尚未验证。
+GPU 环境内编号由 CUDA Driver API 的 UUID 映射确认，不能把物理卡号当作 CUDA 编号。
+`release` 调用 scancel 后还要取得调度器终态，命令返回成功本身不等于归还已确认。
 
 ## 空闲占卡：`server-script-v1`
 

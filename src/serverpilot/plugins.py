@@ -20,16 +20,17 @@ from pathlib import Path
 from typing import Any, Literal
 
 from serverpilot.adapters import MAX_RAW_SSH_STDOUT_BYTES
+from serverpilot.provider_contract import AllocationFact, ConnectionFact
 
 PLUGIN_ID_PATTERN = re.compile(r"^[a-z][a-z0-9-]{1,39}$")
-PLUGIN_CAPABILITIES = frozenset({"observe", "apply", "release"})
+PLUGIN_CAPABILITIES = frozenset({"observe", "apply", "release", "connect", "disconnect"})
 TASK_REF_PATTERN = re.compile(r"^[A-Za-z0-9._@+/-]{1,255}$")
 ALLOCATION_REF_PATTERN = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
 PLUGIN_INFO_TIMEOUT_SECONDS = 8
 PLUGIN_OBSERVE_TIMEOUT_SECONDS = 45
 PLUGIN_MUTATION_TIMEOUT_SECONDS = 60
 MAX_PLUGIN_OUTPUT_BYTES = MAX_RAW_SSH_STDOUT_BYTES
-PLUGIN_SCHEMA_VERSION = 3
+PLUGIN_SCHEMA_VERSION = 5
 # An `apply` that found nothing free right now exits with this instead of the
 # generic failure code, so the outcome is machine-readable rather than inferred
 # from whatever the scheduler happened to print.
@@ -89,9 +90,10 @@ class PluginError(RuntimeError):
     plugin must not read to an agent as an empty cluster.
     """
 
-    def __init__(self, message: str, *, no_capacity: bool = False) -> None:
+    def __init__(self, message: str, *, no_capacity: bool = False, code: str = "plugin_error") -> None:
         super().__init__(message)
         self.no_capacity = no_capacity
+        self.code = code
 
 
 @dataclass(frozen=True, slots=True)
@@ -111,6 +113,8 @@ class PluginInfo:
     path: Path
     source: PluginSource
     description: str = ""
+    release_granularity: str = "device"
+    entry_kind: str = "ssh"
     limits: dict[str, Any] = field(default_factory=lambda: dict(DIRECT_PROFILE_LIMITS))
 
 
@@ -172,7 +176,8 @@ def list_observation_profiles(
 ) -> list[dict[str, Any]]:
     profiles = [dict(item) for item in BUILTIN_PROFILE_CATALOG]
     seen = {item["id"] for item in profiles}
-    for plugin in discover_plugins(home=home, environment=environment):
+    discovered, failures = discover_plugins_with_failures(home=home, environment=environment)
+    for plugin in discovered:
         if plugin.plugin_id in seen:
             continue
         seen.add(plugin.plugin_id)
@@ -187,6 +192,13 @@ def list_observation_profiles(
                 "limits": dict(plugin.limits),
             }
         )
+    for failure in failures:
+        plugin_id = failure.plugin_id or failure.path.name
+        if plugin_id in seen:
+            continue
+        profiles.append({"id": plugin_id, "display_name": f"{plugin_id}（需要升级或修复）",
+                         "description": failure.error, "source": failure.source,
+                         "capabilities": [], "available": False, "error": failure.error})
     return profiles
 
 
@@ -352,6 +364,19 @@ def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
         description = ""
     if not isinstance(description, str) or len(description) > 500:
         raise PluginError("plugin info description is invalid")
+    if ("connect" in capabilities) != ("disconnect" in capabilities):
+        raise PluginError("plugin connection capabilities must include connect and disconnect")
+    if ("apply" in capabilities) != ("release" in capabilities):
+        raise PluginError("plugin allocation capabilities must include apply and release")
+    release_granularity = payload.get("release_granularity")
+    entry_kind = payload.get("entry_kind")
+    if release_granularity not in {"device", "allocation"}:
+        raise PluginError("plugin release_granularity must be device or allocation")
+    if entry_kind not in {"ssh", "allocation"}:
+        raise PluginError("plugin entry_kind must be ssh or allocation")
+    # The current remote release verb takes a whole reference, not device IDs.
+    if "apply" in capabilities and release_granularity != "allocation":
+        raise PluginError("apply/release plugins must declare allocation release granularity")
     limits = parse_plugin_limits(payload.get("limits"))
     return PluginInfo(
         plugin_id=plugin_id,
@@ -362,6 +387,8 @@ def probe_plugin(path: Path, *, source: PluginSource) -> PluginInfo:
         source=source,
         description=description.strip(),
         limits=limits,
+        release_granularity=release_granularity,
+        entry_kind=entry_kind,
     )
 
 
@@ -398,6 +425,7 @@ def invoke_plugin(
         raise PluginError(
             detail[:1500] or f"plugin exited {completed.returncode}",
             no_capacity=completed.returncode == PLUGIN_NO_CAPACITY_EXIT_CODE,
+            code="invalid_request" if completed.returncode == 2 else "plugin_error",
         )
     return stdout
 
@@ -406,21 +434,34 @@ def observe_plugin(plugin_id: str) -> str:
     plugin = require_plugin(plugin_id)
     if "observe" not in plugin.capabilities:
         raise PluginError(f"plugin {plugin_id} does not declare observe")
-    return invoke_plugin(
-        plugin.path,
-        ["observe"],
-        timeout_seconds=PLUGIN_OBSERVE_TIMEOUT_SECONDS,
-    )
+    raw = invoke_plugin(plugin.path, ["observe"], timeout_seconds=PLUGIN_OBSERVE_TIMEOUT_SECONDS)
+    payload = _strict_object(raw, label="plugin observe")
+    if set(payload) == {"connection"}:
+        try:
+            connection = ConnectionFact.model_validate(payload["connection"])
+        except ValueError as exc:
+            raise PluginError("invalid connection observation") from exc
+        raise PluginError(connection.message, code=connection.error_code or "connection_failed")
+    return raw
 
 
-def apply_plugin(plugin_id: str, *, gpu_count: int, task_ref: str) -> dict[str, Any]:
+def apply_plugin(
+    plugin_id: str, *, gpu_count: int, task_ref: str, duration_seconds: int, request_id: str, requirements: dict[str, Any],
+) -> dict[str, Any]:
     plugin = require_plugin(plugin_id)
     if "apply" not in plugin.capabilities:
         raise PluginError(f"plugin {plugin_id} does not declare apply")
     if type(gpu_count) is not int or isinstance(gpu_count, bool) or gpu_count < 1:
         raise PluginError("plugin apply gpu_count must be a positive integer")
-    if not isinstance(task_ref, str) or not TASK_REF_PATTERN.fullmatch(task_ref):
+    if not isinstance(task_ref, str) or not task_ref.strip() or len(task_ref) > 255:
         raise PluginError("plugin apply task_ref is invalid")
+    if type(duration_seconds) is not int or not 60 <= duration_seconds <= MAX_PROFILE_LEASE_SECONDS:
+        raise PluginError("plugin apply duration_seconds is invalid")
+    if not isinstance(request_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", request_id):
+        raise PluginError("plugin apply request_id is invalid")
+    maximum = plugin.limits["max_lease_seconds"]
+    if maximum is not None and duration_seconds > maximum:
+        raise PluginError("requested duration exceeds provider's hard time limit")
     # The plugin declares how long its own apply may take. Enforcing the
     # declaration instead of a generic ceiling is what lets the caller's budget
     # be derived from it: a plugin that overruns what it published is a failure,
@@ -428,12 +469,21 @@ def apply_plugin(plugin_id: str, *, gpu_count: int, task_ref: str) -> dict[str, 
     declared = plugin.limits.get("apply_max_seconds")
     raw = invoke_plugin(
         plugin.path,
-        ["apply", "--gpu-count", str(gpu_count), "--task-ref", task_ref],
+        ["apply", "--gpu-count", str(gpu_count), "--task-ref", task_ref,
+         "--duration-seconds", str(duration_seconds), "--request-id", request_id,
+         "--requirements-json", json.dumps(requirements, separators=(",", ":"))],
         timeout_seconds=(
             float(declared) if isinstance(declared, int) else PLUGIN_MUTATION_TIMEOUT_SECONDS
         ),
     )
-    return parse_apply_payload(raw, plugin_id=plugin_id)
+    payload = parse_apply_payload(raw, plugin_id=plugin_id)
+    if payload["request_id"] != request_id:
+        raise PluginError("plugin apply returned a different request_id")
+    if sum(item["gpu_count"] for item in payload["locations"]) != gpu_count:
+        raise PluginError("plugin apply allocated a different GPU count")
+    if plugin.limits["lease_ends"] == "hard_kill_at_time_limit" and not payload["expires_at"]:
+        raise PluginError("plugin apply omitted its actual deadline")
+    return payload
 
 
 def release_plugin(plugin_id: str, *, allocation_ref: str) -> dict[str, Any]:
@@ -454,65 +504,25 @@ def release_plugin(plugin_id: str, *, allocation_ref: str) -> dict[str, Any]:
 
 
 def parse_apply_payload(raw: str, *, plugin_id: str) -> dict[str, Any]:
-    payload = _strict_object(raw, label="plugin apply")
-    allocation_ref = payload.get("allocation_ref")
-    if not isinstance(allocation_ref, str) or not ALLOCATION_REF_PATTERN.fullmatch(allocation_ref):
-        raise PluginError("plugin apply allocation_ref is invalid")
-    ssh = payload.get("ssh")
-    if not isinstance(ssh, dict):
-        raise PluginError("plugin apply ssh must be an object")
-    host = ssh.get("host")
-    port = ssh.get("port")
-    user = ssh.get("user")
-    if not isinstance(host, str) or not host.strip() or len(host) > 253:
-        raise PluginError("plugin apply ssh.host is invalid")
-    if type(port) is not int or isinstance(port, bool) or not 1 <= port <= 65535:
-        raise PluginError("plugin apply ssh.port is invalid")
-    if not isinstance(user, str) or not re.fullmatch(r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$", user):
-        raise PluginError("plugin apply ssh.user is invalid")
-    workspace_path = payload.get("workspace_path")
-    if (
-        not isinstance(workspace_path, str)
-        or not workspace_path.startswith("/")
-        or any(character in workspace_path for character in ("\x00", "\n", "\r"))
-        or len(workspace_path) > 2000
-    ):
-        raise PluginError("plugin apply workspace_path is invalid")
-    cuda_visible_devices = payload.get("cuda_visible_devices")
-    if not isinstance(cuda_visible_devices, str) or not re.fullmatch(
-        r"^[0-9]+(?:,[0-9]+)*$", cuda_visible_devices
-    ):
-        raise PluginError("plugin apply cuda_visible_devices is invalid")
-    gpus = payload.get("gpus", [])
-    if not isinstance(gpus, list):
-        raise PluginError("plugin apply gpus must be a list")
-    parsed_gpus: list[dict[str, Any]] = []
-    seen_uuids: set[str] = set()
-    for item in gpus:
-        if not isinstance(item, dict):
-            raise PluginError("plugin apply gpus items must be objects")
-        uuid = item.get("gpu_uuid")
-        if not isinstance(uuid, str) or not uuid or len(uuid) > 160:
-            raise PluginError("plugin apply gpus gpu_uuid is invalid")
-        if uuid in seen_uuids:
-            raise PluginError("plugin apply gpus contain duplicate gpu_uuid")
-        seen_uuids.add(uuid)
-        parsed: dict[str, Any] = {"gpu_uuid": uuid}
-        name = item.get("name")
-        if isinstance(name, str) and name and len(name) <= 255:
-            parsed["name"] = name
-        total = item.get("total_vram_mib")
-        if type(total) is int and not isinstance(total, bool) and total >= 1:
-            parsed["total_vram_mib"] = total
-        parsed_gpus.append(parsed)
-    return {
-        "plugin_id": plugin_id,
-        "allocation_ref": allocation_ref,
-        "ssh": {"host": host.strip(), "port": port, "user": user},
-        "workspace_path": workspace_path,
-        "cuda_visible_devices": cuda_visible_devices,
-        "gpus": parsed_gpus,
-    }
+    try:
+        payload = AllocationFact.model_validate_json(raw)
+    except ValueError as exc:
+        raise PluginError(f"plugin apply allocation is invalid: {exc}") from exc
+    if payload.state != "active" or payload.request_id is None or payload.entry is None:
+        raise PluginError("plugin apply must return an active, identified allocation with entry information")
+    return payload.model_dump(mode="json")
+
+
+def set_plugin_connection(plugin_id: str, *, enabled: bool) -> dict[str, Any]:
+    plugin = require_plugin(plugin_id)
+    verb = "connect" if enabled else "disconnect"
+    if verb not in plugin.capabilities:
+        raise PluginError(f"plugin does not declare {verb}")
+    raw = invoke_plugin(plugin.path, [verb], timeout_seconds=PLUGIN_MUTATION_TIMEOUT_SECONDS)
+    try:
+        return ConnectionFact.model_validate_json(raw).model_dump(mode="json")
+    except ValueError as exc:
+        raise PluginError("plugin connection result is invalid") from exc
 
 
 def add_plugin(

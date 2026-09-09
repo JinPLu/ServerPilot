@@ -4,6 +4,49 @@ import Testing
 
 @MainActor
 @Suite(.serialized) struct ServerGroupTests {
+    @Test func schedulerNodesPreserveDrainedNodesAndSortNaturally() throws {
+        let capacity = try #require(EndpointRecord(raw: [
+            "id": "cluster", "host": "login", "ssh_user": "user",
+            "nodes": [
+                ["name": "gnode10", "state": "drain", "total_gpus": 8,
+                 "allocated_gpus": 0, "schedulable": false],
+                ["name": "gnode2", "state": "mix", "total_gpus": 8,
+                 "allocated_gpus": 5, "schedulable": true],
+            ],
+        ]))
+        #expect(capacity.nodes.map(\.name) == ["gnode2", "gnode10"])
+        #expect(capacity.nodes[0].freeGPUs == 3)
+        #expect(capacity.nodes[1].freeGPUs == 8)
+        #expect(!capacity.nodes[1].schedulable)
+    }
+
+    @Test func providerAllocationPreservesPhysicalAndEnvironmentDeviceIdentities() throws {
+        let lease = try #require(LeaseRecord(raw: [
+            "id": "lease-provider", "actor_id": "tester", "project_id": "project-a", "task_ref": "training", "gpu_ids": [],
+            "allocations": [[
+                "id": "application", "endpoint_id": "cluster", "allocation_ref": "901",
+                "state": "active", "release_granularity": "allocation", "fresh": false,
+                "expires_at": "2026-09-08T09:00:00Z",
+                "locations": [["node": "node07", "gpu_count": 2, "devices": [
+                    ["gpu_uuid": "GPU-a", "physical_index": 4, "device_selector": "0"],
+                    ["gpu_uuid": "GPU-b"],
+                ]]],
+                "entry": ["kind": "allocation", "host": "login.example", "port": 22, "user": "alice",
+                          "workspace_path": "/work", "argv": ["provider-enter", "901"], "verified": false],
+            ]],
+        ]))
+        let allocation = try #require(lease.allocations.first)
+        #expect(lease.gpuCount == 2)
+        #expect(allocation.locations[0].node == "node07")
+        #expect(allocation.locations[0].devices[0].physicalIndex == 4)
+        #expect(allocation.locations[0].devices[0].deviceSelector == "0")
+        #expect(allocation.locations[0].devices[1].physicalIndex == nil)
+        #expect(allocation.locations[0].devices[1].deviceSelector == nil)
+        #expect(allocation.entry?.verified == false)
+        #expect(allocation.expiresAt == "2026-09-08T09:00:00Z")
+        #expect(allocation.stateLabel == "位置待重新确认")
+    }
+
     @Test func testSnapshotDecodesServerGroupsAndEndpointAssignment() throws {
         let snapshot = BrokerSnapshot(envelope: Self.groupedEnvelope())
         #expect(snapshot.serverGroups.map(\.id) == ["lab-a", "lab-b"])
@@ -358,6 +401,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 2,
+            durationSeconds: 3600,
             endpointID: "node-a1",
             serverGroupID: "lab-a"
         )
@@ -374,6 +418,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 1,
+            durationSeconds: 3600,
             endpointID: "node-a1",
             serverGroupID: "  lab-a  "
         )
@@ -390,6 +435,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 1,
+            durationSeconds: 3600,
             endpointID: "solo-1"
         )
         #expect(legacy.serverGroupID == nil)
@@ -404,6 +450,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 1,
+            durationSeconds: 3600,
             endpointID: "solo-1",
             serverGroupID: "   "
         )
@@ -444,6 +491,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 2,
+            durationSeconds: 3600,
             endpointID: "node-a1",
             serverGroupID: "lab-a"
         )) { result, message in
@@ -458,6 +506,7 @@ import Testing
         let groupedPayload = try #require(
             try JSONSerialization.jsonObject(with: groupedPayloadBody) as? [String: Any]
         )
+        #expect(groupedPayload["duration_seconds"] as? Int == 3600)
         let groupedConstraints = try #require(groupedPayload["constraints"] as? [String: Any])
         #expect(Set(groupedConstraints.keys) == ["gpu_count", "placement", "same_host", "server_group_ids"])
         #expect(groupedConstraints["same_host"] as? Bool == true)
@@ -470,6 +519,7 @@ import Testing
             taskReference: "train",
             purpose: "fine-tune",
             gpuCount: 1,
+            durationSeconds: 3600,
             endpointID: "solo-1"
         )) { result, message in
             legacyRecorder.success = result != nil

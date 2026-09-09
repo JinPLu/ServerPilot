@@ -37,8 +37,10 @@ enum ServiceProbeResult {
 func confirmLeaseRelease(_ lease: LeaseRecord) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "释放 \(lease.gpuIDs.count) 张 GPU？"
-    alert.informativeText = "请先确认任务已结束。释放不会停止任务。"
+    alert.messageText = "释放 \(lease.gpuCount) 张 GPU？"
+    alert.informativeText = lease.allocations.contains { $0.releaseGranularity == "allocation" }
+        ? "将归还整个资源分配，提供方可能终止其中仍在运行的程序。请先确认任务已结束。"
+        : "请先确认任务已结束。释放不会停止任务。"
     alert.addButton(withTitle: "释放")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn

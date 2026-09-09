@@ -505,6 +505,15 @@ public final class BrokerStore: ObservableObject {
         requestRefresh()
     }
 
+    public func setConnection(_ endpoint: EndpointRecord, enabled: Bool) {
+        performMutationWithPayload(
+            path: "api/v1/endpoints/\(endpoint.id)/connection", method: "PUT", payload: ["enabled": enabled]
+        ) { [weak self] _, error in
+            if let error { self?.errorMessage = error }
+            self?.reload()
+        }
+    }
+
     public func submitClaim(_ draft: ClaimDraft, completion: @escaping @MainActor @Sendable (ClaimSubmissionResult?, String?) -> Void) {
         guard allowsMutations else {
             let message = mutationUnavailableMessage
@@ -515,7 +524,7 @@ public final class BrokerStore: ObservableObject {
         let project = draft.projectID.trimmingCharacters(in: .whitespacesAndNewlines)
         let task = draft.taskReference.trimmingCharacters(in: .whitespacesAndNewlines)
         let purpose = draft.purpose.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !project.isEmpty, !task.isEmpty, !purpose.isEmpty, draft.gpuCount > 0 else {
+        guard !project.isEmpty, !task.isEmpty, !purpose.isEmpty, draft.gpuCount > 0, (60...2592000).contains(draft.durationSeconds) else {
             completion(nil, "请完整填写项目、任务、用途和 GPU 数量。")
             return
         }
@@ -525,6 +534,7 @@ public final class BrokerStore: ObservableObject {
                 "project_id": project,
                 "task_ref": task,
                 "purpose": purpose,
+                "duration_seconds": draft.durationSeconds,
                 "constraints": Self.claimConstraints(for: draft)
             ]
         ) { [weak self] payload, error in
@@ -546,7 +556,7 @@ public final class BrokerStore: ObservableObject {
             self.notice = message
             self.errorMessage = nil
             self.reload()
-            completion(ClaimSubmissionResult(allocated: allocated, message: message), nil)
+            completion(ClaimSubmissionResult(allocated: allocated, message: message, allocations: (lease?["allocations"] as? [[String: Any]] ?? []).compactMap(ResourceAllocationRecord.init)), nil)
         }
     }
 
@@ -1365,7 +1375,8 @@ public final class BrokerStore: ObservableObject {
     /// other mutation is a local database write. Keyed by path, the same way
     /// the Python client budgets this call.
     static func mutationTimeout(forPath path: String) -> TimeInterval {
-        path == "api/v1/endpoints" ? 60 : 10
+        if path.hasSuffix("/connection") { return 70 }
+        return path == "api/v1/endpoints" ? 60 : 10
     }
 
     private func performMutationWithPayload(

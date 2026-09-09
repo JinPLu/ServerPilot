@@ -368,7 +368,7 @@ func localizedStateReason(_ reason: String) -> String {
 }
 
 
-private func formattedTimestamp(_ value: String?) -> String {
+func formattedTimestamp(_ value: String?) -> String {
     guard let value else { return "未知" }
     let parser = ISO8601DateFormatter()
     parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

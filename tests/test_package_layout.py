@@ -50,7 +50,12 @@ def test_no_coroutine_touches_the_domain_or_a_plugin_directly() -> None:
     }
     # `in_domain` is the boundary itself; `collector_interval_seconds` reads
     # loaded configuration; `shutdown` disposes the boundary and cannot use it.
-    on_the_loop = {"in_domain", "collector_interval_seconds", "shutdown"}
+    import inspect
+
+    from serverpilot.service import BrokerService
+    on_the_loop = {"in_domain", "collector_interval_seconds", "shutdown"} | {
+        name for name, _ in inspect.getmembers(BrokerService, inspect.iscoroutinefunction)
+    }
     root = Path(__file__).resolve().parents[1] / "src" / "serverpilot"
     for path in (root / "api.py", root / "collector.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"))

@@ -132,7 +132,7 @@ def test_apply_use_release_round_trip(routine) -> None:  # type: ignore[no-untyp
     assert "busy_gpus" not in status
     server_id = _capacity_servers(status)[0]["server_id"]
 
-    claimed = tools.gpu_apply(server_id=server_id, gpu_count=2, task="端到端训练")
+    claimed = tools.gpu_apply(duration_seconds=3600, server_id=server_id, gpu_count=2, task="端到端训练")
     assert claimed["cuda_device_order"] == "PCI_BUS_ID"
     assert len(claimed["gpus"]) == 2
     assert claimed["cuda_visible_devices"] == ",".join(
@@ -161,10 +161,10 @@ def test_second_agent_sees_no_capacity_then_reclaims_the_idle_card(routine) -> N
     """The whole point of reclaim: a forgotten claim stops blocking others."""
 
     routine.ingest_observation(observation(count=1))
-    claimed = tools.gpu_apply(gpu_count=1, task="忘记释放的任务")
+    claimed = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="忘记释放的任务")
 
     with pytest.raises(BrokerClientError) as blocked:
-        tools.gpu_apply(gpu_count=1, task="被挡住的任务")
+        tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="被挡住的任务")
     assert "no_capacity" in str(blocked.value)
 
     _age_idle(routine, claimed["lease_id"], routine.inventory.idle_lease_reclaim_seconds + 5)
@@ -173,14 +173,14 @@ def test_second_agent_sees_no_capacity_then_reclaims_the_idle_card(routine) -> N
     reclaimed = tools.gpu_status()
     _assert_sku_capacity(reclaimed, available_count=1, total_count=1)
     assert "no_capacity" not in reclaimed
-    second = tools.gpu_apply(gpu_count=1, task="被挡住的任务")
+    second = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="被挡住的任务")
     assert second["lease_id"] != claimed["lease_id"]
     assert len(second["gpus"]) == 1
 
 
 def test_partly_used_claim_keeps_its_working_card_and_returns_the_rest(routine) -> None:  # type: ignore[no-untyped-def]
     routine.ingest_observation(observation(count=2))
-    claimed = tools.gpu_apply(gpu_count=2, task="只用一张卡")
+    claimed = tools.gpu_apply(duration_seconds=3600, gpu_count=2, task="只用一张卡")
     lease_id = claimed["lease_id"]
     busy_uuid = "GPU-endpoint-a-0"
     busy_id, idle_id = f"endpoint-a:{busy_uuid}", "endpoint-a:GPU-endpoint-a-1"
@@ -202,7 +202,7 @@ def test_partly_used_claim_keeps_its_working_card_and_returns_the_rest(routine) 
     assert "no_capacity" not in after_reclaim
     assert [item["task"] for item in after_reclaim["busy_gpus"]] == ["只用一张卡"]
     # The returned card is immediately usable by another claim.
-    other = tools.gpu_apply(gpu_count=1, task="接手空闲卡")
+    other = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="接手空闲卡")
     assert len(other["gpus"]) == 1
     assert other["gpus"][0]["gpu_id"] == "GPU-endpoint-a-1"
 
@@ -217,7 +217,7 @@ def test_releasing_one_of_two_leases_does_not_touch_the_other(routine) -> None: 
     """The contract asks agents to confirm each lease; the broker must honour it."""
 
     routine.ingest_observation(observation(count=2))
-    first = tools.gpu_apply(gpu_count=1, task="任务甲")
+    first = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="任务甲")
     assert len(first["gpus"]) == 1
     after_one = tools.gpu_status()
     # A one-GPU lease on a two-GPU host leaves the sibling advertised as capacity.
@@ -226,7 +226,7 @@ def test_releasing_one_of_two_leases_does_not_touch_the_other(routine) -> None: 
     assert [item["task"] for item in after_one["busy_gpus"]] == ["任务甲"]
     assert after_one["busy_gpus"][0]["gpu_id"] == first["gpus"][0]["gpu_id"]
 
-    second = tools.gpu_apply(gpu_count=1, task="任务乙")
+    second = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="任务乙")
     assert first["lease_id"] != second["lease_id"]
     assert len(second["gpus"]) == 1
 
@@ -266,7 +266,7 @@ def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> N
     """
 
     routine.ingest_observation(observation(count=2))
-    claimed = tools.gpu_apply(gpu_count=1, task="分阶段的任务")
+    claimed = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="分阶段的任务")
     lease_id = claimed["lease_id"]
 
     _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds + 5)

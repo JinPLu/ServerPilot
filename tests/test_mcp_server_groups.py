@@ -54,12 +54,13 @@ def test_gpu_apply_schema_locks_count_source_range_and_group_id() -> None:
     gpu_count = apply_schema["properties"]["gpu_count"]
 
     assert set(apply_schema["properties"]) == {
+        "duration_seconds",
         "server_group_id",
         "server_id",
         "gpu_count",
         "task",
     }
-    assert "required" not in apply_schema
+    assert apply_schema["required"] == ["duration_seconds"]
     assert gpu_count["default"] == 1
     assert gpu_count["minimum"] == 1
     assert gpu_count["maximum"] == 1024
@@ -210,7 +211,7 @@ def test_gpu_apply_passes_one_server_group_ids_constraint(
 
     monkeypatch.setattr(mcp_server, "_routine_client", lambda: FakeClient())
 
-    result = tools.gpu_apply(server_group_id="group-a", task="训练")
+    result = tools.gpu_apply(duration_seconds=3600, server_group_id="group-a", task="训练")
 
     assert captured["path"] == "/api/v1/routine/claims"
     body = captured["body"]
@@ -255,7 +256,7 @@ def test_group_selection_required_is_structured_data_not_a_transport_failure(
     client = Refusing()
     monkeypatch.setattr(mcp_server, "_routine_client", lambda: client)
 
-    result = tools.gpu_apply(gpu_count=2, task="probe")
+    result = tools.gpu_apply(duration_seconds=3600, gpu_count=2, task="probe")
 
     assert set(result) == {"group_selection_required"}
     payload = result["group_selection_required"]
@@ -293,7 +294,7 @@ def test_group_selection_required_on_retry_is_still_data(
     client = Retrying()
     monkeypatch.setattr(mcp_server, "_routine_client", lambda: client)
 
-    result = tools.gpu_apply(gpu_count=1, task="probe")
+    result = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="probe")
 
     assert set(result) == {"group_selection_required"}
     assert result["group_selection_required"]["server_groups"] == [{"id": "group-a"}]
@@ -310,7 +311,7 @@ def test_blank_server_group_id_is_rejected_before_contacting_broker(
     )
 
     with pytest.raises(ValueError, match="server_group_id must not be empty when it is given"):
-        tools.gpu_apply(server_group_id="   ", task="训练")
+        tools.gpu_apply(duration_seconds=3600, server_group_id="   ", task="训练")
 
 
 def test_delegated_cluster_appears_inside_its_server_group() -> None:

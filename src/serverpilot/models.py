@@ -76,6 +76,8 @@ class EndpointObservationFact(Base):
     collector_version: Mapped[str | None] = mapped_column(String(64))
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
+    provider_allocations_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+
 
 class ServerGroup(Base):
     """A first-class scheduling and workspace boundary for one or more endpoints.
@@ -173,6 +175,9 @@ class EndpointTelemetryCurrent(Base):
     endpoint_id: Mapped[str] = mapped_column(
         ForeignKey("endpoints.id", ondelete="CASCADE"), primary_key=True
     )
+    node_id: Mapped[str] = mapped_column(String(253), nullable=False, default="self", primary_key=True)
+    boot_id: Mapped[str | None] = mapped_column(String(120))
+
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, index=True)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cpu_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -202,6 +207,9 @@ class EndpointTelemetrySnapshot(Base):
     endpoint_id: Mapped[str] = mapped_column(
         ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    node_id: Mapped[str] = mapped_column(String(253), nullable=False, default="self")
+    boot_id: Mapped[str | None] = mapped_column(String(120))
+
     observed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     collected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     cpu_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -221,12 +229,13 @@ class EndpointTelemetrySnapshot(Base):
 
 class GPUDevice(Base):
     __tablename__ = "gpu_devices"
-    __table_args__ = (UniqueConstraint("endpoint_id", "gpu_uuid", name="uq_endpoint_gpu_uuid"),)
+    __table_args__ = (UniqueConstraint("endpoint_id", "node_id", "gpu_uuid", name="uq_endpoint_node_gpu_uuid"),)
 
     id: Mapped[str] = mapped_column(String(260), primary_key=True)
     endpoint_id: Mapped[str] = mapped_column(
         ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True
     )
+    node_id: Mapped[str] = mapped_column(String(253), nullable=False, default="self")
     gpu_uuid: Mapped[str] = mapped_column(String(160), nullable=False)
     gpu_index: Mapped[int] = mapped_column(Integer, nullable=False)
     cuda_ordinal: Mapped[int | None] = mapped_column(Integer)
@@ -404,6 +413,54 @@ class Lease(Base):
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
 
+class ResourceAllocation(Base):
+    """A provider's allocation, including an unresolved remote application."""
+
+    __tablename__ = "resource_allocations"
+    __table_args__ = (
+        UniqueConstraint("actor_id", "request_key", "endpoint_id", name="uq_allocation_request"),
+        UniqueConstraint("endpoint_id", "provider_id", "allocation_ref", name="uq_provider_allocation"),
+    )
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lease_id: Mapped[str | None] = mapped_column(ForeignKey("leases.id", ondelete="CASCADE"), index=True)
+    endpoint_id: Mapped[str] = mapped_column(ForeignKey("endpoints.id", ondelete="CASCADE"), nullable=False, index=True)
+    provider_id: Mapped[str] = mapped_column(String(64), nullable=False)
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False)
+    request_key: Mapped[str] = mapped_column(String(255), nullable=False)
+    request_json: Mapped[str] = mapped_column(Text, nullable=False)
+    allocation_ref: Mapped[str | None] = mapped_column(String(128))
+    name: Mapped[str | None] = mapped_column(String(255))
+    owner: Mapped[str | None] = mapped_column(String(120))
+    accounting_json: Mapped[str | None] = mapped_column(Text)
+    state: Mapped[str] = mapped_column(String(32), nullable=False)
+    release_granularity: Mapped[str] = mapped_column(String(24), nullable=False)
+    locations_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
+    entry_json: Mapped[str | None] = mapped_column(Text)
+    requested_duration_seconds: Mapped[int] = mapped_column(Integer, nullable=False)
+    expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    workload_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_error: Mapped[str | None] = mapped_column(String(1500))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
+class EndpointConnection(Base):
+    """Explicit connection intent; observing a server never grants this intent."""
+
+    __tablename__ = "endpoint_connections"
+    endpoint_id: Mapped[str] = mapped_column(ForeignKey("endpoints.id", ondelete="CASCADE"), primary_key=True)
+    desired: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False)
+    state: Mapped[str] = mapped_column(String(32), nullable=False, default="disconnected")
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    message: Mapped[str | None] = mapped_column(String(500))
+    last_attempt_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    connected_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+
+
 class LeaseResource(Base):
     __tablename__ = "lease_resources"
     __table_args__ = (
@@ -533,3 +590,13 @@ class ProviderState(Base):
 
 
 JsonValue = dict[str, Any] | list[Any] | str | int | float | bool | None
+
+
+class NodeObservationState(Base):
+    __tablename__ = "node_observation_states"
+    endpoint_id: Mapped[str] = mapped_column(ForeignKey("endpoints.id", ondelete="CASCADE"), primary_key=True)
+    node_id: Mapped[str] = mapped_column(String(253), primary_key=True)
+    last_success_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    last_attempt_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    message: Mapped[str | None] = mapped_column(String(500))

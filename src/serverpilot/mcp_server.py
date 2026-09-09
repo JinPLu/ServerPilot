@@ -707,6 +707,20 @@ def _routine_open_leases(
         if not isinstance(lease, dict) or lease.get("kind") != "workload":
             continue
         gpu_ids = [item for item in lease.get("gpu_ids", []) or [] if isinstance(item, str)]
+        allocations = lease.get("allocations", [])
+        delegated = [item for item in allocations if item.get("release_granularity") == "allocation"]
+        if delegated:
+            fresh = all(item.get("workload_fresh") and item.get("fresh") for item in delegated)
+            locations = [location for item in delegated for location in item.get("locations", [])]
+            known_devices = [device for location in locations for device in location.get("devices", [])]
+            count = sum(location["gpu_count"] for location in locations)
+            running_known = fresh and len(known_devices) == count and all(
+                device.get("running_process_count") is not None for device in known_devices)
+            leases.append({"lease_id": lease.get("id"), "task": lease.get("task_ref"),
+                           "servers": sorted({item["endpoint_id"] for item in delegated}), "gpu_count": count,
+                           "running_gpu_count": sum(device["running_process_count"] > 0 for device in known_devices) if running_known else None,
+                           "held_since": lease.get("issued_at"), "allocations": delegated})
+            continue
         if not gpu_ids:
             continue
         leases.append(
@@ -857,12 +871,51 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
     if ungrouped_servers:
         result["ungrouped_servers"] = ungrouped_servers
     if lease_id is not None:
-        result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
+        held = next((item for item in data.get("leases", []) if item.get("id") == lease_id), None) if isinstance(data, dict) else None
+        allocations = held.get("allocations", []) if held else []
+        delegated = [item for item in allocations if item.get("release_granularity") == "allocation"]
+        if delegated:
+            rows = []
+            for allocation in delegated:
+                for location in allocation["locations"]:
+                    for device in location["devices"]:
+                        row = {"server_id": allocation["endpoint_id"], "allocation_id": allocation["id"],
+                               "node": location["node"], "gpu_id": device["gpu_uuid"],
+                               "index": device.get("physical_index"), "device_selector": device.get("device_selector"),
+                               "name": device.get("name"), "vram_mib": device.get("total_vram_mib")}
+                        if allocation["fresh"] and allocation["workload_fresh"]:
+                            row.update({"memory_used_mib": device.get("memory_used_mib"),
+                                        "gpu_utilization_pct": device.get("gpu_utilization_pct"),
+                                        "running_process_count": device.get("running_process_count")})
+                        rows.append(row)
+            result.update({"lease": {"lease_id": lease_id, "task": held.get("task_ref"), "allocations": delegated,
+                                     "gpu_count": sum(location["gpu_count"] for item in delegated for location in item["locations"])},
+                           "leased_gpus": rows})
+        else:
+            result.update(_routine_lease_view(lease_id, leased_gpus, lease_windows, lease_task))
     open_leases = _routine_open_leases(data if isinstance(data, dict) else {}, status_by_gpu_id)
     if open_leases:
         result["open_leases"] = open_leases
     if busy_gpus:
         result["busy_gpus"] = busy_gpus
+    if isinstance(data, dict) and data.get("pending_allocations"):
+        result["pending_allocations"] = data["pending_allocations"]
+    connections = [{"server_id": item["id"], **item["connection"]} for item in endpoints
+                   if isinstance(item, dict) and item.get("connection", {}).get("supported")]
+    if connections:
+        result["connections"] = connections
+    observation_gpus = {gpu["id"]: gpu for gpu in data.get("gpus", []) if isinstance(gpu, dict) and "id" in gpu} if isinstance(data, dict) else {}
+    resource_nodes = [{"server_id": endpoint["id"], **node,
+        "gpus": [{key: observation_gpus[gpu_id].get(key) for key in (
+            "id", "gpu_uuid", "gpu_index", "name", "total_vram_mib", "state", "telemetry", "processes")}
+            for gpu_id in node["gpu_ids"] if gpu_id in observation_gpus]}
+        for endpoint in endpoints if isinstance(endpoint, dict) for node in endpoint.get("resource_nodes", [])]
+    if resource_nodes:
+        result["resource_nodes"] = resource_nodes
+    external = [{"server_id": item["id"], **allocation} for item in endpoints if isinstance(item, dict)
+                for allocation in item.get("external_allocations", [])]
+    if external:
+        result["external_allocations"] = external
     cpu_only_servers: list[dict[str, Any]] = []
     for endpoint in endpoints:
         if not isinstance(endpoint, dict):
@@ -964,6 +1017,17 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
         server_id = endpoint.get("id") if isinstance(endpoint, dict) else None
         workspace_path = endpoint.get("workspace_path") if isinstance(endpoint, dict) else None
         ssh = _routine_ssh(endpoint)
+        entry = resource.get("entry")
+        if isinstance(entry, dict) and entry.get("kind") == "allocation":
+            resources.append({"server_id": server_id, "ssh": ssh, "workspace_path": workspace_path,
+                              "workspace": _routine_workspace(workspace_path), "entry": entry,
+                              "allocation_id": resource["allocation_id"], "locations": resource["locations"]})
+            for location in resource["locations"]:
+                rows.extend({"server_id": server_id, "node": location["node"],
+                             "gpu_id": device["gpu_uuid"], "gpu_index": device.get("physical_index"),
+                             "device_selector": device.get("device_selector")}
+                            for device in location["devices"])
+            continue
         cuda_visible_devices = resource.get("cuda_visible_devices")
         cuda_device_order = resource.get("cuda_device_order")
         if cuda_device_order != "PCI_BUS_ID" or not isinstance(cuda_visible_devices, str):
@@ -998,6 +1062,8 @@ def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
                     }
                 )
     result: dict[str, Any] = {"lease_id": lease.get("id"), "servers": resources, "gpus": rows}
+    if lease.get("allocations"):
+        result["allocations"] = lease["allocations"]
     if len(resources) == 1:
         result.update(resources[0])
     return result
@@ -1056,6 +1122,7 @@ async def gpu_status(server_id: str | None = None, lease_id: str | None = None) 
     )
 )
 async def gpu_apply(
+    duration_seconds: Annotated[int, Field(ge=60, le=2592000, description="Expected task duration in seconds; provider hard limits still apply")],
     server_group_id: str | None = None,
     server_id: str | None = None,
     gpu_count: Annotated[
@@ -1065,7 +1132,7 @@ async def gpu_apply(
     task: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Claim GPUs on a single server now; pass server_group_id for grouped hosts. Returns SSH, the remote working directory and a CUDA selector. no_capacity and group_selection_required are answers and nothing is queued."""
+    """Claim GPUs on a single server now; pass server_group_id for grouped hosts. Returns allocations, locations, provider entry information and confirmed device selectors. no_capacity and group_selection_required are answers and nothing is queued."""
 
     if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
         raise ValueError("gpu_count must be a positive integer")
@@ -1089,8 +1156,11 @@ async def gpu_apply(
         constraints["server_group_ids"] = [server_group_id]
     if server_id is not None:
         constraints["endpoint_ids"] = [server_id]
+    if type(duration_seconds) is not int or not 60 <= duration_seconds <= 2592000:
+        raise ValueError("duration_seconds must be between 60 and 2592000")
     task_ref = _routine_task(task)
     body = {
+        "duration_seconds": duration_seconds,
         "project_id": "agent",
         "task_ref": task_ref,
         "purpose": task_ref,
