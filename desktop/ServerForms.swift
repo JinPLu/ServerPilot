@@ -219,16 +219,16 @@ struct EditServerSheet: View {
     }
 
     private func deleteServer() {
-        guard confirmEndpointDelete(endpoint) else { return }
+        guard confirmEndpointsDelete([endpoint]) else { return }
         validationMessage = nil
         isSubmitting = true
-        store.deleteEndpoint(endpoint) { success, error in
+        store.deleteEndpoints([endpoint]) { result in
             isSubmitting = false
-            if success {
+            if let failure = result.failureSummary {
+                validationMessage = failure
+            } else {
                 onRemoved()
                 dismiss()
-            } else {
-                validationMessage = error
             }
         }
     }

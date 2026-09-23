@@ -118,17 +118,24 @@ func confirmEmptyKeepaliveCleanup(gpuCount: Int) -> Bool {
 
 @discardableResult
 
-func confirmEndpointDelete(_ endpoint: EndpointRecord) -> Bool {
+func confirmEndpointsDelete(_ endpoints: [EndpointRecord]) -> Bool {
+    let listLimit = 12
+    var listed = endpoints.prefix(listLimit).map(\.sshCommand)
+    if endpoints.count > listLimit {
+        listed.append("…以及另外 \(endpoints.count - listLimit) 台")
+    }
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "从 ServerPilot 移除这台服务器？"
+    alert.messageText = endpoints.count == 1
+        ? "从 ServerPilot 移除这台服务器？"
+        : "从 ServerPilot 移除 \(endpoints.count) 台服务器？"
     alert.informativeText = """
-    \(endpoint.sshCommand)
+    \(listed.joined(separator: "\n"))
 
     这会停止对本机的监控与协调，并移除本机关联记录，不会停止远端进程。
     """
     alert.addButton(withTitle: "取消")
-    alert.addButton(withTitle: "从 ServerPilot 移除")
+    alert.addButton(withTitle: endpoints.count == 1 ? "从 ServerPilot 移除" : "移除 \(endpoints.count) 台")
     alert.buttons.last?.hasDestructiveAction = true
     return alert.runModal() == .alertSecondButtonReturn
 }

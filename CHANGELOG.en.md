@@ -6,6 +6,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+- Add bulk removal to the server list: tick several servers (for example filter to connection failures and select all), confirm once, and they are all removed from ServerPilot; any that fail are named with their reason and stay selected.
 - Ordinary servers and plugin compute nodes share GPU, CPU, memory and process observations. Node tables show current resource usage; job accounting stays separate and missing samples include a reason.
 
 - Allocation results now include task ownership, node/device locations, provider deadlines and entry instructions. Unconfirmed releases retain ownership; explicitly enabled connections are maintained automatically. Plugins must upgrade to protocol v5.

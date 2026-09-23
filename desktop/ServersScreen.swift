@@ -74,6 +74,9 @@ struct ResourcesDashboard: View {
     @State private var filter: EndpointFilter = .all
     @State private var sort: EndpointSort = .id
     @State private var sortDirection: EndpointSortDirection = .ascending
+    @State private var isSelectingForRemoval = false
+    @State private var selectedEndpointIDs: Set<String> = []
+    @State private var isRemovingEndpoints = false
     let claimEndpoint: (String) -> Void
     let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
@@ -141,6 +144,16 @@ struct ResourcesDashboard: View {
                             || ($0.purpose ?? "").lowercased().contains(query)
                     }
             }
+    }
+
+    /// Selected endpoints still in the snapshot, so a server removed
+    /// elsewhere drops out of the selection on the next refresh.
+    private var selectedEndpoints: [EndpointRecord] {
+        endpoints.filter { selectedEndpointIDs.contains($0.id) }
+    }
+
+    private var allFilteredSelected: Bool {
+        !filteredEndpoints.isEmpty && filteredEndpoints.allSatisfy { selectedEndpointIDs.contains($0.id) }
     }
 
     private var tableSections: [EndpointOverviewSection] {
@@ -285,6 +298,19 @@ struct ResourcesDashboard: View {
                 .help("资源排序")
                 .accessibilityLabel("资源排序")
 
+                if store.supportsEndpointDelete {
+                    Button(action: toggleRemovalSelection) {
+                        Label(
+                            isSelectingForRemoval ? "完成" : "批量移除",
+                            systemImage: isSelectingForRemoval ? "checkmark" : "checklist"
+                        )
+                        .font(Typography.identity)
+                    }
+                    .buttonStyle(.borderless)
+                    .help(isSelectingForRemoval ? "退出批量移除" : "勾选多台服务器，一次从 ServerPilot 移除")
+                    .accessibilityIdentifier("endpoint-bulk-remove-mode")
+                }
+
                 Button(action: manageGroups) {
                     Label("服务器组", systemImage: "rectangle.3.group")
                         .font(Typography.identity)
@@ -296,6 +322,10 @@ struct ResourcesDashboard: View {
             }
             .padding(.horizontal, 20)
             .padding(.vertical, 11)
+
+            if isSelectingForRemoval {
+                removalSelectionBar
+            }
 
             GeometryReader { proxy in
                 // Columns fold from the right as the window narrows; the SSH
@@ -389,13 +419,75 @@ struct ResourcesDashboard: View {
         }
     }
 
+    private var removalSelectionBar: some View {
+        let selected = selectedEndpoints
+        return HStack(spacing: 12) {
+            Text("已选 \(selected.count) 台")
+                .font(Typography.identity.weight(.semibold))
+                .foregroundStyle(DesignTokens.ink)
+                .monospacedDigit()
+            Button(allFilteredSelected ? "取消全选" : "全选当前结果（\(filteredEndpoints.count) 台）") {
+                if allFilteredSelected {
+                    selectedEndpointIDs.subtract(filteredEndpoints.map(\.id))
+                } else {
+                    selectedEndpointIDs.formUnion(filteredEndpoints.map(\.id))
+                }
+            }
+            .buttonStyle(.borderless)
+            .disabled(filteredEndpoints.isEmpty)
+            .accessibilityIdentifier("endpoint-bulk-select-all")
+            Text("点击行勾选；可先用搜索或「连接失败」过滤再全选。")
+                .font(Typography.annotation)
+                .foregroundStyle(DesignTokens.mutedInk)
+                .lineLimit(1)
+            Spacer(minLength: 0)
+            Button(selected.isEmpty ? "移除…" : "移除 \(selected.count) 台…", action: removeSelectedEndpoints)
+                .buttonStyle(SoftButtonStyle(tint: DesignTokens.danger, foreground: DesignTokens.onInteraction))
+                .disabled(selected.isEmpty || isRemovingEndpoints || !store.allowsEndpointLifecycleMutations)
+                .help(store.allowsEndpointLifecycleMutations
+                    ? "从本机控制面移除所选服务器；不会停止远端进程"
+                    : store.endpointLifecycleMutationUnavailableReason)
+                .accessibilityIdentifier("endpoint-bulk-remove-action")
+        }
+        .padding(.horizontal, 20)
+        .padding(.bottom, 4)
+    }
+
+    private func toggleRemovalSelection() {
+        isSelectingForRemoval.toggle()
+        selectedEndpointIDs = []
+    }
+
+    private func toggleSelection(_ endpoint: EndpointRecord) {
+        if selectedEndpointIDs.contains(endpoint.id) {
+            selectedEndpointIDs.remove(endpoint.id)
+        } else {
+            selectedEndpointIDs.insert(endpoint.id)
+        }
+    }
+
+    private func removeSelectedEndpoints() {
+        let targets = selectedEndpoints
+        guard !targets.isEmpty, confirmEndpointsDelete(targets) else { return }
+        isRemovingEndpoints = true
+        store.deleteEndpoints(targets) { result in
+            isRemovingEndpoints = false
+            selectedEndpointIDs.subtract(result.removedIDs)
+            if result.failures.isEmpty {
+                isSelectingForRemoval = false
+            }
+        }
+    }
+
     private func sectionRowCount(_ section: EndpointOverviewSection) -> Int {
         sectionRows(section).count
     }
 
     private func sectionRows(_ section: EndpointOverviewSection) -> [EndpointOverviewRow] {
         section.endpoints.flatMap { endpoint -> [EndpointOverviewRow] in
-            if !endpoint.nodes.isEmpty {
+            // Removal acts on servers, so selection shows one row per server
+            // even where the table normally lists a cluster's nodes.
+            if !endpoint.nodes.isEmpty && !isSelectingForRemoval {
                 return visibleNodes(endpoint).map { .node(endpoint, $0) }
             }
             return [.endpoint(endpoint)]
@@ -423,8 +515,15 @@ struct ResourcesDashboard: View {
         EndpointTableRow(
             endpoint: endpoint, gpus: store.snapshot.gpus(for: endpoint),
             leases: leases(for: endpoint), group: store.snapshot.serverGroup(for: endpoint),
-            isSnapshotFresh: store.freshness == .fresh, tier: tier
-        ) { openEndpoint(endpoint) }
+            isSnapshotFresh: store.freshness == .fresh, tier: tier,
+            removalMark: isSelectingForRemoval ? selectedEndpointIDs.contains(endpoint.id) : nil
+        ) {
+            if isSelectingForRemoval {
+                toggleSelection(endpoint)
+            } else {
+                openEndpoint(endpoint)
+            }
+        }
     }
 
     private func nodeRow(_ endpoint: EndpointRecord, node: SchedulerNodeRecord, tier: EndpointTableLayout.Tier) -> SchedulerNodeTableRow {
@@ -854,6 +953,8 @@ private struct EndpointTableRow: View {
     let group: ServerGroupRecord?
     let isSnapshotFresh: Bool
     let tier: EndpointTableLayout.Tier
+    /// nil outside bulk removal; otherwise whether this row is checked.
+    let removalMark: Bool?
     let select: () -> Void
 
     func sortValue(for field: EndpointSort) -> ResourceTableSortValue? {
@@ -877,6 +978,11 @@ private struct EndpointTableRow: View {
     var body: some View {
         Button(action: select) {
             HStack(spacing: tier.columnSpacing) {
+                if let checked = removalMark {
+                    Image(systemName: checked ? "checkmark.circle.fill" : "circle")
+                        .font(.body)
+                        .foregroundStyle(checked ? DesignTokens.danger : DesignTokens.mutedInk)
+                }
                 serverCell
                     .frame(minWidth: EndpointTableLayout.sshLane, maxWidth: .infinity, alignment: .leading)
                 if tier.showsAssignment {
@@ -903,11 +1009,11 @@ private struct EndpointTableRow: View {
         // Everything a 44 pt row cannot print — the workspace path, per-card
         // VRAM, the full lease list — is one hover away, and all of it is in
         // the detail sheet a click away.
-        .help(tooltip)
+        .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
         .accessibilityElement(children: .ignore)
         // Without this the row reports as AXUnknown, so assistive technology
         // reads its label but cannot say it is actionable.
-        .accessibilityAddTraits(.isButton)
+        .accessibilityAddTraits(removalMark == true ? [.isButton, .isSelected] : .isButton)
         .accessibilityIdentifier("endpoint-row-\(endpoint.id)")
         .accessibilityLabel("服务器 \(endpoint.sshCommand)")
         .accessibilityValue(accessibilityValue)

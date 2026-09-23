@@ -660,24 +660,87 @@ public final class BrokerStore: ObservableObject {
         }
     }
 
-    public func deleteEndpoint(
-        _ endpoint: EndpointRecord,
-        completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
+    public struct EndpointRemovalResult: Sendable {
+        public struct Failure: Sendable {
+            public let endpointID: String
+            public let message: String
+        }
+
+        public let removedIDs: [String]
+        public let failures: [Failure]
+
+        /// One failure reads as its own message; several name each endpoint.
+        public var failureSummary: String? {
+            guard !failures.isEmpty else { return nil }
+            if failures.count == 1 && removedIDs.isEmpty { return failures[0].message }
+            let lines = failures.map { "\($0.endpointID)：\($0.message)" }.joined(separator: "\n")
+            return "\(failures.count) 台服务器未移除：\n\(lines)"
+        }
+    }
+
+    /// Removes the endpoints one after another and reloads once at the end.
+    /// A failure on one endpoint does not stop the rest; the result names
+    /// every endpoint that stayed and why.
+    public func deleteEndpoints(
+        _ endpoints: [EndpointRecord],
+        completion: @escaping @MainActor @Sendable (EndpointRemovalResult) -> Void
     ) {
-        guard supportsEndpointDelete else {
-            let message = endpointCompatibilityMessage("删除服务器", capability: "endpoint_delete")
-            errorMessage = message
-            completion(false, message)
+        let refusal: String?
+        if !supportsEndpointDelete {
+            refusal = endpointCompatibilityMessage("删除服务器", capability: "endpoint_delete")
+        } else if !allowsEndpointLifecycleMutations {
+            refusal = endpointLifecycleMutationUnavailableReason
+        } else if endpoints.contains(where: { mutatingEndpointIDs.contains($0.id) }) {
+            refusal = "所选服务器中有设置正在更新，请稍候。"
+        } else {
+            refusal = nil
+        }
+        if let refusal {
+            errorMessage = refusal
+            completion(EndpointRemovalResult(
+                removedIDs: [],
+                failures: endpoints.map { EndpointRemovalResult.Failure(endpointID: $0.id, message: refusal) }
+            ))
             return
         }
-        performEndpointMutation(
-            endpoint,
+        mutatingEndpointIDs.formUnion(endpoints.map(\.id))
+        removeEndpoints(endpoints[...], removedIDs: [], failures: [], completion: completion)
+    }
+
+    private func removeEndpoints(
+        _ remaining: ArraySlice<EndpointRecord>,
+        removedIDs: [String],
+        failures: [EndpointRemovalResult.Failure],
+        completion: @escaping @MainActor @Sendable (EndpointRemovalResult) -> Void
+    ) {
+        guard let endpoint = remaining.first else {
+            let result = EndpointRemovalResult(removedIDs: removedIDs, failures: failures)
+            if let summary = result.failureSummary {
+                errorMessage = summary
+            } else {
+                errorMessage = nil
+                notice = removedIDs.count == 1
+                    ? "已从本机控制面移除 \(removedIDs[0])。"
+                    : "已从本机控制面移除 \(removedIDs.count) 台服务器。"
+            }
+            if !removedIDs.isEmpty { reload() }
+            completion(result)
+            return
+        }
+        performMutationWithPayload(
             path: "api/v1/endpoints/\(endpoint.id)",
             method: "DELETE",
-            payload: [:],
-            successMessage: "已从本机控制面移除 \(endpoint.displayName)。",
-            completion: completion
-        )
+            payload: [:]
+        ) { [weak self] _, error in
+            guard let self else { return }
+            self.mutatingEndpointIDs.remove(endpoint.id)
+            self.removeEndpoints(
+                remaining.dropFirst(),
+                removedIDs: error == nil ? removedIDs + [endpoint.id] : removedIDs,
+                failures: error.map { failures + [EndpointRemovalResult.Failure(endpointID: endpoint.id, message: $0)] } ?? failures,
+                completion: completion
+            )
+        }
     }
 
     public func updateEndpoint(

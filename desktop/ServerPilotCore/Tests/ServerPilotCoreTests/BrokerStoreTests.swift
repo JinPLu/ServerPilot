@@ -727,9 +727,9 @@ import Testing
         #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1/leases/lease-conflict/release-empty")
 
         let deleteRecorder = CompletionRecorder()
-        store.deleteEndpoint(endpoint) { success, message in
-            deleteRecorder.success = success
-            deleteRecorder.message = message
+        store.deleteEndpoints([endpoint]) { result in
+            deleteRecorder.success = result.failures.isEmpty
+            deleteRecorder.message = result.failureSummary
         }
         try await waitUntil { deleteRecorder.success != nil }
         #expect(deleteRecorder.success == true)
@@ -1037,6 +1037,41 @@ import Testing
         #expect(fixture.supportsEndpointDelete)
     }
 
+    @Test func testDeleteEndpointsRemovesEachSelectedServerAndReportsOnce() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StateRouteURLProtocol.self]
+        let mutationSession = URLSession(configuration: configuration)
+        let snapshot = try Self.snapshot(named: "64")
+        let targets = Array(snapshot.endpoints.prefix(2))
+        try #require(targets.count == 2)
+        let store = BrokerStore(
+            actorID: "tester",
+            refreshTimeoutSeconds: 1,
+            refreshIntervalSeconds: 0,
+            mutationSession: mutationSession
+        )
+        defer { StateRouteURLProtocol.reset() }
+        store.connectForTesting(
+            snapshotClient: ScriptedClient(results: [.success(snapshot), .success(snapshot)]),
+            serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: ["endpoint_delete"]),
+            baseURL: URL(string: "http://broker.test/")!
+        )
+        try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
+
+        let recorder = CompletionRecorder()
+        store.deleteEndpoints(targets) { result in
+            recorder.success = result.failures.isEmpty
+            recorder.message = result.removedIDs.joined(separator: ",")
+        }
+        try await waitUntil { recorder.success != nil }
+        #expect(recorder.success == true)
+        #expect(recorder.message == targets.map(\.id).joined(separator: ","))
+        #expect(StateRouteURLProtocol.requests.filter { $0.httpMethod == "DELETE" }.map { "DELETE \($0.url?.path ?? "")" }
+            == targets.map { "DELETE /api/v1/endpoints/\($0.id)" })
+        #expect(store.notice == "已从本机控制面移除 2 台服务器。")
+        #expect(store.mutatingEndpointIDs.isEmpty)
+    }
+
     @Test func testDeleteEndpointKeepsActionableConflictError() async throws {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [StateRouteURLProtocol.self]
@@ -1065,9 +1100,9 @@ import Testing
         try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
 
         let recorder = CompletionRecorder()
-        store.deleteEndpoint(endpoint) { success, message in
-            recorder.success = success
-            recorder.message = message
+        store.deleteEndpoints([endpoint]) { result in
+            recorder.success = result.failures.isEmpty
+            recorder.message = result.failureSummary
         }
         try await waitUntil { recorder.success != nil }
         #expect(recorder.success == false)
@@ -1087,9 +1122,9 @@ import Testing
         try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
 
         let recorder = CompletionRecorder()
-        store.deleteEndpoint(endpoint) { success, message in
-            recorder.success = success
-            recorder.message = message
+        store.deleteEndpoints([endpoint]) { result in
+            recorder.success = result.failures.isEmpty
+            recorder.message = result.failureSummary
         }
         try await waitUntil { recorder.success != nil }
         #expect(recorder.success == false)
@@ -1592,6 +1627,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var responseData: Data?
     nonisolated(unsafe) static var lastRequest: URLRequest?
     nonisolated(unsafe) static var lastBody: Data?
+    nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var statusCode = 200
 
     /// URLSession turns `httpBody` into a stream before a protocol sees the
@@ -1620,6 +1656,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
 
     override func startLoading() {
         Self.lastRequest = request
+        Self.requests.append(request)
         Self.lastBody = request.httpBody ?? Self.drain(request.httpBodyStream)
         let data = Self.responseData ?? Data("{}".utf8)
         let response = HTTPURLResponse(
@@ -1639,6 +1676,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         responseData = nil
         lastRequest = nil
         lastBody = nil
+        requests = []
         statusCode = 200
     }
 }
