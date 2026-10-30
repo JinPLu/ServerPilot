@@ -8354,20 +8354,27 @@ class BrokerService:
             # single answer, applied below once the machine's own proof is in.
             # Repeating the state and resource tests here is how this path came
             # to disagree with the one the App was reading.
-            resources = session.scalars(
+            held = session.scalars(
                 select(LeaseResource).where(
                     LeaseResource.lease_id == lease.id,
                     LeaseResource.active.is_(True),
                 )
             ).all()
-            gpu_ids = {resource.gpu_id for resource in resources}
-            gpus = [session.get(GPUDevice, gpu_id) for gpu_id in gpu_ids]
-            if any(gpu is None or gpu.endpoint_id != endpoint_id for gpu in gpus):
+            # A lease may span servers. Clearing one settles that server's
+            # cards and leaves the rest of the lease working.
+            resources = [
+                resource
+                for resource in held
+                if session.get(GPUDevice, resource.gpu_id).endpoint_id == endpoint_id
+            ]
+            if held and not resources:
                 raise BrokerError(
                     "lease_endpoint_mismatch",
-                    "the lease does not belong entirely to this server",
+                    "the lease holds nothing on this server",
                     status_code=409,
                 )
+            gpu_ids = {resource.gpu_id for resource in resources}
+            gpus = [session.get(GPUDevice, gpu_id) for gpu_id in gpu_ids]
 
             now = utcnow()
             unreachable = self._endpoint_is_unreachable(session, endpoint_id, now)
@@ -8448,16 +8455,16 @@ class BrokerService:
 
             revision = self._bump_revision(session, now)
             before = self._lease_dict(session, lease)
-            lease.state = "RELEASED"
-            lease.released_at = now
-            lease.release_reason = (
+            reason = (
                 "server unreachable; operator settled the ledger"
                 if unreachable
                 else "empty fresh observation cleared endpoint ownership"
             )
-            for resource in resources:
-                resource.active = False
-                resource.released_at = now
+            self._settle_cards(lease, resources, reason=reason, released_by=actor.id, now=now)
+            if len(resources) == len(held):
+                lease.state = "RELEASED"
+                lease.released_at = now
+                lease.release_reason = reason
             self._resolve_lease_alerts(session, lease.id, now)
             event = self._audit(
                 session,

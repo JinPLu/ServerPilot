@@ -278,3 +278,25 @@ def test_a_reclaim_is_told_once_and_stands_until_read(routine) -> None:  # type:
     routine.mark_reminders(ACTOR, [pending[0]["id"]], notified=True)
     assert not [item for item in routine.pending_notifications() if item["type"] == "lease_reclaimed"]
     assert any(item["id"] == pending[0]["id"] and item["state"] == "active" for item in routine.list_reminders())
+
+
+def test_clearing_one_server_leaves_the_rest_of_a_lease_working(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(task="两台机器", duration_seconds=3600)["lease_id"]
+    second = _hold_cards_on_second_server(routine, lease_id)
+    routine.ingest_observation(observation("endpoint-b", count=1))
+    first = (_active_gpu_ids(routine, lease_id) - {second}).pop()
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds - 60, gpu_ids={first})
+    observed_after = utcnow() - timedelta(seconds=5)
+    routine.ingest_observation(observation(count=1))
+
+    admin = ActorContext("claude-code", "admin", frozenset())
+    routine.release_empty_conflicted_lease(
+        admin, "endpoint-a", lease_id, observation_not_before=observed_after, idempotency_key="clear-a"
+    )
+
+    assert _active_gpu_ids(routine, lease_id) == {second}
+    assert first not in _active_gpu_ids(routine, lease_id)
+    lease = routine._read(lambda session: session.get(Lease, lease_id))
+    assert lease.state in {"HELD", "ACTIVE"}
+    assert lease.resource_epoch == 1
