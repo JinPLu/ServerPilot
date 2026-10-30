@@ -6,7 +6,12 @@
 
 ## Unreleased
 
-- Agent 现在被要求在批量任务收尾时主动归还用不到的卡，不再等到自动回收。
+**升级须知：** MCP 工具从七个收为三个，`gpu_lease`、`gpu_resize`、`gpu_take_over`、`gpu_server` 已移除。升级后要重启 daemon 和各 MCP 客户端。
+
+- MCP 简化为 `gpu_status`、`gpu_apply`、`gpu_release`：Agent 只需声明任务要几张卡，重复申请、恢复入口、加减卡和接手都用同一个调用。
+- 同一台服务器还有卡在运行时，空闲的卡 30 分钟后自动归还（原来 1 小时），不再依赖 Agent 记得归还。
+- 普通服务器申请时不再要求填写时长；集群仍然必须填写。
+- 登记和更新服务器改用 `serverpilot endpoint add` / `update` 或 App。
 - 目前只维护 macOS：不再保证 Windows 可用，Windows 也不再参与 CI。
 
 ## 4.0.0 - 2026-10-31

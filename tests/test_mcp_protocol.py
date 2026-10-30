@@ -21,15 +21,7 @@ from serverpilot import __version__
 from serverpilot.config import InventoryConfig
 
 ROOT = Path(__file__).resolve().parents[1]
-ROUTINE_TOOLS = (
-    "gpu_status",
-    "gpu_apply",
-    "gpu_lease",
-    "gpu_resize",
-    "gpu_release",
-    "gpu_take_over",
-    "gpu_server",
-)
+ROUTINE_TOOLS = ("gpu_status", "gpu_apply", "gpu_release")
 
 
 def _unused_loopback_port() -> int:
@@ -159,15 +151,13 @@ def test_every_routine_tool_declares_its_effect(protocol_probe: ProtocolProbe) -
     # has to gate all three the same way.
     by_name = {tool.name: tool.annotations for tool in protocol_probe.tools.tools}
 
-    # gpu_status writes nothing, so it may say so: some clients auto-approve on
-    # that hint alone. The heartbeat moved to gpu_lease, which still takes
-    # nothing away and is meant to be repeated.
-    assert by_name["gpu_status"].readOnlyHint is True
-    assert by_name["gpu_lease"].readOnlyHint is False
-    assert by_name["gpu_lease"].destructiveHint is False
-    assert by_name["gpu_lease"].idempotentHint is True
-    assert by_name["gpu_apply"].readOnlyHint is False
-    assert by_name["gpu_release"].destructiveHint is True
+    # Asking about your task is its heartbeat, so a status read may not claim
+    # to be read-only: some clients auto-approve on that hint alone. Nothing
+    # here is destructive, and a release that is repeated changes nothing.
+    assert by_name["gpu_status"].readOnlyHint is False
+    assert by_name["gpu_status"].idempotentHint is True
+    assert by_name["gpu_apply"].idempotentHint is False
+    assert by_name["gpu_release"].destructiveHint is False
     for name in ROUTINE_TOOLS:
         assert by_name[name] is not None, name
 

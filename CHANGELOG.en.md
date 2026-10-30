@@ -6,7 +6,12 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
-- Agents are now told to return cards they no longer need as a batch winds down, instead of waiting for reclaim.
+**Before upgrading:** the MCP surface drops from seven tools to three; `gpu_lease`, `gpu_resize`, `gpu_take_over` and `gpu_server` are gone. Restart the daemon and every MCP client after upgrading.
+
+- MCP is now `gpu_status`, `gpu_apply` and `gpu_release`: an agent declares what a task needs, and the same call repeats, recovers, resizes or takes over a task.
+- Idle cards beside working ones on a server now return after 30 minutes instead of an hour, without relying on agents to remember.
+- Direct servers no longer require a duration; clusters still do.
+- Register and update servers with `serverpilot endpoint add` / `update` or the app.
 - Only macOS is maintained for now: Windows is no longer supported or tested in CI.
 
 ## 4.0.0 - 2026-10-31

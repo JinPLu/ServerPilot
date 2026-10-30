@@ -364,3 +364,13 @@ def test_a_delegated_cluster_appears_in_capacity_with_no_gpu_rows(service, admin
     assert delegated, groups
     assert delegated[0]["total"] == 0
     assert delegated[0]["free"] > 0
+
+
+def test_a_cluster_refuses_an_undeclared_duration(service, admin, provider):
+    from serverpilot.service import UNDECLARED_DURATION_SECONDS
+
+    undeclared = request(duration_seconds=UNDECLARED_DURATION_SECONDS)
+    with pytest.raises(BrokerError) as error:
+        claim(service, admin, data=undeclared)
+    assert error.value.code == "duration_required"
+    assert provider == []

@@ -65,21 +65,13 @@ class AgentTool:
 
 
 AGENT_TOOLS: tuple[AgentTool, ...] = (
-    AgentTool("gpu_status", ("view=summary", "server_group_id?", "server_id?", "if_changed?")),
+    AgentTool("gpu_status", ("task?", "server_id?", "telemetry?")),
     AgentTool(
         "gpu_apply",
-        ("task", "duration_seconds", "gpu_count=1", "server_group_id?", "server_id?", "project?"),
-        "gets cards now and returns how to enter them (task=what this work is, stable across restarts)",
+        ("task", "gpu_count=1", "server_group_id?", "server_id?", "duration_seconds?", "change?", "take_over?", "project?"),
+        "declares what a task needs (task=what this work is, stable across restarts)",
     ),
-    AgentTool("gpu_lease", ("lease_id|task", "keep_idle?", "include?"), "is your heartbeat"),
-    AgentTool(
-        "gpu_resize",
-        ("lease_id|task", "add_count?", "server_id?", "server_group_id?", "remove_gpu_ids?", "expected_epoch?"),
-        "adds or returns cards on your lease",
-    ),
-    AgentTool("gpu_release", ("lease_id|task", "outcome=completed")),
-    AgentTool("gpu_take_over", ("reason", "lease_id|task", "project?", "force?"), "claims a lease after a restart"),
-    AgentTool("gpu_server", ("action", "..."), "adds or updates a host"),
+    AgentTool("gpu_release", ("task", "gpu_ids?", "outcome=completed")),
 )
 
 @dataclass(frozen=True)
@@ -114,15 +106,11 @@ CARD_STATUS_BY_STATE = {
 _COUNT_WORDS = ("", "One", "Two", "Three", "Four", "Five", "Six", "Seven")
 
 STANDING_RULES: tuple[str, ...] = (
-    "Every reply has ok. ok=false carries error{code,message,retryable,retry_after_seconds?,next?,details?}: a refusal to act on, not a failure. Follow error.next when present.",
-    "Start with gpu_status: groups show free cards and largest_block (one apply's maximum); mine lists your leases; recoverable lists leases you can take with gpu_take_over. Pass if_changed=digest when polling. view=servers and view=nodes are large: ask only when choosing by hardware or debugging.",
-    "gpu_apply needs task and duration_seconds. Choose server_group_id for grouped hosts; server_id must not pin a grouped host. gpu_count comes from your launch config, never from free capacity. Repeating a task returns its lease; task_already_held means it is held with another size or by another session.",
-    "no_capacity is final for now; nothing queues. details gives reason, alternatives and eta; eta=null means no honest estimate. Wait retry_after_seconds, then try again or use an alternative.",
-    "Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directory, never a code repository. Allocation entries require entering the existing provider allocation first: entry.argv opens a terminal; without one, prefix commands with entry.exec_prefix. verified=false means probe before use. Never guess a selector; ask gpu_lease(include=[entry]) after a restart.",
-    "Call gpu_lease during preparation and quiet phases, within heartbeat_within_seconds: it is the heartbeat and it reports at_risk (cards with reclaim_at), changes (what happened to your lease) and resource_epoch. gpu_status is not a heartbeat. A card with no process next to a working card on its server is reclaimed unless you pass keep_idle=true, which lasts three windows at most. Whole-allocation providers reclaim only after lost heartbeats and observed idle; respect their deadline.",
-    "gpu_resize is all or nothing and grows where the lease already is unless server_id or server_group_id is named. Pass expected_epoch to refuse a stale view. A running process cannot see added cards: restart_required=true. Provider allocations cannot resize: apply a new task. When a card has no work left for this task, as a batch winds down, return it with remove_gpu_ids at once rather than waiting for reclaim: idle cards you hold are unavailable to everyone else.",
-    "gpu_release with outcome when the task ends or fails. Zero running GPUs alone does not mean a task is finished. allocation_unconfirmed means repeat the same gpu_apply, never apply differently.",
-    "Card status tokens: free (includes ServerPilot's own keepalive hold, stopped before allocation), in_use, held_idle (held, nothing computing), foreign (a process ServerPilot does not own), conflict, unknown (stale data; fails closed), fault, provider. Node utilization describes the node, not one job. Provider counts are scheduling facts, not measurements.",
+    "Every reply has ok. ok=false carries error{code,message,retryable,retry_after_seconds?,next?,details?}: an answer to act on. Follow error.next when present.",
+    "gpu_apply gives cards now or says why; nothing queues. gpu_count comes from your launch config, never from free capacity. Choose server_group_id for grouped hosts; server_id must not pin a grouped host. To wait, repeat it after retry_after_seconds; eta=null means no honest estimate. Repeating it is always safe: it returns your entry after a restart and keeps idle cards you still want. change=true grows or shrinks the task, and a running process cannot see added cards. take_over=true takes a task from a session that is gone. duration_seconds is required on clusters, whose jobs end at that limit.",
+    "Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directory, never a code repository. Allocation entries require entering the existing provider allocation first: entry.argv opens a terminal; without one, prefix commands with entry.exec_prefix. verified=false means probe before use. Never guess a selector.",
+    "gpu_release ends the task, with outcome, when it finishes or fails; gpu_ids returns only some cards. Zero running GPUs alone does not mean a task is finished. Idle cards beside working ones are reclaimed after 30 minutes, and a wholly idle task after an hour unless you call gpu_status(task); changes reports what happened.",
+    "gpu_status() lists free cards per group, largest_block (one apply's maximum), your tasks in mine, and recoverable tasks. Read group notes before first use. gpu_status(server_id) shows one server. Card status: free (includes ServerPilot's own keepalive hold, stopped before allocation), in_use, held_idle (held, nothing computing), foreign (a process ServerPilot does not own), conflict, unknown (stale data; fails closed), fault, provider.",
     "ServerPilot only coordinates GPUs. Do not use SSH, SQLite, inventory or nvidia-smi to work around it. Non-GPU remote work such as syncing a repository needs no lease.",
 )
 
@@ -141,8 +129,9 @@ STANDING_RULES: tuple[str, ...] = (
 # text became English, longer in characters and cheaper in tokens.  Contract
 # sentences are never cut to fit this bound; when the contract needs more
 # words, this number moves and the reason is written here.
-# 4.0 moved it down for the first time: replies now carry what rules had to explain.
-MCP_INSTRUCTION_BUDGET_CHARS = 3400
+# 4.0 moved it down for the first time, and 4.0.1 again: three tools, and the
+# system now does what rules used to ask of agents.
+MCP_INSTRUCTION_BUDGET_CHARS = 2300
 
 POLICY_TITLE = "# ServerPilot — Agent MCP Rules"
 POLICY_INTRO = "Use the local `serverpilot` MCP."

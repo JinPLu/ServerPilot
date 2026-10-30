@@ -531,10 +531,14 @@ class SessionOpen(StrictModel):
 class ApplyBody(StrictModel):
     project: str = Field(min_length=1, max_length=64)
     task: str = Field(min_length=1, max_length=255)
-    duration_seconds: int = Field(ge=60, le=60 * 60 * 24 * 30)
+    duration_seconds: int | None = Field(default=None, ge=60, le=60 * 60 * 24 * 30)
     gpu_count: int = Field(default=1, ge=1, le=1024)
     server_group_id: str | None = None
     server_id: str | None = None
+    #: Saying the count is meant to differ, so a retry with a typo cannot grow a lease.
+    change: bool = False
+    #: Saying this session is taking the task from one that is gone.
+    take_over: bool = False
 
 
 class HeartbeatBody(StrictModel):

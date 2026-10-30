@@ -91,6 +91,8 @@ LEASE_CHANGE_ACTIONS = (
     "lease.operator_released",
     "lease.reassigned",
 )
+#: A direct lease has no deadline, so saying how long it runs is optional.
+UNDECLARED_DURATION_SECONDS = 60 * 60 * 24 * 30
 ETA_SAMPLE_DAYS = 30
 ETA_MIN_SAMPLES = 50
 RETRY_MIN_SECONDS = 60
@@ -1848,6 +1850,9 @@ class BrokerService:
         if len(candidates) != 1:
             raise BrokerError("provider_selection_ambiguous", "该组包含多个分配提供方，当前无法唯一选择", status_code=409)
         endpoint, plugin = candidates[0]
+        if request_data.duration_seconds == UNDECLARED_DURATION_SECONDS:
+            # A cluster ends the job at this limit, so nothing can stand in for it.
+            raise BrokerError("duration_required", "集群任务需要声明时长，到时作业会被终止", status_code=422)
         maximum = plugin.limits["max_lease_seconds"]
         if maximum is not None and request_data.duration_seconds > maximum:
             raise BrokerError("duration_exceeds_provider_limit", "任务时长超过提供方硬时限", status_code=422,
@@ -6177,9 +6182,46 @@ class BrokerService:
         )
 
     def _find_task_lease(self, session: Session, project_id: str, task: str) -> Lease | None:
+        """The live lease for this task, including one from before sessions existed."""
+
         return session.scalar(select(Lease).where(
-            Lease.project_id == project_id, Lease.task_ref == task, Lease.released_at.is_(None),
+            Lease.kind == "workload",
+            Lease.task_ref == task,
+            Lease.released_at.is_(None),
+            or_(Lease.project_id == project_id, Lease.owner_session_id.is_(None)),
         ).order_by(Lease.issued_at.desc()))
+
+    def task_holding(
+        self, actor: ActorContext, project_id: str, task: str
+    ) -> dict[str, Any] | None:
+        """Who holds this task now, which is what decides what an apply means."""
+
+        def operation(session: Session) -> dict[str, Any] | None:
+            lease = self._find_task_lease(session, project_id, task)
+            if lease is None:
+                return None
+            return {
+                "lease_id": lease.id,
+                "mine": lease.owner_session_id == actor.session_id,
+                "gpu_count": self._lease_card_count(session, lease),
+            }
+
+        return self._read(operation)
+
+    def idle_card_ids(self, lease_id: str) -> list[str]:
+        """Cards of a lease that are running nothing, the ones a smaller count gives up."""
+
+        def operation(session: Session) -> list[str]:
+            now = utcnow()
+            cards = session.scalars(select(LeaseResource).where(
+                LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+            )).all()
+            return [
+                card.gpu_id for card in cards
+                if not self._current_processes(session, card.gpu_id, now)
+            ]
+
+        return self._read(operation)
 
     def _agent_lease(self, session: Session, actor: ActorContext, lease_id: str) -> Lease:
         """The lease this caller may act on, or a refusal naming why not."""
@@ -6478,11 +6520,15 @@ class BrokerService:
                 LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
             )).all()
             at_risk = []
+            working_endpoints = self._working_endpoints(session, cards, now)
             for card in cards:
                 idle_since = _as_utc(card.idle_since)
                 if idle_since is None:
                     continue
-                reclaim_at = idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
+                reclaim_at = idle_since + timedelta(seconds=self._card_reclaim_after_seconds(
+                    card,
+                    working=session.get(GPUDevice, card.gpu_id).endpoint_id in working_endpoints,
+                ))
                 at_risk.append({
                     "gpu_id": self._gpu_uuid(session, card.gpu_id),
                     "reclaim_at": _iso(reclaim_at),
@@ -6561,9 +6607,10 @@ class BrokerService:
             if gpu.get("present") is not False:
                 gpus_by_endpoint[gpu["endpoint_id"]].append(gpu)
 
-        def count(members: list[dict[str, Any]]) -> dict[str, int]:
+        def count(members: list[dict[str, Any]]) -> dict[str, Any]:
             cards = [gpu for member in members for gpu in gpus_by_endpoint[member["id"]]]
             return {
+                "gpus": sorted({gpu["name"] for gpu in cards if gpu.get("name")}),
                 "total": len(cards),
                 "free": sum(gpu.get("publicly_available") is True for gpu in cards),
                 "unknown": sum(str(gpu.get("state", "")).startswith("UNKNOWN") for gpu in cards),
@@ -6587,6 +6634,7 @@ class BrokerService:
                     {},
                 )
                 entry["free"] = capacity.get("free_gpu_count", 0)
+                entry["gpus"] = entry["gpus"] or [name for name in [capacity.get("gpu_name")] if name]
                 entry["provider"] = True
                 entry["max_lease_seconds"] = limits.get("max_lease_seconds")
             answer.append(entry)
@@ -6653,7 +6701,7 @@ class BrokerService:
             ratios = sorted(
                 ((_as_utc(end) - _as_utc(start)).total_seconds() / max(1, seconds))
                 for start, end, seconds in finished
-                if start is not None and end is not None
+                if start is not None and end is not None and seconds != UNDECLARED_DURATION_SECONDS
             )
             sampled = len(ratios) >= ETA_MIN_SAMPLES
             scale = ratios[len(ratios) // 2] if sampled else 1.0
@@ -6664,7 +6712,7 @@ class BrokerService:
             )).all():
                 cards = self._lease_card_count(session, lease)
                 ends = (_as_utc(lease.issued_at) or now) + timedelta(seconds=lease.duration_seconds * scale)
-                if ends <= now:
+                if ends <= now or lease.duration_seconds == UNDECLARED_DURATION_SECONDS:
                     unknown_holders += cards
                 else:
                     releases.append((ends, cards))
@@ -6805,6 +6853,7 @@ class BrokerService:
             quiet = self._lease_liveness_age_seconds(session, lease, cards, now) >= (
                 reclaim_after - alert_rules.AT_RISK_LEAD_SECONDS
             )
+            working_endpoints = self._working_endpoints(session, cards, now)
             at_risk = 0
             idle = 0
             for card in cards:
@@ -6814,8 +6863,9 @@ class BrokerService:
                 idle_seconds = (now - idle_since).total_seconds()
                 if idle_seconds >= self.inventory.idle_lease_alert_seconds:
                     idle += 1
-                left = self._card_reclaim_after_seconds(card) - idle_seconds
-                if left <= alert_rules.AT_RISK_LEAD_SECONDS and quiet:
+                working = session.get(GPUDevice, card.gpu_id).endpoint_id in working_endpoints
+                left = self._card_reclaim_after_seconds(card, working=working) - idle_seconds
+                if left <= alert_rules.AT_RISK_LEAD_SECONDS and (working or quiet):
                     at_risk += 1
             if at_risk:
                 signals.append(lease_signal(
@@ -6829,7 +6879,10 @@ class BrokerService:
                 ))
             issued_at = _as_utc(lease.issued_at) or now
             limit = lease.duration_seconds * alert_rules.OVERRUN_FACTOR
-            if (now - issued_at).total_seconds() > limit:
+            if (
+                lease.duration_seconds != UNDECLARED_DURATION_SECONDS
+                and (now - issued_at).total_seconds() > limit
+            ):
                 signals.append(lease_signal(
                     lease, f"overrun:{lease.id}", alert_rules.RESOURCE_IDLE, "lease_overrun",
                     f"任务「{lease.task_ref}」已超过预计时长的 {alert_rules.OVERRUN_FACTOR} 倍",
@@ -8787,28 +8840,29 @@ class BrokerService:
     ) -> list[dict[str, Any]]:
         """Extend each idle card one window past now, up to the limit."""
 
-        reclaim_after = self.inventory.idle_lease_reclaim_seconds
-        cards = session.scalars(
+        window = self.inventory.idle_card_reclaim_seconds
+        held = session.scalars(
             select(LeaseResource).where(
-                LeaseResource.lease_id == lease.id,
-                LeaseResource.active.is_(True),
-                LeaseResource.idle_since.is_not(None),
+                LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
             )
         ).all()
+        working_endpoints = self._working_endpoints(session, held, now)
+        cards = [card for card in held if card.idle_since is not None]
         kept: list[dict[str, Any]] = []
         changed: list[str] = []
         for card in cards:
             idle_since = _as_utc(card.idle_since) or now
             elapsed = int((now - idle_since).total_seconds())
-            windows = min(MAX_KEEP_IDLE_WINDOWS, elapsed // reclaim_after + 2)
+            windows = min(MAX_KEEP_IDLE_WINDOWS, elapsed // window + 2)
             if windows > card.keep_idle_windows:
                 card.keep_idle_windows = windows
                 changed.append(card.gpu_id)
             kept.append({
                 "gpu_id": self._gpu_uuid(session, card.gpu_id),
-                "reclaim_at": _iso(
-                    idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
-                ),
+                "reclaim_at": _iso(idle_since + timedelta(seconds=self._card_reclaim_after_seconds(
+                    card,
+                    working=session.get(GPUDevice, card.gpu_id).endpoint_id in working_endpoints,
+                ))),
                 "windows_left": MAX_KEEP_IDLE_WINDOWS - card.keep_idle_windows,
             })
         if changed:
@@ -8824,10 +8878,31 @@ class BrokerService:
             )
         return kept
 
-    def _card_reclaim_after_seconds(self, resource: LeaseResource) -> int:
-        """Idle time after which this card goes, counting windows its holder kept."""
+    def _card_reclaim_after_seconds(self, resource: LeaseResource, *, working: bool) -> int:
+        """Idle time after which this card goes, counting windows its holder kept.
 
-        return self.inventory.idle_lease_reclaim_seconds * max(1, resource.keep_idle_windows)
+        ``working`` says a card on the same server is in use. Then this card is
+        one the job has stopped needing, not a pause in the job, and it goes
+        sooner, whether or not the holder is still checking in.
+        """
+
+        base = (
+            self.inventory.idle_card_reclaim_seconds
+            if working
+            else self.inventory.idle_lease_reclaim_seconds
+        )
+        return base * max(1, resource.keep_idle_windows)
+
+    def _working_endpoints(
+        self, session: Session, resources: Iterable[LeaseResource], now: datetime
+    ) -> set[str]:
+        """Servers on which any of these cards is running something."""
+
+        return {
+            session.get(GPUDevice, resource.gpu_id).endpoint_id
+            for resource in resources
+            if self._current_processes(session, resource.gpu_id, now)
+        }
 
     @staticmethod
     def _settle_cards(
@@ -8912,10 +8987,11 @@ class BrokerService:
         by_endpoint: dict[str, list[LeaseResource]] = defaultdict(list)
         for resource in resources:
             by_endpoint[session.get(GPUDevice, resource.gpu_id).endpoint_id].append(resource)
+        working_endpoints = self._working_endpoints(session, resources, now)
         protected_endpoints = {
             endpoint_id
             for endpoint_id, cards in by_endpoint.items()
-            if not any(self._current_processes(session, card.gpu_id, now) for card in cards)
+            if endpoint_id not in working_endpoints
             and self._lease_liveness_age_seconds(session, lease, cards, now) < reclaim_after
         }
         endpoint_of = {
@@ -8936,8 +9012,9 @@ class BrokerService:
             idle_seconds = (now - (_as_utc(resource.idle_since) or now)).total_seconds()
             if idle_seconds < alert_after:
                 continue
+            working = endpoint_of[resource.id] in working_endpoints
             if (
-                idle_seconds >= self._card_reclaim_after_seconds(resource)
+                idle_seconds >= self._card_reclaim_after_seconds(resource, working=working)
                 and endpoint_of[resource.id] not in protected_endpoints
             ):
                 reclaimed.append(resource)
@@ -8960,9 +9037,8 @@ class BrokerService:
                     resource_id=lease.id,
                     message=(
                         f"{alerting} of {len(resources)} leased GPU(s) have run no compute "
-                        f"process for over {alert_after // 60} minutes; each is reclaimed "
-                        f"automatically after {reclaim_after // 60} minutes, once its "
-                        f"holder has also stopped checking in for that long"
+                        f"process for over {alert_after // 60} minutes and will be "
+                        f"reclaimed automatically"
                     ),
                     now=now,
                 )

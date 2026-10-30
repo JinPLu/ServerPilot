@@ -31,7 +31,7 @@ def test_the_tools_are_the_ones_the_contract_names() -> None:
 
 def test_apply_tells_the_agent_how_to_enter_without_assembling_anything(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    reply = tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)
+    reply = tools.gpu_apply(task="train", gpu_count=2)
     assert reply["ok"] is True
     server = reply["servers"][0]
     assert server["env"] == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0,1"}
@@ -42,26 +42,26 @@ def test_apply_tells_the_agent_how_to_enter_without_assembling_anything(mcp_agen
 
 def test_a_direct_lease_can_be_recovered_after_context_loss(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["lease_id"]
-    mine = tools.gpu_status()["mine"]
-    assert [item["lease_id"] for item in mine] == [lease_id]
-    reply = tools.gpu_lease(task="train", include=["entry"])
-    assert reply["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+    lease_id = tools.gpu_apply(task="train", gpu_count=2)["lease_id"]
+    assert [item["lease_id"] for item in tools.gpu_status()["mine"]] == [lease_id]
+    again = tools.gpu_apply(task="train", gpu_count=2)
+    assert again["existing"] is True
+    assert again["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
 
 
 def test_telemetry_reports_the_holders_cards_and_a_tuning_summary(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["lease_id"]
-    uuids = [card["gpu_id"] for card in tools.gpu_lease(lease_id=lease_id, include=["entry"])["servers"][0]["cards"]]
+    applied = tools.gpu_apply(task="train", gpu_count=2)
+    uuids = [card["gpu_id"] for card in applied["servers"][0]["cards"]]
     mcp_agent.ingest_observation(observation(count=2, processes=[process_for_gpu(uuid) for uuid in uuids]))
-    telemetry = tools.gpu_lease(lease_id=lease_id, include=["telemetry"])["telemetry"]
+    telemetry = tools.gpu_status(task="train", telemetry=True)["telemetry"]
     assert len(telemetry["cards"]) == 2
     assert telemetry["summary"]["recent_average"]["min_memory_free_mib"] is not None
 
 
-def test_status_is_no_heartbeat_and_lease_is(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_asking_about_your_task_is_the_heartbeat(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
+    lease_id = tools.gpu_apply(task="train")["lease_id"]
     old = utcnow() - timedelta(hours=1)
 
     def age(session):  # type: ignore[no-untyped-def]
@@ -72,22 +72,19 @@ def test_status_is_no_heartbeat_and_lease_is(mcp_agent) -> None:  # type: ignore
     before = read()
     tools.gpu_status()
     assert read() == before
-    tools.gpu_lease(lease_id=lease_id)
+    tools.gpu_status(task="train")
     assert read() > before
 
 
-def test_if_changed_answers_briefly_while_nothing_moved(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_a_group_says_which_cards_it_has(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    digest = tools.gpu_status(view="capacity")["digest"]
-    assert tools.gpu_status(view="capacity", if_changed=digest) == {"ok": True, "unchanged": True, "digest": digest}
-    tools.gpu_apply(task="train", duration_seconds=3600)
-    assert "groups" in tools.gpu_status(view="capacity", if_changed=digest)
+    assert tools.gpu_status()["groups"][0]["gpus"] == ["Test GPU"]
 
 
 def test_no_capacity_is_an_answer_with_a_next_move(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    tools.gpu_apply(task="first", duration_seconds=3600)
-    reply = tools.gpu_apply(task="second", duration_seconds=3600)
+    tools.gpu_apply(task="first")
+    reply = tools.gpu_apply(task="second")
     assert reply["ok"] is False
     error = reply["error"]
     assert error["code"] == "no_capacity"
@@ -98,43 +95,61 @@ def test_no_capacity_is_an_answer_with_a_next_move(mcp_agent) -> None:  # type: 
 
 def test_a_repeated_task_returns_its_lease(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    first = tools.gpu_apply(task="train", duration_seconds=3600)
-    again = tools.gpu_apply(task="train", duration_seconds=3600)
+    first = tools.gpu_apply(task="train")
+    again = tools.gpu_apply(task="train")
     assert again["lease_id"] == first["lease_id"]
     assert again["existing"] is True
 
 
-def test_every_reply_about_a_lease_carries_its_current_epoch(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_a_task_view_carries_its_current_epoch(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
-    grown = tools.gpu_resize(lease_id=lease_id, add_count=1)
-    assert tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["resource_epoch"] == grown["resource_epoch"]
-    assert tools.gpu_take_over(reason="重启", lease_id=lease_id)["resource_epoch"] == grown["resource_epoch"]
+    tools.gpu_apply(task="train")
+    assert tools.gpu_status(task="train")["resource_epoch"] == 0
+    tools.gpu_apply(task="train", gpu_count=2, change=True)
+    assert tools.gpu_status(task="train")["resource_epoch"] == 1
 
 
-def test_a_held_task_points_at_the_tool_that_resolves_it(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_a_different_count_is_refused_unless_it_is_meant(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 3)
-    first = tools.gpu_apply(task="train", duration_seconds=3600)
-    error = tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["error"]
+    tools.gpu_apply(task="train")
+    error = tools.gpu_apply(task="train", gpu_count=2)["error"]
     assert error["code"] == "task_already_held"
-    assert error["next"] == {"tool": "gpu_lease", "args": {"lease_id": first["lease_id"]}}
+    assert error["next"] == {"tool": "gpu_apply", "args": {"change": True}}
+    assert tools.gpu_status(task="train")["gpu_count"] == 1
 
 
-def test_resize_grows_returns_and_warns_about_running_processes(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_a_task_grows_and_returns_cards(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 3)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
-    grown = tools.gpu_resize(lease_id=lease_id, add_count=2)
+    tools.gpu_apply(task="train")
+    grown = tools.gpu_apply(task="train", gpu_count=3, change=True)
     assert grown["restart_required"] is True
     assert grown["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1,2"
-    change = tools.gpu_lease(lease_id=lease_id)["changes"][-1]
-    assert change["added"] == grown["added"]
-    shrunk = tools.gpu_resize(task="train", remove_gpu_ids=grown["added"][:1], expected_epoch=grown["resource_epoch"])
-    assert shrunk["resource_epoch"] == grown["resource_epoch"] + 1
+    third = grown["servers"][0]["cards"][2]["gpu_id"]
+    returned = tools.gpu_release(task="train", gpu_ids=[third])
+    assert returned["removed"] == [third]
+    assert returned["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1"
+    assert tools.gpu_status(task="train")["changes"][-1]["removed"] == [third]
+
+
+def test_a_smaller_count_gives_up_idle_cards_and_never_a_busy_one(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    mcp_agent.ingest_observation(observation(count=3))
+    cards = tools.gpu_apply(task="train", gpu_count=3)["servers"][0]["cards"]
+    busy = [process_for_gpu(card["gpu_id"]) for card in cards[:2]]
+    mcp_agent.ingest_observation(observation(count=3, processes=busy))
+    assert tools.gpu_apply(task="train", gpu_count=1, change=True)["error"]["code"] == "card_in_use"
+    shrunk = tools.gpu_apply(task="train", gpu_count=2, change=True)
+    assert {card["gpu_id"] for card in shrunk["servers"][0]["cards"]} == {cards[0]["gpu_id"], cards[1]["gpu_id"]}
+
+
+def test_returning_every_card_ends_the_task(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    fleet(mcp_agent, ("endpoint-a",), 1)
+    card = tools.gpu_apply(task="train")["servers"][0]["cards"][0]["gpu_id"]
+    assert tools.gpu_release(task="train", gpu_ids=[card])["ended"] is True
 
 
 def test_a_reclaim_reaches_the_holder_on_its_next_heartbeat(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     mcp_agent.ingest_observation(observation(count=2))
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["lease_id"]
+    lease_id = tools.gpu_apply(task="train", gpu_count=2)["lease_id"]
     cards = mcp_agent._read(lambda session: [
         session.get(GPUDevice, card.gpu_id)
         for card in session.scalars(select(LeaseResource).where(LeaseResource.lease_id == lease_id)).all()
@@ -144,36 +159,59 @@ def test_a_reclaim_reaches_the_holder_on_its_next_heartbeat(mcp_agent) -> None: 
 
     def age(session):  # type: ignore[no-untyped-def]
         card = session.scalar(select(LeaseResource).where(LeaseResource.gpu_id == idle.id))
-        card.idle_since = utcnow() - timedelta(seconds=mcp_agent.inventory.idle_lease_reclaim_seconds + 5)
+        card.idle_since = utcnow() - timedelta(seconds=mcp_agent.inventory.idle_card_reclaim_seconds + 5)
 
     mcp_agent._write(age)
+    # Checking in does not keep a card beside working ones: that takes asking for it.
+    tools.gpu_status(task="train")
     mcp_agent.ingest_observation(observation(count=2, processes=[process_for_gpu(busy.gpu_uuid)]))
 
-    view = tools.gpu_lease(lease_id=lease_id)
+    view = tools.gpu_status(task="train")
     assert view["changes"][0]["action"] == "idle_gpu_reclaimed"
     assert view["gpu_count"] == 1
-    assert view["resource_epoch"] == 1
-    assert tools.gpu_lease(lease_id=lease_id)["changes"] == []
+    assert tools.gpu_status(task="train")["changes"] == []
 
 
-def test_a_finished_lease_says_how_it_ended(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_asking_again_keeps_idle_cards_for_a_while(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    mcp_agent.ingest_observation(observation(count=2))
+    cards = tools.gpu_apply(task="train", gpu_count=2)["servers"][0]["cards"]
+    busy, idle = cards
+    processes = [process_for_gpu(busy["gpu_id"])]
+    mcp_agent.ingest_observation(observation(count=2, processes=processes))
+    window = mcp_agent.inventory.idle_card_reclaim_seconds
+
+    def age(seconds: int) -> None:
+        def write(session):  # type: ignore[no-untyped-def]
+            session.scalar(select(LeaseResource).where(
+                LeaseResource.gpu_id.like(f"%{idle['gpu_id']}")
+            )).idle_since = utcnow() - timedelta(seconds=seconds)
+
+        mcp_agent._write(write)
+
+    age(window - 5)
+    tools.gpu_apply(task="train", gpu_count=2)
+    age(window + 5)
+    mcp_agent.ingest_observation(observation(count=2, processes=processes))
+    assert tools.gpu_status(task="train")["gpu_count"] == 2
+
+
+def test_a_finished_task_says_how_it_ended(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
-    assert tools.gpu_release(lease_id=lease_id, outcome="failed") == {"ok": True, "lease_id": lease_id, "ended": True}
-    view = tools.gpu_lease(lease_id=lease_id)
-    assert view["ended"]["reason"] == "workload_failed"
+    lease_id = tools.gpu_apply(task="train")["lease_id"]
+    assert tools.gpu_release(task="train", outcome="failed") == {"ok": True, "lease_id": lease_id, "ended": True}
+    assert tools.gpu_status(task="train")["ended"]["reason"] == "workload_failed"
 
 
-def test_releasing_a_settled_lease_confirms_it(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_releasing_a_finished_task_confirms_it(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
-    tools.gpu_release(lease_id=lease_id)
-    assert tools.gpu_release(lease_id=lease_id)["ended"] is True
+    tools.gpu_apply(task="train")
+    tools.gpu_release(task="train")
+    assert tools.gpu_release(task="train")["ended"] is True
 
 
-def test_an_old_lease_appears_as_recoverable_and_can_be_claimed(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_an_unclaimed_task_is_refused_until_it_is_taken_over(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    lease_id = tools.gpu_apply(task="old", duration_seconds=3600)["lease_id"]
+    lease_id = tools.gpu_apply(task="old")["lease_id"]
 
     def disown(session):  # type: ignore[no-untyped-def]
         session.get(Lease, lease_id).owner_session_id = None
@@ -182,14 +220,17 @@ def test_an_old_lease_appears_as_recoverable_and_can_be_claimed(mcp_agent) -> No
     status = tools.gpu_status()
     assert status["mine"] == []
     assert [item["lease_id"] for item in status["recoverable"]] == [lease_id]
-    taken = tools.gpu_take_over(reason="升级到 4.0", lease_id=lease_id)
+    error = tools.gpu_apply(task="old")["error"]
+    assert error["next"] == {"tool": "gpu_apply", "args": {"take_over": True}}
+    taken = tools.gpu_apply(task="old", take_over=True)
     assert taken["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0"
     assert [item["lease_id"] for item in tools.gpu_status()["mine"]] == [lease_id]
 
 
-def test_node_detail_needs_a_server(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+def test_one_server_shows_its_cards_and_processes(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
-    assert tools.gpu_status(view="nodes")["error"]["code"] == "server_required"
+    nodes = tools.gpu_status(server_id="endpoint-a")["nodes"]
+    assert nodes[0]["cards"][0]["status"] == "free"
 
 
 def test_every_internal_card_state_has_a_defined_word() -> None:
@@ -241,18 +282,16 @@ def test_replies_stay_within_budget_on_a_realistic_fleet(build_app, inventory, m
     client = Client()
     monkeypatch.setattr(mcp_server, "_session_client", lambda actor: client)
 
-    applied = tools.gpu_apply(task="多卡训练", duration_seconds=3600, gpu_count=8)
+    applied = tools.gpu_apply(task="多卡训练", gpu_count=8)
     assert applied["ok"], applied
-    tools.gpu_apply(task="第二个任务", duration_seconds=3600, gpu_count=2)
+    tools.gpu_apply(task="第二个任务", gpu_count=2)
     budgets = (
         ("apply", applied, 1500),
         ("summary", tools.gpu_status(), 1500),
-        ("capacity", tools.gpu_status(view="capacity"), 500),
-        ("servers", tools.gpu_status(view="servers"), 6000),
-        ("nodes", tools.gpu_status(view="nodes", server_id="endpoint-a"), 12000),
-        ("heartbeat", tools.gpu_lease(lease_id=applied["lease_id"]), 600),
-        ("telemetry", tools.gpu_lease(lease_id=applied["lease_id"], include=["telemetry"]), 2500),
-        ("release", tools.gpu_release(lease_id=applied["lease_id"]), 200),
+        ("server", tools.gpu_status(server_id="endpoint-a"), 12000),
+        ("heartbeat", tools.gpu_status(task="多卡训练"), 600),
+        ("telemetry", tools.gpu_status(task="多卡训练", telemetry=True), 2500),
+        ("release", tools.gpu_release(task="多卡训练"), 200),
     )
     sizes = {name: size(reply) for name, reply, _limit in budgets}
     assert all(sizes[name] <= limit for name, _reply, limit in budgets), sizes
@@ -349,8 +388,13 @@ def test_a_group_choice_reaches_the_control_plane(mcp_agent, monkeypatch) -> Non
     assert tools.gpu_apply(task="t", duration_seconds=60, server_group_id="missing")["error"]
     assert ("/api/v2/leases", {
         "project": "tests", "task": "t", "duration_seconds": 60, "gpu_count": 1,
-        "server_group_id": "missing", "server_id": None,
+        "server_group_id": "missing", "server_id": None, "change": False, "take_over": False,
     }) in sent
+
+
+def test_only_a_task_is_required(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    fleet(mcp_agent, ("endpoint-a",), 1)
+    assert tools.gpu_apply(task="train")["ok"] is True
 
 
 def test_the_schema_rejects_what_an_agent_should_not_send() -> None:
@@ -358,6 +402,5 @@ def test_the_schema_rejects_what_an_agent_should_not_send() -> None:
 
     listed = {tool.name: tool for tool in asyncio.run(mcp_server.mcp.list_tools())}
     apply_schema = listed["gpu_apply"].inputSchema
-    assert set(apply_schema["required"]) == {"task", "duration_seconds"}
+    assert apply_schema["required"] == ["task"]
     assert apply_schema["properties"]["gpu_count"]["minimum"] == 1
-    assert apply_schema["properties"]["duration_seconds"]["minimum"] == 60

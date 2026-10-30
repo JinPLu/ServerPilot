@@ -63,15 +63,11 @@ shown group → server → SKU, not as a menu of individual free cards.
 
 ### 🧩 Agents allocate for themselves
 
-The MCP surface is exactly seven tools:
+The MCP surface is exactly three tools:
 
-- 🔎 `gpu_status` — free capacity and your own leases; never a heartbeat
-- 🎯 `gpu_apply` — get cards now, with ssh, working directory and environment ready to use
-- 💓 `gpu_lease` — heartbeat, plus what changed and which cards are at risk
-- ↔️ `gpu_resize` — add or return cards on a lease
-- 🧹 `gpu_release` — return a lease when its task ends or fails
-- 🤝 `gpu_take_over` — claim a lease after a restart
-- ➕ `gpu_server` — add a host or update its safe metadata
+- 🔎 `gpu_status` — free cards and your tasks, or one task, or one server
+- 🎯 `gpu_apply` — declare what a task needs and get how to enter its cards
+- 🧹 `gpu_release` — return a task's cards, all of them or some
 
 A successful request returns the SSH connection, the remote working directory,
 a CUDA selector, and a `lease_id`, so an agent never has to guess a server, a
@@ -207,19 +203,19 @@ Full per-client notes are in the
 gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
 ```
 
-- Routine apply is `gpu_apply(task, duration_seconds, gpu_count=1, server_group_id?, server_id?, project?)`.
-  Agents never pass GPU IDs; `gpu_apply` picks the cards. A lease starts on one
-  server and can grow or shrink with `gpu_resize`, including onto another server
-  when one is named. `gpu_count` is exact job parallelism from the launch script
-  or config. The safe default is 1. Never infer it from free capacity.
+- Routine apply is `gpu_apply(task, gpu_count=1, server_group_id?, server_id?, duration_seconds?, change?, take_over?, project?)`.
+  Repeating it is safe: it returns the same task's entry. `change=true` grows or
+  shrinks a task, and `take_over=true` takes it from a session that is gone.
+  `gpu_count` is exact job parallelism from the launch script or config. The
+  safe default is 1. Never infer it from free capacity.
 - On a grouped host — bare-metal `direct` or plugin `delegated` — pass
   `server_group_id`; the broker then best-fits one host inside that group.
   `server_id` is only for ungrouped hosts. A plugin-adapted cluster appears as
   an ordinary group, with `allocation`, `limits`, and
   `largest_allocatable_block` (one apply's max cards, not remaining pool size;
   `null` means unknown — do not invent a number).
-- Inventory uses `gpu_server`. There is no MCP
-  delete; remove a server in the app or REST, which refuses while it holds
+- Register hosts with `serverpilot endpoint add` or in the app. Remove a server
+  in the app or REST, which refuses while it holds
   active leases.
 - Assess a group's workspace, environment notes, and data/weight notes before
   claiming. Endpoints inherit the group workspace or override it. Environment
@@ -229,7 +225,7 @@ gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<g
   telemetry. Load observable on a free card comes from ServerPilot's own
   keepalive hold, which is stopped before the card is handed over, so it is not
   evidence that the card is busy. Telemetry follows the lease:
-  `gpu_lease(include=["telemetry"])` returns rolling ten-minute averages for
+  `gpu_status(task=…, telemetry=true)` returns rolling ten-minute averages for
   `leased_gpus` plus a `lease` summary (`min_memory_free_mib`, `slowest_gpu`)
   for judging whether your own job is using the cards well.
 - SSH in, `cd` to the returned `cwd`, then set the returned `env`.

@@ -51,7 +51,13 @@ from serverpilot.schemas import (
     SessionOpen,
     TakeOverBody,
 )
-from serverpilot.service import SYSTEM_ACTOR_ID, ActorContext, BrokerError, BrokerService
+from serverpilot.service import (
+    SYSTEM_ACTOR_ID,
+    UNDECLARED_DURATION_SECONDS,
+    ActorContext,
+    BrokerError,
+    BrokerService,
+)
 from serverpilot.timeutil import utcnow
 
 logger = logging.getLogger(__name__)
@@ -1304,25 +1310,116 @@ def create_app(
     def capacity(actor: ApiActor) -> dict[str, Any]:
         return {"groups": service.capacity_groups(actor)}
 
+    async def change_cards(
+        actor: ActorContext,
+        lease_id: str,
+        *,
+        add_count: int = 0,
+        server_id: str | None = None,
+        server_group_id: str | None = None,
+        remove_gpu_ids: list[str] | None = None,
+        expected_epoch: int | None = None,
+    ) -> dict[str, Any]:
+        removals = remove_gpu_ids or []
+        if not add_count:
+            return await service.in_domain(
+                service.resize_lease, actor, lease_id, add_request=None,
+                remove_gpu_ids=removals, expected_epoch=expected_epoch,
+            )
+        request_data = await service.in_domain(
+            service.resize_request_data, actor, lease_id, add_count=add_count,
+            server_id=server_id, server_group_id=server_group_id,
+        )
+        endpoint_ids = claim_candidate_endpoint_ids(
+            request_data, await service.in_domain(service.collector_endpoints)
+        )
+        resize = functools.partial(
+            service.in_domain, service.resize_lease, actor, lease_id, add_request=request_data,
+            remove_gpu_ids=removals, expected_epoch=expected_epoch,
+        )
+        # The same handoff a claim uses: a keeper must not start on a card in
+        # the gap between stopping its neighbour and writing the new owner.
+        async with keepalive_endpoint_locks(endpoint_ids):
+            try:
+                return await resize()
+            except BrokerError as exc:
+                if exc.code != "no_capacity":
+                    raise
+                resized = await reclaim_keepalive_for_claim(
+                    actor, lambda: request_data, resize,
+                    idempotency_key=None, locked_endpoint_ids=endpoint_ids,
+                )
+                if resized is not None:
+                    return resized
+                raise explained_no_capacity(actor, exc, add_count) from None
+
+    async def redeclare_task(actor: ActorContext, body: ApplyBody, holding: dict[str, Any]) -> dict[str, Any]:
+        """Apply for a task that already has cards: the answer depends on the count."""
+
+        lease_id = holding["lease_id"]
+        if not holding["mine"]:
+            if not body.take_over:
+                raise BrokerError(
+                    "task_already_held", "这个任务已有租约", status_code=409,
+                    details={"gpu_count": holding["gpu_count"], "held_by_you": False},
+                )
+            await service.in_domain(
+                service.take_over_lease, actor, lease_id=lease_id, task=None,
+                project_id=body.project, reason="session took over the task",
+            )
+        wanted = body.gpu_count - holding["gpu_count"]
+        if wanted == 0:
+            # Asking again for what it holds says the holder still wants it,
+            # idle cards included.
+            view = await service.in_domain(
+                service.lease_view, actor, lease_id=lease_id, task=None,
+                project_id=body.project, keep_idle=True, include_entry=True,
+            )
+            return {"lease": view["lease"], "existing": True}
+        if not body.change:
+            raise BrokerError(
+                "task_already_held", "这个任务已有租约，卡数不同", status_code=409,
+                details={"gpu_count": holding["gpu_count"], "held_by_you": True},
+            )
+        if wanted > 0:
+            return await change_cards(
+                actor, lease_id, add_count=wanted,
+                server_id=body.server_id, server_group_id=body.server_group_id,
+            )
+        idle = await service.in_domain(service.idle_card_ids, lease_id)
+        if len(idle) < -wanted:
+            raise BrokerError(
+                "card_in_use", "空闲的卡不够归还", status_code=409,
+                details={"idle_cards": len(idle), "to_return": -wanted},
+            )
+        return await change_cards(actor, lease_id, remove_gpu_ids=idle[:-wanted])
+
     @app.post("/api/v2/leases")
     async def apply_lease(body: ApplyBody, actor: ApiActor) -> dict[str, Any]:
-        constraints: dict[str, Any] = {"gpu_count": body.gpu_count, "same_host": True}
-        if body.server_group_id is not None:
-            constraints["server_group_ids"] = [body.server_group_id]
-        if body.server_id is not None:
-            constraints["endpoint_ids"] = [body.server_id]
-        request_data = RequestCreate(
-            project_id=body.project, task_ref=body.task, purpose=body.task,
-            duration_seconds=body.duration_seconds, constraints=constraints,
-        )
-        try:
-            claimed = await claim_request_now(
-                actor, request_data, idempotency_key=None, persistent_lease=True
+        """Declare what a task needs. The same call starts, repeats and changes it."""
+
+        holding = await service.in_domain(service.task_holding, actor, body.project, body.task)
+        if holding is not None:
+            claimed = await redeclare_task(actor, body, holding)
+        else:
+            constraints: dict[str, Any] = {"gpu_count": body.gpu_count, "same_host": True}
+            if body.server_group_id is not None:
+                constraints["server_group_ids"] = [body.server_group_id]
+            if body.server_id is not None:
+                constraints["endpoint_ids"] = [body.server_id]
+            request_data = RequestCreate(
+                project_id=body.project, task_ref=body.task, purpose=body.task,
+                duration_seconds=body.duration_seconds or UNDECLARED_DURATION_SECONDS,
+                constraints=constraints,
             )
-        except BrokerError as exc:
-            if exc.code != "no_capacity":
-                raise
-            raise explained_no_capacity(actor, exc, body.gpu_count) from None
+            try:
+                claimed = await claim_request_now(
+                    actor, request_data, idempotency_key=None, persistent_lease=True
+                )
+            except BrokerError as exc:
+                if exc.code != "no_capacity":
+                    raise
+                raise explained_no_capacity(actor, exc, body.gpu_count) from None
         # Only a quiet lease needs this, and a holder cannot pace itself
         # against a limit nobody told it.
         return {**claimed, "heartbeat_within_seconds": service.inventory.idle_lease_reclaim_seconds}
@@ -1347,37 +1444,11 @@ def create_app(
 
     @app.post("/api/v2/leases/{lease_id}/resize")
     async def resize_lease(lease_id: str, body: ResizeBody, actor: ApiActor) -> dict[str, Any]:
-        if not body.add_count:
-            return await service.in_domain(
-                service.resize_lease, actor, lease_id, add_request=None,
-                remove_gpu_ids=body.remove_gpu_ids, expected_epoch=body.expected_epoch,
-            )
-        request_data = await service.in_domain(
-            service.resize_request_data, actor, lease_id, add_count=body.add_count,
-            server_id=body.server_id, server_group_id=body.server_group_id,
+        return await change_cards(
+            actor, lease_id, add_count=body.add_count, server_id=body.server_id,
+            server_group_id=body.server_group_id, remove_gpu_ids=body.remove_gpu_ids,
+            expected_epoch=body.expected_epoch,
         )
-        endpoint_ids = claim_candidate_endpoint_ids(
-            request_data, await service.in_domain(service.collector_endpoints)
-        )
-        resize = functools.partial(
-            service.in_domain, service.resize_lease, actor, lease_id, add_request=request_data,
-            remove_gpu_ids=body.remove_gpu_ids, expected_epoch=body.expected_epoch,
-        )
-        # The same handoff a claim uses: a keeper must not start on a card in
-        # the gap between stopping its neighbour and writing the new owner.
-        async with keepalive_endpoint_locks(endpoint_ids):
-            try:
-                return await resize()
-            except BrokerError as exc:
-                if exc.code != "no_capacity":
-                    raise
-                resized = await reclaim_keepalive_for_claim(
-                    actor, lambda: request_data, resize,
-                    idempotency_key=None, locked_endpoint_ids=endpoint_ids,
-                )
-                if resized is not None:
-                    return resized
-                raise explained_no_capacity(actor, exc, body.add_count) from None
 
     @app.post("/api/v2/leases/{lease_id}/release")
     def release_v2(lease_id: str, body: ReleaseBody, actor: ApiActor) -> dict[str, Any]:

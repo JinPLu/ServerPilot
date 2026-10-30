@@ -6,6 +6,7 @@ import asyncio
 import difflib
 import json
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -373,6 +374,59 @@ def endpoint_list(
     actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")]=None,
 ) -> None:
     _print(_call(lambda: _client(url, actor).endpoints()), as_json)
+
+
+@endpoint_app.command("add")
+def endpoint_add(
+    host: str,
+    workspace: Annotated[str, typer.Option("--workspace", help="Working directory on the host.")],
+    project: Annotated[str, typer.Option("--project")],
+    port: Annotated[int, typer.Option("--port")] = 22,
+    user: Annotated[str, typer.Option("--user")] = "root",
+    alias: Annotated[str | None, typer.Option("--alias")] = None,
+    group: Annotated[str | None, typer.Option("--group", help="Server group; a grouped host is reached only through it.")] = None,
+    profile: Annotated[str, typer.Option("--profile", help="linux, or a plugin id from `serverpilot plugin list`.")] = "linux",
+    label: Annotated[list[str] | None, typer.Option("--label")] = None,
+    endpoint_id: Annotated[str | None, typer.Option("--id")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")] = None,
+    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")] = None,
+) -> None:
+    """Register a host, then observe it once and report what came back."""
+
+    generated = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96] + f"-p{port}"
+    _print(_call(lambda: _client(url, actor).post("/api/v2/endpoints", {
+        "id": endpoint_id or generated, "host": host, "port": port, "ssh_user": user,
+        "ssh_alias": alias, "workspace_path": workspace, "server_group_id": group,
+        "observation_profile": profile, "labels": label or [], "storage_group": None,
+        "expected_gpu_count": None, "expected_gpu_total_vram_mib": None,
+        "owner_project_id": project,
+    }, idempotency_key=_idempotency_key(None))), as_json)
+
+
+@endpoint_app.command("update")
+def endpoint_update(
+    endpoint_id: str,
+    user: Annotated[str | None, typer.Option("--user")] = None,
+    alias: Annotated[str | None, typer.Option("--alias")] = None,
+    workspace: Annotated[str | None, typer.Option("--workspace")] = None,
+    group: Annotated[str | None, typer.Option("--group")] = None,
+    profile: Annotated[str | None, typer.Option("--profile")] = None,
+    as_json: Annotated[bool, typer.Option("--json")] = False,
+    url: Annotated[str | None, typer.Option(envvar="SERVERPILOT_URL")] = None,
+    actor: Annotated[str | None, typer.Option(envvar="SERVERPILOT_ACTOR")] = None,
+) -> None:
+    """Update safe metadata. Host and port never change."""
+
+    body = {key: value for key, value in {
+        "ssh_user": user, "ssh_alias": alias, "workspace_path": workspace,
+        "server_group_id": group, "observation_profile": profile,
+    }.items() if value is not None}
+    if not body:
+        raise typer.BadParameter("give at least one field to update")
+    _print(_call(lambda: _client(url, actor).patch(
+        f"/api/v2/endpoints/{endpoint_id}", body, idempotency_key=_idempotency_key(None),
+    )), as_json)
 
 
 @endpoint_app.command("connect")

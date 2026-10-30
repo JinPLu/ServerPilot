@@ -80,7 +80,7 @@ def test_apply_use_release_round_trip(routine) -> None:  # type: ignore[no-untyp
     after = tools.gpu_status()
     assert _free(after) == 0
     assert [item["task"] for item in after["mine"]] == ["端到端训练"]
-    assert tools.gpu_release(lease_id=claimed["lease_id"])["ended"] is True
+    assert tools.gpu_release(task="端到端训练")["ended"] is True
     assert _free(tools.gpu_status()) == 2
 
 
@@ -131,17 +131,17 @@ def test_releasing_one_of_two_leases_does_not_touch_the_other(routine) -> None: 
     second = tools.gpu_apply(task="任务乙", duration_seconds=3600)
     assert first["lease_id"] != second["lease_id"]
 
-    assert tools.gpu_release(lease_id=first["lease_id"])["ended"] is True
+    assert tools.gpu_release(task="任务甲")["ended"] is True
     status = tools.gpu_status()
     assert _free(status) == 1
     assert [item["task"] for item in status["mine"]] == ["任务乙"]
-    assert tools.gpu_release(lease_id=second["lease_id"])["ended"] is True
+    assert tools.gpu_release(task="任务乙")["ended"] is True
     assert _free(tools.gpu_status()) == 2
 
 
-def test_status_narrows_to_one_group(routine) -> None:  # type: ignore[no-untyped-def]
+def test_status_of_an_unknown_server_is_empty(routine) -> None:  # type: ignore[no-untyped-def]
     routine.ingest_observation(observation(count=2))
-    assert tools.gpu_status(server_group_id="no-such-group")["groups"] == []
+    assert tools.gpu_status(server_id="no-such-server")["nodes"] == []
 
 
 def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> None:  # type: ignore[no-untyped-def]
@@ -156,7 +156,7 @@ def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> N
     lease_id = tools.gpu_apply(task="分阶段的任务", duration_seconds=3600)["lease_id"]
 
     _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds + 5)
-    tools.gpu_lease(lease_id=lease_id)
+    tools.gpu_status(task="分阶段的任务")
     routine.ingest_observation(observation(count=2))
     assert len(_active_gpu_ids(routine, lease_id)) == 1
 
@@ -236,7 +236,7 @@ def test_keep_idle_postpones_reclaim_for_three_windows_and_no_more(routine) -> N
     routine.ingest_observation(_running_on_first_card(routine, lease_id, count=2))
     idle = max(_active_gpu_ids(routine, lease_id))
     actor = ACTOR
-    reclaim_after = routine.inventory.idle_lease_reclaim_seconds
+    reclaim_after = routine.inventory.idle_card_reclaim_seconds
 
     def age_card(seconds: int) -> None:
         def write(session):  # type: ignore[no-untyped-def]

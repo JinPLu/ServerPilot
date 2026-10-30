@@ -2,13 +2,13 @@
 
 ## 升级到 4.0
 
-4.0 不保留旧 MCP 工具，升级后必须完成下面三步：
+4.0 起 MCP 只有三个工具，不保留旧工具，升级后必须完成下面三步：
 
 1. 重启 daemon，确认 `/health/live` 的 `version` 是新版本。迁移保留全部数据和活跃租约，并重置它们的心跳与空闲计时。
 2. 重启每个 MCP 客户端。旧客户端调用时会收到 `restart_client`。
 3. 运行 `serverpilot mcp policy --install` 更新全局规则。
 
-升级前已有的租约显示在 `gpu_status` 的 `recoverable` 里，Agent 用 `gpu_take_over(lease_id=...)` 认领。
+升级前已有的租约显示在 `gpu_status` 的 `recoverable` 里，Agent 用 `gpu_apply(task=..., take_over=true)` 认领。
 
 
 包换了、源码对了，不等于现场在跑新契约。下面这些步骤**没有自动入口**；漏做时通常不报升级失败，只是旧进程、旧客户端缓存或旧远端入口继续工作。

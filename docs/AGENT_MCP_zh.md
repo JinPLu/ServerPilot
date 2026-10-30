@@ -70,7 +70,7 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
 
 ## 边界
 
-- 服务器登记和更新走 `gpu_server`（`action=add` 必须给 `host`、`workspace_path`，并先取得人的明确同意；分组主机同时给 `server_group_id`。`action=update` 必须给 `server_id` 和至少一个安全字段）；其余生命周期与管理操作走 App 或 REST。登记会当场观测一次并在 `observation` 里给出结果：`observed=false` 说明记录建好了但机器没连上，修好后下一轮采集自己接上，不要重复登记。
+- 服务器登记和更新不在 MCP 里：用 `serverpilot endpoint add` / `update` 或 App，并先取得人的明确同意。登记会当场观测一次，`observed=false` 说明记录建好了但机器没连上，修好后下一轮采集自己接上，不要重复登记。
 - App 负责人工查看和纠错；默认 Agent 路径不需要额外生命周期步骤。
 - ServerPilot 返回 SSH 连接参数但不提供密码、私钥或 shell；它复用当前用户已有凭据，也不代替项目自己的远端执行授权。
 

@@ -341,6 +341,11 @@ class InventoryConfig(BaseModel):
     # mistaken for an idle workload.
     idle_lease_alert_seconds: int = Field(default=600, ge=60, le=86400)
     idle_lease_reclaim_seconds: int = Field(default=3600, ge=120, le=604800)
+    # A card idle while a sibling on its server works, which is how a batch
+    # winds down. Of the gaps measured on live leases, the median was a minute
+    # and 4% ran past thirty, so this returns cards without taking many that
+    # were about to be used again.
+    idle_card_reclaim_seconds: int = Field(default=1800, ge=120, le=604800)
     # How long a GPU stays off limits to a fresh keepalive worker after the
     # workload lease that held it was released.  Releasing is the only "the
     # owner is done" signal the control plane has, and a staged job's gap

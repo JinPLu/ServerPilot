@@ -124,12 +124,14 @@ def test_routine_tools_do_not_ensure_the_daemon_on_the_call_path(
         def post(self, path: str, *_args: object, **_kwargs: object) -> dict[str, object]:
             if path == "/api/v2/sessions":
                 return {}
+            if path == "/api/v2/leases/heartbeat":
+                return {"lease_id": "lease-a", "ended": {"reason": "workload_completed"}}
             raise BrokerClientError("already settled", code="lease_already_released")
 
     monkeypatch.setattr(mcp_server, "_session_client", lambda actor: Fake())
 
     assert tools.gpu_status()["groups"] == []
-    assert tools.gpu_release(lease_id="lease-a") == {"ok": True, "lease_id": "lease-a", "ended": True}
+    assert tools.gpu_release(task="training") == {"ok": True, "lease_id": "lease-a", "ended": True}
 
 
 def test_in_flight_tool_calls_overlap_on_the_event_loop(
@@ -169,14 +171,13 @@ def test_in_flight_tool_calls_overlap_on_the_event_loop(
 
 def test_tool_parameter_names_match_the_contract() -> None:
     listed = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
-    assert set(listed["gpu_status"].inputSchema["properties"]) == {
-        "view", "server_group_id", "server_id", "if_changed",
-    }
+    assert set(listed) == {"gpu_status", "gpu_apply", "gpu_release"}
+    assert set(listed["gpu_status"].inputSchema["properties"]) == {"task", "server_id", "telemetry"}
     assert set(listed["gpu_apply"].inputSchema["properties"]) == {
-        "task", "duration_seconds", "gpu_count", "server_group_id", "server_id", "project",
+        "task", "gpu_count", "server_group_id", "server_id", "duration_seconds", "change",
+        "take_over", "project",
     }
-    assert listed["gpu_apply"].inputSchema["properties"]["gpu_count"]["default"] == 1
-    assert set(listed["gpu_release"].inputSchema["properties"]) == {"lease_id", "task", "outcome"}
+    assert set(listed["gpu_release"].inputSchema["properties"]) == {"task", "gpu_ids", "outcome"}
 
 
 def test_async_broker_claim_waits_out_the_server_budget() -> None:

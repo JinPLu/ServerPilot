@@ -658,12 +658,10 @@ def test_mcp_exposes_required_tools() -> None:
     tools = asyncio.run(mcp.list_tools())
     by_name = {tool.name: tool for tool in tools}
     assert set(by_name) == set(ROUTINE_MCP_TOOL_NAMES)
-    for retired in ("gpu_add_server", "gpu_update_server", "gpu_grant_server_project",
+    for retired in ("gpu_lease", "gpu_resize", "gpu_take_over", "gpu_server",
+                    "gpu_add_server", "gpu_update_server", "gpu_grant_server_project",
                     "gpu_scheduler_upload", "gpu_renew_lease"):
         assert retired not in by_name
-    server = by_name["gpu_server"]
-    assert server.inputSchema["required"] == ["action"]
-    assert "human approval" in server.description
 
 
 def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:

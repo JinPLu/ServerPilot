@@ -6,7 +6,6 @@ import hashlib
 import inspect
 import math
 import os
-import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
@@ -861,7 +860,7 @@ DOCUMENTED_REFUSALS = frozenset({
     "no_capacity", "group_selection_required", "task_already_held", "resize_unsupported",
     "epoch_conflict", "card_in_use", "card_not_held", "use_release", "nothing_to_change",
     "lease_not_found", "lease_forbidden", "lease_taken_over", "lease_ended",
-    "takeover_project_mismatch", "project_required", "allocation_unconfirmed",
+    "takeover_project_mismatch", "project_required", "allocation_unconfirmed", "duration_required",
     "entry_unusable", "restart_client", "server_required", "server_group_not_found",
     "endpoint_not_found",
 })
@@ -870,8 +869,8 @@ RETRYABLE_REFUSALS = frozenset({"no_capacity", "allocation_unconfirmed"})
 
 def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:
     if code == "task_already_held":
-        tool = "gpu_lease" if details.get("held_by_you") else "gpu_take_over"
-        return {"tool": tool, "args": {"lease_id": details.get("lease_id")}}
+        flag = "change" if details.get("held_by_you") else "take_over"
+        return {"tool": "gpu_apply", "args": {flag: True}}
     if code == "resize_unsupported":
         return {"tool": "gpu_apply", "args": {"task": "<a new task name>"}}
     if code == "allocation_unconfirmed":
@@ -1039,12 +1038,6 @@ def _node_view(node: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _capacity_digest(groups: list[dict[str, Any]]) -> str:
-    facts = sorted((str(group.get("server_group_id") or group.get("server_id")), group["free"],
-                    group.get("largest_block"), group.get("unknown", 0)) for group in groups)
-    return hashlib.sha256(repr(facts).encode()).hexdigest()[:12]
-
-
 def _clean(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
     # largest_block=null means unknown, which is not the same as absent.
     return [{key: value for key, value in group.items()
@@ -1054,58 +1047,46 @@ def _clean(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 LEASE_SUMMARY_KEYS = ("recent_average", "slowest_gpu")
 
-_READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
 _HEARTBEAT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 _ACTS = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
-_RETURNS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+_RETURNS = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
 
 
-@mcp.tool(annotations=_READ_ONLY)
+async def _task_view(client: Any, project: str, task: str) -> dict[str, Any]:
+    return await _client_call(client, "post", "/api/v2/leases/heartbeat", {"task": task, "project": project})
+
+
+@mcp.tool(annotations=_HEARTBEAT)
 async def gpu_status(
-    view: Annotated[
-        Literal["summary", "capacity", "servers", "nodes"],
-        Field(description="summary=capacity plus your leases; capacity=free cards only; "
-                          "servers=per-server detail; nodes=one server's nodes, needs server_id"),
-    ] = "summary",
-    server_group_id: str | None = None,
-    server_id: str | None = None,
-    if_changed: Annotated[
-        str | None, Field(description="digest from an earlier reply; unchanged capacity answers briefly")
-    ] = None,
+    task: Annotated[str | None, Field(description="Your task: its state, what changed, and cards at risk. Counts as your heartbeat")] = None,
+    server_id: Annotated[str | None, Field(description="One server's nodes, cards and processes")] = None,
+    telemetry: Annotated[bool, Field(description="With task: per-card use, for tuning batch size")] = False,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Read capacity and your own leases. Does not count as a heartbeat."""
+    """Where cards are free and what you hold, or one task, or one server."""
 
     try:
         client, project = await _identity(context)
-        if view == "nodes" and server_id is None:
-            raise BrokerClientError(
-                "broker HTTP 400: server_required: view=nodes needs server_id",
-                code="server_required", status_code=400,
-            )
-        if view in {"servers", "nodes"}:
+        if task is not None:
+            view = await _task_view(client, project, task)
+            if telemetry and "ended" not in view:
+                payload = await _client_call(client, "snapshot")
+                detail = _routine_gpu_status(payload, lease_id=view["lease_id"])
+                view["telemetry"] = {
+                    "cards": [
+                        {key: value for key, value in row.items() if key not in {"name", "server_id"}}
+                        for row in detail.get("leased_gpus", [])
+                    ],
+                    "summary": {key: (detail.get("lease") or {}).get(key) for key in LEASE_SUMMARY_KEYS},
+                }
+            return {"ok": True, **view}
+        if server_id is not None:
             payload = await _client_call(client, "snapshot", endpoint_id=server_id)
             detail = _routine_gpu_status(payload, lease_id=None)
-            if view == "nodes":
-                return {"ok": True, "nodes": [_node_view(node) for node in detail.get("resource_nodes", [])]}
-            detail.pop("resource_nodes", None)
-            detail.pop("open_leases", None)
-            return {"ok": True, **detail}
+            return {"ok": True, "nodes": [_node_view(node) for node in detail.get("resource_nodes", [])]}
         groups = (await _client_call(client, "get", "/api/v2/capacity"))["groups"]
-        if server_group_id is not None:
-            groups = [group for group in groups if group.get("server_group_id") == server_group_id]
-        digest = _capacity_digest(groups)
-        if if_changed == digest:
-            return {"ok": True, "unchanged": True, "digest": digest}
-        answer: dict[str, Any] = {"ok": True, "digest": digest, "groups": _clean(groups)}
-        if view == "capacity":
-            # Enough to poll on. The notes are read once, before choosing.
-            for group in answer["groups"]:
-                for key in ("name", "cwd", "notes", "max_lease_seconds"):
-                    group.pop(key, None)
-        if view == "summary":
-            answer["project"] = project
-            answer.update(await _client_call(client, "get", "/api/v2/leases/mine", params={"project": project}))
+        answer: dict[str, Any] = {"ok": True, "project": project, "groups": _clean(groups)}
+        answer.update(await _client_call(client, "get", "/api/v2/leases/mine", params={"project": project}))
         return answer
     except BrokerClientError as exc:
         return _refusal(exc)
@@ -1114,219 +1095,77 @@ async def gpu_status(
 @mcp.tool(annotations=_ACTS)
 async def gpu_apply(
     task: Annotated[str, Field(min_length=1, max_length=255, description="What this work is, stable across restarts")],
-    duration_seconds: Annotated[int, Field(ge=60, le=2592000, description="Expected duration; an estimate for others, never a deadline for you")],
     gpu_count: Annotated[int, Field(ge=1, le=1024, description=ROUTINE_GPU_COUNT_DESCRIPTION)] = 1,
     server_group_id: str | None = None,
     server_id: str | None = None,
+    duration_seconds: Annotated[int | None, Field(ge=60, le=2592000, description="Required on clusters, whose jobs end at this limit")] = None,
+    change: Annotated[bool, Field(description="The count differs from what this task holds, on purpose")] = False,
+    take_over: Annotated[bool, Field(description="Take this task from a session that is gone")] = False,
     project: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Get GPUs now, or a reason you can act on. Repeating a task returns its lease; nothing queues."""
+    """Declare what a task needs. Returns how to enter its cards, or why not; nothing queues. Repeating is safe."""
 
     try:
         client, resolved = await _identity(context, project)
         payload = await _post(client, "/api/v2/leases", {
             "project": resolved, "task": task, "duration_seconds": duration_seconds,
             "gpu_count": gpu_count, "server_group_id": server_group_id, "server_id": server_id,
+            "change": change, "take_over": take_over,
         })
     except BrokerClientError as exc:
         return _refusal(exc)
     lease = payload["lease"]
-    return {
+    answer = {
         "ok": True,
         "lease_id": lease["id"],
         "existing": bool(payload.get("existing")),
-        "resource_epoch": lease.get("resource_epoch", 0),
         "heartbeat_within_seconds": payload.get("heartbeat_within_seconds"),
         "servers": _cards_by_server(lease),
     }
-
-
-@mcp.tool(annotations=_HEARTBEAT)
-async def gpu_lease(
-    lease_id: str | None = None,
-    task: str | None = None,
-    keep_idle: Annotated[bool, Field(description="Postpone reclaiming idle cards, up to three windows")] = False,
-    include: Annotated[
-        list[Literal["entry", "telemetry"]] | None,
-        Field(description="entry=ssh, cwd, env; telemetry=per-card use of your cards"),
-    ] = None,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Heartbeat and read one of your leases: its state, cards at risk, and what changed since you last asked."""
-
-    wanted = set(include or [])
-    try:
-        client, project = await _identity(context)
-        view = await _client_call(client, "post", "/api/v2/leases/heartbeat", {
-            "lease_id": lease_id, "task": task, "project": project,
-            "keep_idle": keep_idle, "include_entry": "entry" in wanted,
-        })
-        lease = view.pop("lease", None)
-        if lease is not None:
-            view["servers"] = _cards_by_server(lease)
-        if "telemetry" in wanted and "ended" not in view:
-            payload = await _client_call(client, "snapshot")
-            detail = _routine_gpu_status(payload, lease_id=view["lease_id"])
-            view["telemetry"] = {
-                "cards": [
-                    {key: value for key, value in row.items() if key not in {"name", "server_id"}}
-                    for row in detail.get("leased_gpus", [])
-                ],
-                "summary": {key: (detail.get("lease") or {}).get(key) for key in LEASE_SUMMARY_KEYS},
-            }
-        return {"ok": True, **view}
-    except BrokerClientError as exc:
-        return _refusal(exc)
-
-
-@mcp.tool(annotations=_ACTS)
-async def gpu_resize(
-    lease_id: str | None = None,
-    task: str | None = None,
-    add_count: Annotated[int, Field(ge=0, le=1024)] = 0,
-    server_id: Annotated[str | None, Field(description="Add on this server; default is where the lease already is")] = None,
-    server_group_id: str | None = None,
-    remove_gpu_ids: list[str] | None = None,
-    expected_epoch: Annotated[int | None, Field(description="Refuse if the cards changed since you read this")] = None,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Add or return cards on your lease, all or nothing. A running process cannot see new cards until restarted."""
-
-    try:
-        client, project = await _identity(context)
-        target = lease_id or (await _client_call(client, "post", "/api/v2/leases/heartbeat", {
-            "task": task, "project": project,
-        }))["lease_id"]
-        payload = await _post(client, f"/api/v2/leases/{target}/resize", {
-            "add_count": add_count, "server_id": server_id, "server_group_id": server_group_id,
-            "remove_gpu_ids": remove_gpu_ids or [], "expected_epoch": expected_epoch,
-        })
-    except BrokerClientError as exc:
-        return _refusal(exc)
-    return {
-        "ok": True,
-        "lease_id": target,
-        "resource_epoch": payload["resource_epoch"],
-        "added": payload["added_gpu_ids"],
-        "removed": payload["removed_gpu_ids"],
-        "restart_required": True,
-        "servers": _cards_by_server(payload["lease"]),
-    }
+    if "added_gpu_ids" in payload:
+        # A running process cannot see cards that were not there when it started.
+        answer["restart_required"] = True
+    return answer
 
 
 @mcp.tool(annotations=_RETURNS)
 async def gpu_release(
-    lease_id: str | None = None,
-    task: str | None = None,
+    task: str,
+    gpu_ids: Annotated[list[str] | None, Field(description="Return only these cards; omit to end the task")] = None,
     outcome: Literal["completed", "failed", "abandoned"] = "completed",
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Return a whole lease when its task ends or fails."""
+    """Return a task's cards: all when it ends or fails, or some when they have no work left."""
 
     try:
         client, project = await _identity(context)
-        target = lease_id or (await _client_call(client, "post", "/api/v2/leases/heartbeat", {
-            "task": task, "project": project,
-        }))["lease_id"]
-        await _client_call(client, "post", f"/api/v2/leases/{target}/release", {"outcome": outcome})
-    except BrokerClientError as exc:
-        if exc.code == "lease_already_released":
+        view = await _task_view(client, project, task)
+        lease_id = view["lease_id"]
+        if "ended" in view:
             return {"ok": True, "lease_id": lease_id, "ended": True}
-        return _refusal(exc)
-    return {"ok": True, "lease_id": target, "ended": True}
-
-
-@mcp.tool(annotations=_ACTS)
-async def gpu_take_over(
-    reason: Annotated[str, Field(min_length=1, max_length=300)],
-    lease_id: str | None = None,
-    task: str | None = None,
-    project: str | None = None,
-    force: Annotated[bool, Field(description="Allow a lease from another project")] = False,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Make a lease yours after a restart, or one left by a crashed session. Audited."""
-
-    try:
-        client, resolved = await _identity(context, project)
-        payload = await _client_call(client, "post", "/api/v2/leases/take-over", {
-            "lease_id": lease_id, "task": task, "project": resolved, "reason": reason, "force": force,
-        })
+        if gpu_ids:
+            try:
+                payload = await _client_call(
+                    client, "post", f"/api/v2/leases/{lease_id}/resize", {"remove_gpu_ids": gpu_ids}
+                )
+                return {
+                    "ok": True,
+                    "lease_id": lease_id,
+                    "removed": payload["removed_gpu_ids"],
+                    "servers": _cards_by_server(payload["lease"]),
+                }
+            except BrokerClientError as exc:
+                # Every card it holds: that is the task ending.
+                if exc.code != "use_release":
+                    raise
+        await _client_call(client, "post", f"/api/v2/leases/{lease_id}/release", {"outcome": outcome})
     except BrokerClientError as exc:
         return _refusal(exc)
-    lease = payload["lease"]
-    return {
-        "ok": True,
-        "lease_id": lease["id"],
-        "resource_epoch": lease.get("resource_epoch", 0),
-        "servers": _cards_by_server(lease),
-    }
+    return {"ok": True, "lease_id": lease_id, "ended": True}
 
 
-OBSERVATION_PROFILE_DESCRIPTION = (
-    "linux for an ordinary host; otherwise a plugin id from `serverpilot plugin list`"
-)
-SERVER_GROUP_DESCRIPTION = "Group sharing workspace and data; a grouped host is reached only through it"
-
-
-@mcp.tool(annotations=_ACTS)
-async def gpu_server(
-    action: Literal["add", "update"],
-    server_id: str | None = None,
-    host: str | None = None,
-    port: int = 22,
-    ssh_user: str | None = None,
-    ssh_alias: str | None = None,
-    workspace_path: str | None = None,
-    server_group_id: Annotated[str | None, Field(description=SERVER_GROUP_DESCRIPTION)] = None,
-    observation_profile: Annotated[str | None, Field(description=OBSERVATION_PROFILE_DESCRIPTION)] = None,
-    labels: list[str] | None = None,
-    project: str | None = None,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Add a host after explicit human approval, or update safe metadata. Host and port never change."""
-
-    replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
-    try:
-        client, resolved = await _identity(context, project)
-        if action == "add":
-            if not host or not workspace_path:
-                raise ValueError("adding a server needs host and workspace_path")
-            generated = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96] + f"-p{port}"
-            return {"ok": True, **await _client_call(client, "post", "/api/v2/endpoints", {
-                "id": server_id or generated, "host": host, "port": port,
-                "ssh_user": ssh_user or "root", "ssh_alias": ssh_alias,
-                "workspace_path": workspace_path, "server_group_id": server_group_id,
-                "observation_profile": observation_profile or "linux", "labels": labels or [],
-                "storage_group": None, "expected_gpu_count": None,
-                "expected_gpu_total_vram_mib": None, "owner_project_id": resolved,
-            }, idempotency_key=replay_key)}
-        if server_id is None:
-            raise ValueError("updating a server needs server_id")
-        body = {key: value for key, value in {
-            "ssh_user": ssh_user, "ssh_alias": ssh_alias, "workspace_path": workspace_path,
-            "server_group_id": server_group_id, "observation_profile": observation_profile,
-            "labels": labels,
-        }.items() if value is not None}
-        if not body:
-            raise ValueError("updating a server needs at least one field")
-        return {"ok": True, **await _client_call(
-            client, "patch", f"/api/v2/endpoints/{server_id}", body, idempotency_key=replay_key
-        )}
-    except BrokerClientError as exc:
-        return _refusal(exc)
-
-
-ROUTINE_MCP_TOOL_NAMES = (
-    "gpu_status",
-    "gpu_apply",
-    "gpu_lease",
-    "gpu_resize",
-    "gpu_release",
-    "gpu_take_over",
-    "gpu_server",
-)
+ROUTINE_MCP_TOOL_NAMES = ("gpu_status", "gpu_apply", "gpu_release")
 
 
 def main() -> None:
