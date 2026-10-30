@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import httpx
 import pytest
 from alembic import command
 from alembic.config import Config
-from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 
 from serverpilot import mcp_server
@@ -47,7 +45,7 @@ def test_client_emits_only_the_actor_header(monkeypatch: pytest.MonkeyPatch) -> 
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
     client = BrokerClient.from_env()
-    client.get("/api/v1/snapshot")
+    client.get("/api/v2/snapshot")
 
     assert client.actor == "agent"
     assert calls[0]["headers"] == {"X-ServerPilot-Actor": "agent"}
@@ -95,99 +93,6 @@ def test_historical_contact_column_is_inert_and_not_projected(service, admin) ->
     assert allocated["lease"] is not None
     assert "coordination_uri" not in _keys(allocated)
     assert "coordination_uri" not in _keys(service.snapshot(admin))
-
-
-def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) -> None:  # type: ignore[no-untyped-def]
-    app = build_app("routine")
-    app.state.service.ingest_observation(observation(count=2))
-    client = TestClient(app)
-    headers = {"X-ServerPilot-Actor": "agent"}
-    replay_headers = {**headers, "Idempotency-Key": "routine-call-one"}
-
-    claimed = client.post(
-        "/api/v1/routine/claims",
-        json={
-            "project_id": "agent",
-            "task_ref": "训练任务",
-            "purpose": "训练任务",
-            "constraints": {"gpu_count": 1, "placement": "pack"},
-        },
-        headers=replay_headers,
-    )
-
-    assert claimed.status_code == 200
-    lease = claimed.json()["lease"]
-    assert lease["actor_id"] == "agent"
-    assert "coordination_uri" not in lease
-    assert lease["expires_at"] is None
-    assert lease["state"] == "HELD"
-    assert claimed.json()["lease"]["task_ref"] == "训练任务"
-    retried = client.post(
-        "/api/v1/routine/claims",
-        json={
-            "project_id": "agent",
-            "task_ref": "训练任务",
-            "purpose": "训练任务",
-            "constraints": {"gpu_count": 1, "placement": "pack"},
-        },
-        headers=replay_headers,
-    )
-    assert retried.status_code == 200
-    assert retried.json()["lease"]["id"] == lease["id"]
-    second_claim = client.post(
-        "/api/v1/routine/claims",
-        json={
-            "project_id": "agent",
-            "task_ref": "训练任务",
-            "purpose": "训练任务",
-            "constraints": {"gpu_count": 1, "placement": "pack"},
-        },
-        headers={**headers, "Idempotency-Key": "routine-call-two"},
-    )
-    assert second_claim.status_code == 200
-    assert second_claim.json()["lease"]["id"] != lease["id"]
-    with app.state.service.database.session() as session:
-        app.state.service._reconcile_leases(
-            session,
-            datetime.now(UTC) + timedelta(days=2),
-            actor_id="serverpilot-system",
-        )
-        session.commit()
-        assert (
-            session.execute(
-                text("SELECT state FROM leases WHERE id = :lease_id"),
-                {"lease_id": lease["id"]},
-            ).scalar_one()
-            == "HELD"
-        )
-    with app.state.service.database.engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT COUNT(*) FROM idempotency_records")).scalar_one() == 2
-        )
-
-    released = client.post(
-        f"/api/v1/routine/leases/{lease['id']}/release",
-        headers=headers,
-    )
-
-    assert released.status_code == 200
-    assert released.json()["lease"]["state"] == "RELEASED"
-    claimed_again = client.post(
-        "/api/v1/routine/claims",
-        json={
-            "project_id": "agent",
-            "task_ref": "训练任务",
-            "purpose": "训练任务",
-            "constraints": {"gpu_count": 1, "placement": "pack"},
-        },
-        headers={**headers, "Idempotency-Key": "routine-call-three"},
-    )
-    assert claimed_again.status_code == 200
-    assert claimed_again.json()["lease"]["id"] != lease["id"]
-    with app.state.service.database.engine.connect() as connection:
-        assert (
-            connection.execute(text("SELECT COUNT(*) FROM idempotency_records")).scalar_one() == 3
-        )
 
 
 def test_busy_status_returns_task_without_a_contact_field() -> None:

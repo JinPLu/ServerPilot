@@ -195,9 +195,9 @@ def test_async_broker_claim_waits_out_the_server_budget() -> None:
             url="http://127.0.0.1:8787",
             actor="agent",
         )
-        await broker.get("/api/v1/snapshot")
+        await broker.get("/api/v2/snapshot")
         await broker.post(
-            "/api/v1/routine/claims",
+            "/api/v2/claims",
             {"constraints": {"gpu_count": 8}},
         )
 

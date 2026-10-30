@@ -187,11 +187,9 @@ def test_release_failure_keeps_lease_and_remote_handle(service, admin, provider,
 
 def test_provider_deadline_cannot_be_extended_locally(service, admin, provider):
     lease = claim(service, admin)["lease"]
-    with pytest.raises(BrokerError) as error:
-        service.renew_lease(admin, lease["id"], idempotency_key="renew")
-    assert error.value.code == "provider_deadline_not_extendable"
+    deadline = record(service).expires_at
     assert service.record_lease_heartbeat(admin, lease["id"])["recorded"]
-    assert record(service).expires_at is not None
+    assert record(service).expires_at == deadline
 
 
 def backdate_idle(service, lease_id, *, heartbeat_old=True):

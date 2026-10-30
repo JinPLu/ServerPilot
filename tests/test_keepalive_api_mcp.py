@@ -412,7 +412,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("keep-on"),
     )
@@ -439,7 +439,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
     assert resolved == ["server-script-v1"]
 
     disabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": False},
         headers=_headers("keep-off"),
     )
@@ -515,7 +515,7 @@ def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             toggle_task = asyncio.create_task(
                 client.post(
-                    "/api/v1/endpoints/endpoint-a/keepalive",
+                    "/api/v2/endpoints/endpoint-a/keepalive",
                     json={"enabled": True},
                     headers=_headers("blocked-start-race"),
                 )
@@ -523,7 +523,7 @@ def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
             assert await asyncio.to_thread(adapter.started.wait, 2)
             claim_task = asyncio.create_task(
                 client.post(
-                    "/api/v1/routine/claims",
+                    "/api/v2/claims",
                     json={
                         "project_id": "project-a",
                         "task_ref": "claim-during-keeper-start",
@@ -618,7 +618,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             toggle_task = asyncio.create_task(
                 client.post(
-                    "/api/v1/endpoints/endpoint-a/keepalive",
+                    "/api/v2/endpoints/endpoint-a/keepalive",
                     json={"enabled": True},
                     headers=_headers("blocked-a-other-b"),
                 )
@@ -626,7 +626,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
             assert await asyncio.to_thread(adapter.started.wait, 2)
             other = asyncio.create_task(
                 client.post(
-                    "/api/v1/routine/claims",
+                    "/api/v2/claims",
                     json={
                         "project_id": "project-a",
                         "task_ref": "claim-b-while-a-blocked",
@@ -644,7 +644,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
             other_response = other.result()
             unscoped = asyncio.create_task(
                 client.post(
-                    "/api/v1/routine/claims",
+                    "/api/v2/claims",
                     json={
                         "project_id": "project-a",
                         "task_ref": "claim-unscoped-while-a-blocked",
@@ -707,7 +707,7 @@ def test_claims_on_different_server_groups_do_not_block_each_other(
         async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
             toggle_task = asyncio.create_task(
                 client.post(
-                    "/api/v1/endpoints/endpoint-a/keepalive",
+                    "/api/v2/endpoints/endpoint-a/keepalive",
                     json={"enabled": True},
                     headers=_headers("blocked-group-a"),
                 )
@@ -715,7 +715,7 @@ def test_claims_on_different_server_groups_do_not_block_each_other(
             assert await asyncio.to_thread(adapter.started.wait, 2)
             other = asyncio.create_task(
                 client.post(
-                    "/api/v1/routine/claims",
+                    "/api/v2/claims",
                     json={
                         "project_id": "project-a",
                         "task_ref": "claim-group-b-while-a-blocked",
@@ -860,7 +860,7 @@ def test_keepalive_api_starts_sibling_when_one_gpu_has_workload_conflict(
     )
 
     enabled = TestClient(app).post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("conflict-sibling-keepalive"),
     )
@@ -878,7 +878,7 @@ def test_keepalive_api_disable_without_managed_coverage_never_targets_foreign_gp
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": False},
         headers=_headers("stop-foreign"),
     )
@@ -928,7 +928,7 @@ def test_endpoint_operator_can_clear_empty_internal_keepalive_lease(
     )
 
     response = TestClient(app).post(
-        f"/api/v1/endpoints/endpoint-a/leases/{lease_id}/release-empty",
+        f"/api/v2/endpoints/endpoint-a/leases/{lease_id}/release-empty",
         headers=_headers("cleanup-empty-keepalive"),
     )
 
@@ -947,14 +947,14 @@ def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertai
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("partial-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     disabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": False},
         headers=_headers("partial-stop-off"),
     )
@@ -964,7 +964,7 @@ def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertai
         ("endpoint-a", False, (GPU_UUIDS[0],)),
         ("endpoint-a", False, (GPU_UUIDS[1],)),
     ]
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     states_by_uuid = {gpu["gpu_uuid"]: gpu["state"] for gpu in snapshot["gpus"]}
@@ -980,7 +980,7 @@ def test_keepalive_api_missing_endpoint_does_not_resolve_adapter_or_collect(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
-        "/api/v1/endpoints/missing/keepalive",
+        "/api/v2/endpoints/missing/keepalive",
         json={"enabled": False},
         headers=_headers("missing-stop"),
     )
@@ -997,7 +997,7 @@ def test_keepalive_api_strict_body_and_mutation_headers(
     collector = FakeTargetedCollector(adapter)
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
-    path = "/api/v1/endpoints/endpoint-a/keepalive"
+    path = "/api/v2/endpoints/endpoint-a/keepalive"
     assert client.post(path, json={"enabled": True}).status_code == 422
     invalid = client.post(
         path, json={"enabled": True, "gpu_uuids": [GPU_UUIDS[0]]}, headers=_headers("strict")
@@ -1008,7 +1008,7 @@ def test_keepalive_api_strict_body_and_mutation_headers(
     assert policy.status_code == 422
     assert policy.json()["error"]["code"] == "validation_error"
     generic_patch = client.patch(
-        "/api/v1/endpoints/endpoint-a",
+        "/api/v2/endpoints/endpoint-a",
         json={"keepalive_policy": "idle_keepalive"},
         headers=_headers("strict-generic-patch"),
     )
@@ -1029,7 +1029,7 @@ def test_keepalive_api_failures_are_reported_as_errors(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers(failure_kind),
     )
@@ -1061,7 +1061,7 @@ def test_incompatible_helper_is_reported_without_cleanup_mutation(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("incompatible-helper"),
     )
@@ -1097,14 +1097,14 @@ def test_incompatible_helper_on_stop_is_not_collapsed_to_partial_stop(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("incompatible-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     disabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": False},
         headers=_headers("incompatible-stop-off"),
     )
@@ -1139,7 +1139,7 @@ def test_keepalive_api_reports_known_cuda_worker_failure_in_chinese_without_remo
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
     response = TestClient(app).post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("known-cuda-worker-failure"),
     )
@@ -1425,7 +1425,7 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("claim-keepers-on"),
     )
@@ -1464,7 +1464,7 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
     service.create_request = observed_create_request  # type: ignore[method-assign]
     service.plan_keepalive_reclaim = observed_plan_keepalive_reclaim  # type: ignore[method-assign]
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json=claim_payload,
         headers=_headers("claim-one-keeper"),
     )
@@ -1486,7 +1486,7 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
             ("endpoint-a", False, (GPU_UUIDS[0],)),
         ],
     ]
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     states_by_uuid = {gpu["gpu_uuid"]: gpu["state"] for gpu in snapshot["gpus"]}
@@ -1494,7 +1494,7 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
     assert states_by_uuid[GPU_UUIDS[1]] == "BUSY_UNMANAGED"
 
     repeated = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json=claim_payload,
         headers=_headers("claim-one-keeper"),
     )
@@ -1515,14 +1515,14 @@ def test_immediate_claim_stop_failure_does_not_create_workload_lease(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("failed-claim-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     failed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "failed-claim-one-keeper",
@@ -1538,7 +1538,7 @@ def test_immediate_claim_stop_failure_does_not_create_workload_lease(
     assert error["details"] == {
         "gpu_id": "endpoint-a:GPU-00000000-0000-0000-0000-000000000001"
     }
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert snapshot["leases"] == []
@@ -1557,7 +1557,7 @@ def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("eight-keepers-on"),
     )
@@ -1568,7 +1568,7 @@ def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(
     collects_after_enable = len(collector.calls)
 
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "claim-eight-keepers",
@@ -1597,14 +1597,14 @@ def test_eight_gpu_reclaim_stop_failure_does_not_allocate(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("eight-fail-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     failed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "claim-eight-fail-stop",
@@ -1621,7 +1621,7 @@ def test_eight_gpu_reclaim_stop_failure_does_not_allocate(
     # confirmation that follows can: this names the first GPU still occupied.
     assert isinstance(error["details"]["gpu_id"], str)
     assert error["details"]["gpu_id"].startswith("endpoint-a:")
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert snapshot["leases"] == []
@@ -1639,14 +1639,14 @@ def test_reclaim_stop_reports_failure_after_empty_observation(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("empty-then-fail-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     failed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "claim-empty-then-fail",
@@ -1665,7 +1665,7 @@ def test_reclaim_stop_reports_failure_after_empty_observation(
     assert error["details"] == {
         "failed_gpu_ids": ["endpoint-a:GPU-00000000-0000-0000-0000-000000000001"]
     }
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert snapshot["leases"] == []
@@ -1682,14 +1682,14 @@ def test_reclaim_residual_process_does_not_allocate(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("residual-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     failed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "claim-residual",
@@ -1705,7 +1705,7 @@ def test_reclaim_residual_process_does_not_allocate(
     assert error["details"] == {
         "gpu_id": "endpoint-a:GPU-00000000-0000-0000-0000-000000000001"
     }
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert snapshot["leases"] == []
@@ -1720,7 +1720,7 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("missing-keeper-on"),
     )
@@ -1737,7 +1737,7 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
         )
     )
 
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     missing = next(gpu for gpu in snapshot["gpus"] if gpu["gpu_uuid"] == GPU_UUIDS[0])
@@ -1756,7 +1756,7 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
     assert snapshot["resource_projection"]["claimed"]["gpu_count"] == 0
 
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "claim-missing-keeper",
@@ -1782,13 +1782,13 @@ def test_quick_claim_uses_the_same_selected_keeper_handoff(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("quick-claim-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "quick-claim-one-keeper",
@@ -1820,13 +1820,13 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("restore-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "release-then-restore",
@@ -1840,15 +1840,15 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
     claimed_uuid = next(
         gpu["gpu_uuid"]
         for gpu in client.get(
-            "/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}
+            "/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}
         ).json()["data"]["gpus"]
         if gpu["id"] == claimed_gpu_id
     )
     assert claimed_uuid not in adapter.active_pids
 
     released = client.post(
-        f"/api/v1/leases/{claimed.json()['lease']['id']}/release",
-        json={"reason": "workload completed"},
+        f"/api/v2/leases/{claimed.json()['lease']['id']}/release",
+        json={"outcome": "completed"},
         headers=_headers("release-before-restore"),
     )
     assert released.status_code == 200, released.text
@@ -1865,7 +1865,7 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
     asyncio.run(next_collection())
 
     assert set(adapter.active_pids) == set(GPU_UUIDS)
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert {gpu["state"] for gpu in snapshot["gpus"]} == {"KEEPALIVE"}
@@ -1885,7 +1885,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
             # Mirror BrokerClient.snapshot: an unset endpoint_id is dropped
             # rather than sent as an empty value the broker would filter on.
             params = {key: value for key, value in kwargs.items() if value is not None}
-            response = rest.get("/api/v1/snapshot", params=params, headers=headers)
+            response = rest.get("/api/v2/snapshot", params=params, headers=headers)
             assert response.status_code == 200, response.text
             return response.json()
 
@@ -1900,7 +1900,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     monkeypatch.setattr(mcp_server, "_session_client", lambda actor: RoutineClient())
 
     enabled = rest.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("agent-path-on"),
     )
@@ -1994,7 +1994,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert adapter.attested_pids[selected_uuid] != adapter.active_pids[selected_uuid]
     assert adapter.driver_pids[selected_uuid] == adapter.active_pids[selected_uuid]
     disabled = rest.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": False},
         headers=_headers("agent-path-off"),
     )
@@ -2024,7 +2024,7 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("attestation-mismatch-on"),
     )
@@ -2050,7 +2050,7 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
     # Recovery is read-only.  A mismatched helper proof never stops an
     # existing worker or turns the GPU into immediately claimable capacity.
     assert adapter.calls == calls_before_recovery
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert {gpu["state"] for gpu in snapshot["gpus"]} == {"CONFLICT"}
@@ -2067,7 +2067,7 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("foreign-process-on"),
     )
@@ -2092,7 +2092,7 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
     # stop, or restart is attempted around a potentially real workload.
     assert adapter.calls == calls_before_recovery
     assert adapter.attest_calls == attestations_before_recovery
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     assert {gpu["state"] for gpu in snapshot["gpus"]} == {"CONFLICT"}
@@ -2108,7 +2108,7 @@ def test_restart_preserves_keepalive_ownership_without_remote_churn(
     first_client = TestClient(first_app)
 
     enabled = first_client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("restart-recovery-on"),
     )
@@ -2155,13 +2155,13 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
     client = TestClient(app)
 
     enabled = client.post(
-        "/api/v1/endpoints/endpoint-a/keepalive",
+        "/api/v2/endpoints/endpoint-a/keepalive",
         json={"enabled": True},
         headers=_headers("reassign-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "reassign-from-keeper-a",
@@ -2173,13 +2173,13 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
     assert claimed.status_code == 200, claimed.text
     lease = claimed.json()["lease"]
     original_gpu_id = lease["gpu_ids"][0]
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     keeper = next(gpu for gpu in snapshot["gpus"] if gpu["state"] == "KEEPALIVE")
 
     moved = client.patch(
-        f"/api/v1/operator/leases/{lease['id']}/gpus",
+        f"/api/v2/operator/leases/{lease['id']}/gpus",
         json={"gpu_ids": [keeper["id"]]},
         headers={**_headers("reassign-to-keeper"), "X-ServerPilot-Client": "desktop-app"},
     )
@@ -2188,7 +2188,7 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
     assert moved.json()["restart_required"] is True
     assert moved.json()["lease"]["gpu_ids"] == [keeper["id"]]
     assert adapter.calls[-1] == ("endpoint-a", False, (keeper["gpu_uuid"],))
-    after = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+    after = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
         "data"
     ]
     states_by_id = {gpu["id"]: gpu["state"] for gpu in after["gpus"]}

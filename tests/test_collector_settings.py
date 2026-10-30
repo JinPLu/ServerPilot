@@ -80,26 +80,26 @@ def test_collector_settings_api_requires_supported_value_and_idempotency(build_a
     )
     headers = {"X-ServerPilot-Actor": "bootstrap-admin"}
     with TestClient(app) as client:
-        response = client.get("/api/v1/settings/collector", headers=headers)
+        response = client.get("/api/v2/settings/collector", headers=headers)
         assert response.status_code == 200
         assert response.json()["data"]["interval_seconds"] == 10
 
         response = client.patch(
-            "/api/v1/settings/collector",
+            "/api/v2/settings/collector",
             headers=headers,
             json={"interval_seconds": 5},
         )
         assert response.status_code == 422
 
         response = client.patch(
-            "/api/v1/settings/collector",
+            "/api/v2/settings/collector",
             headers={**headers, "Idempotency-Key": "settings-5"},
             json={"interval_seconds": 7},
         )
         assert response.status_code == 422
 
         response = client.patch(
-            "/api/v1/settings/collector",
+            "/api/v2/settings/collector",
             headers={**headers, "Idempotency-Key": "settings-5"},
             json={"interval_seconds": 5},
         )

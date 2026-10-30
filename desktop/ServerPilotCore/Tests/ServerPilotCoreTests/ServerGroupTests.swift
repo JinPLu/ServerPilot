@@ -501,7 +501,7 @@ import Testing
         try await waitUntil { groupedRecorder.success != nil }
         #expect(groupedRecorder.success == true)
         #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/claims")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v2/claims")
         let groupedPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
         let groupedPayload = try #require(
             try JSONSerialization.jsonObject(with: groupedPayloadBody) as? [String: Any]
@@ -589,7 +589,7 @@ import Testing
         try await waitUntil { createRecorder.success != nil }
         #expect(createRecorder.success == true)
         #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v2/server-groups")
         let createPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
         let createPayload = try #require(
             try JSONSerialization.jsonObject(with: createPayloadBody) as? [String: Any]
@@ -618,7 +618,7 @@ import Testing
         try await waitUntil { updateRecorder.success != nil }
         #expect(updateRecorder.success == true)
         #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
-        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups/lab-a")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v2/server-groups/lab-a")
         let updatePayloadBody = try #require(GroupRouteURLProtocol.lastBody)
         let updatePayload = try #require(
             try JSONSerialization.jsonObject(with: updatePayloadBody) as? [String: Any]
@@ -635,7 +635,7 @@ import Testing
         try await waitUntil { deleteRecorder.success != nil }
         #expect(deleteRecorder.success == true)
         #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "DELETE")
-        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/server-groups/lab-a")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v2/server-groups/lab-a")
     }
 
     @Test func testAddEndpointPayloadIncludesGroupAssignmentAndOverride() async throws {
@@ -676,7 +676,7 @@ import Testing
         try await waitUntil { groupedRecorder.success != nil }
         #expect(groupedRecorder.success == true)
         #expect(GroupRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints")
+        #expect(GroupRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints")
         let groupedPayloadBody = try #require(GroupRouteURLProtocol.lastBody)
         let groupedPayload = try #require(
             try JSONSerialization.jsonObject(with: groupedPayloadBody) as? [String: Any]

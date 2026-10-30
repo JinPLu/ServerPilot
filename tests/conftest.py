@@ -144,7 +144,7 @@ def mcp_agent(build_app, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-un
 
         def snapshot(self, **params):  # type: ignore[no-untyped-def]
             kept = {key: value for key, value in params.items() if value is not None}
-            return parse_broker_response(rest.get("/api/v1/snapshot", params=kept, headers=self.headers))
+            return parse_broker_response(rest.get("/api/v2/snapshot", params=kept, headers=self.headers))
 
         def get(self, path, *, params=None):  # type: ignore[no-untyped-def]
             return parse_broker_response(rest.get(path, params=params, headers=self.headers))

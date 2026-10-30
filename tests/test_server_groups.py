@@ -560,7 +560,7 @@ def test_server_group_rest_routes(build_app) -> None:
     client = TestClient(app)
     headers = {"Idempotency-Key": "api-group", "X-ServerPilot-Actor": "test-admin"}
     created = client.post(
-        "/api/v1/server-groups",
+        "/api/v2/server-groups",
         json={
             "id": "api-group",
             "display_name": "API",
@@ -570,7 +570,7 @@ def test_server_group_rest_routes(build_app) -> None:
         headers=headers,
     )
     assert created.status_code == 200
-    state = client.get("/api/v1/state", headers={"X-ServerPilot-Actor": "test-admin"})
+    state = client.get("/api/v2/state", headers={"X-ServerPilot-Actor": "test-admin"})
     assert state.status_code == 200
     groups = state.json()["data"]["current"]["server_groups"]
     fetched = next(item for item in groups if item["id"] == "api-group")
@@ -579,9 +579,8 @@ def test_server_group_rest_routes(build_app) -> None:
     assert live.json()["capabilities"] == list(API_CAPABILITIES)
     assert "server_group_crud" in live.json()["capabilities"]
     assert "server_groups" not in live.json()["capabilities"]
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "test-admin"})
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "test-admin"})
     assert "server_groups" in snapshot.json()["data"]
-
 
 
 def test_workspace_override_mutation_contract(tmp_path: Path, service, admin) -> None:
@@ -686,7 +685,7 @@ def test_claims_map_group_and_ungrouped_pin(build_app) -> None:
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "test-agent"}
     grouped = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "grouped-claim",
@@ -711,7 +710,7 @@ def test_claims_map_group_and_ungrouped_pin(build_app) -> None:
     assert grouped_lease["state"] == "HELD"
 
     ungrouped = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "ungrouped-claim",
@@ -742,7 +741,7 @@ def test_endpoint_create_inherits_and_overrides_group_workspace(build_app) -> No
     service = app.state.service
     actor_headers = {"X-ServerPilot-Actor": "test-admin"}
     inherited = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "form-inherit",
             "host": "127.0.0.8",
@@ -760,7 +759,7 @@ def test_endpoint_create_inherits_and_overrides_group_workspace(build_app) -> No
     assert form_endpoint["workspace_path_override"] is None
 
     ssh_inherit = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "ssh-inherit-host",
             "host": "ssh-inherit-host",
@@ -778,7 +777,7 @@ def test_endpoint_create_inherits_and_overrides_group_workspace(build_app) -> No
     assert inherited_ssh["workspace_path_override"] is None
 
     ssh_override = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "ssh-override-host",
             "host": "ssh-override-host",
@@ -796,7 +795,7 @@ def test_endpoint_create_inherits_and_overrides_group_workspace(build_app) -> No
     assert overridden["workspace_path_override"] == "/data/ssh-override"
 
     ssh_legacy = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "ssh-legacy-host",
             "host": "ssh-legacy-host",
@@ -821,18 +820,13 @@ def _no_idempotency(service: BrokerService) -> None:
         assert session.scalars(select(IdempotencyRecord)).all() == []
 
 
-
-
-
-
-
 def test_unknown_server_group_id_fails_before_persistence(build_app) -> None:
     app = build_app("unknown-group", inventory_config=grouped_inventory())
     service = app.state.service
     service.ingest_observation(observation(endpoint_id="small-a", count=2))
     actor = service.local_actor("test-agent")
     refused = TestClient(app).post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "missing-group",
@@ -854,35 +848,6 @@ def test_unknown_server_group_id_fails_before_persistence(build_app) -> None:
     _no_idempotency(service)
 
 
-def test_routine_claims_canonicalize_omitted_and_false_same_host(build_app) -> None:
-    app = build_app("routine-same-host")
-    service = app.state.service
-    service.ingest_observation(observation(count=2))
-    client = TestClient(app)
-    for label, constraints in (
-        ("omitted", {"gpu_count": 1, "placement": "pack"}),
-        ("false", {"gpu_count": 1, "same_host": False, "placement": "pack"}),
-    ):
-        claimed = client.post(
-            "/api/v1/routine/claims",
-            json={
-                "project_id": "project-a",
-                "task_ref": f"routine-{label}",
-                "purpose": "legacy one host",
-                "constraints": constraints,
-            },
-            headers={
-                "X-ServerPilot-Actor": "test-agent",
-                "Idempotency-Key": f"routine-{label}",
-            },
-        )
-        assert claimed.status_code == 200, claimed.text
-        body = claimed.json()
-        assert body["lease"]["constraints"]["same_host"] is True
-        hosts = {resource["endpoint"]["id"] for resource in body["lease"]["resources"]}
-        assert hosts == {"endpoint-a"}
-
-
 def test_routine_claims_grouped_omitted_same_host_requires_group(build_app) -> None:
     app = build_app("routine-grouped", inventory_config=grouped_inventory())
     service = app.state.service
@@ -894,7 +859,7 @@ def test_routine_claims_grouped_omitted_same_host_requires_group(build_app) -> N
         ("false", {"gpu_count": 1, "same_host": False, "placement": "pack"}),
     ):
         refused = client.post(
-            "/api/v1/routine/claims",
+            "/api/v2/claims",
             json={
                 "project_id": "project-a",
                 "task_ref": f"need-group-{label}",
@@ -922,7 +887,7 @@ def test_generic_claims_same_host_false_spans_inside_one_group_or_ungrouped_flee
     client = TestClient(grouped)
     headers = {"X-ServerPilot-Actor": "test-agent"}
     refused = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "cross-group",
@@ -937,7 +902,7 @@ def test_generic_claims_same_host_false_spans_inside_one_group_or_ungrouped_flee
     assert grouped.state.service.list_leases(actor)["data"] == []
     _no_idempotency(grouped.state.service)
     intra = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "intra-group",
@@ -960,7 +925,7 @@ def test_generic_claims_same_host_false_spans_inside_one_group_or_ungrouped_flee
     bare.state.service.ingest_observation(observation(endpoint_id="endpoint-a", count=4))
     bare.state.service.ingest_observation(observation(endpoint_id="endpoint-b", count=4))
     spanning = TestClient(bare).post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "ungrouped-span",
@@ -1001,26 +966,6 @@ def test_grouped_multi_host_request_does_not_mix_groups(tmp_path: Path) -> None:
     assert hosts == {"small-a", "small-b"}
 
 
-def test_routine_nodes_greater_than_one_is_validation_error(build_app) -> None:
-    app = build_app("routine-nodes")
-    app.state.service.ingest_observation(observation(count=8))
-    refused = TestClient(app).post(
-        "/api/v1/routine/claims",
-        json={
-            "project_id": "project-a",
-            "task_ref": "routine-nodes",
-            "purpose": "contradictory topology",
-            "constraints": {"gpu_count": 8, "nodes": 2, "gpus_per_node": 4},
-        },
-        headers={"X-ServerPilot-Actor": "test-agent", "Idempotency-Key": "routine-nodes"},
-    )
-    assert refused.status_code == 422, refused.text
-    assert refused.json()["error"]["code"] == "validation_error"
-    actor = app.state.service.local_actor("test-agent")
-    assert app.state.service.list_leases(actor)["data"] == []
-    _no_idempotency(app.state.service)
-
-
 def test_routine_exact_grouped_pin_requires_group(build_app) -> None:
     app = build_app("routine-exact", inventory_config=grouped_inventory())
     service = app.state.service
@@ -1030,7 +975,7 @@ def test_routine_exact_grouped_pin_requires_group(build_app) -> None:
         item["id"] for item in service.list_gpus(actor)["data"] if item["endpoint_id"] == "small-a"
     )
     refused = TestClient(app).post(
-        "/api/v1/routine/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "routine-exact",
@@ -1056,7 +1001,7 @@ def test_ungrouped_create_requires_workspace_and_typed_path_is_override(build_ap
     service = app.state.service
     headers = {"X-ServerPilot-Actor": "test-admin"}
     ungrouped_blank = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "blank-ungrouped",
             "host": "127.0.0.9",
@@ -1073,7 +1018,7 @@ def test_ungrouped_create_requires_workspace_and_typed_path_is_override(build_ap
         for item in service.list_endpoints(service.local_actor("test-admin"))["data"]
     )
     stock = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "typed-stock",
             "host": "127.0.0.10",

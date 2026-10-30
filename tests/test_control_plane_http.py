@@ -19,7 +19,7 @@ class _LoopbackHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:
         if self.path == "/health/live":
             body = b'{"status":"live","schema_version":"v1"}'
-        elif self.path == "/api/v1/snapshot":
+        elif self.path == "/api/v2/snapshot":
             body = b'{"schema_version":"v1","data":[]}'
         else:
             self.send_error(404)
@@ -109,7 +109,7 @@ def test_loopback_clients_ignore_proxy_environment(
     assert live.status_code == 200
     assert live.json() == {"status": "live", "schema_version": "v1"}
 
-    snapshot = BrokerClient(loopback_url).get("/api/v1/snapshot")
+    snapshot = BrokerClient(loopback_url).get("/api/v2/snapshot")
     assert snapshot == {"schema_version": "v1", "data": []}
 
     probed = daemon._probe_json(loopback_url, "/health/live")

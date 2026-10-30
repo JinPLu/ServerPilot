@@ -50,7 +50,7 @@ public final class URLSessionBrokerSnapshotClient: BrokerSnapshotClient {
     }
 
     public func snapshot(actorID: String) async throws -> BrokerSnapshot {
-        var request = URLRequest(url: baseURL.appendingPathComponent("api/v1/state"))
+        var request = URLRequest(url: baseURL.appendingPathComponent("api/v2/state"))
         request.timeoutInterval = 6
         request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
         let (data, response) = try await session.data(for: request)
@@ -88,7 +88,7 @@ public final class URLSessionEndpointTelemetryHistoryClient: BrokerEndpointTelem
         actorID: String
     ) async throws -> EndpointTelemetryHistory {
         let endpointURL = baseURL
-            .appendingPathComponent("api/v1/endpoints")
+            .appendingPathComponent("api/v2/endpoints")
             .appendingPathComponent(endpointID)
             .appendingPathComponent("history")
         var components = URLComponents(url: endpointURL, resolvingAgainstBaseURL: false)
@@ -418,7 +418,7 @@ public final class BrokerStore: ObservableObject {
         }
         // Deterministic fixtures already carry an in-memory value and have no
         // REST endpoint. Keep the setting visible but read-only in that mode.
-        guard let url = baseURL?.appendingPathComponent("api/v1/settings/collector")
+        guard let url = baseURL?.appendingPathComponent("api/v2/settings/collector")
         else {
             collectorSettingsLoading = false
             return
@@ -451,7 +451,7 @@ public final class BrokerStore: ObservableObject {
             mcpEntryLoading = false
             return
         }
-        guard let url = baseURL?.appendingPathComponent("api/v1/mcp-entry") else {
+        guard let url = baseURL?.appendingPathComponent("api/v2/mcp-entry") else {
             mcpEntryLoading = false
             return
         }
@@ -490,7 +490,7 @@ public final class BrokerStore: ObservableObject {
         }
         collectorSettingsLoading = true
         performMutationWithPayload(
-            path: "api/v1/settings/collector",
+            path: "api/v2/settings/collector",
             method: "PATCH",
             payload: ["interval_seconds": intervalSeconds]
         ) { [weak self] payload, error in
@@ -531,7 +531,7 @@ public final class BrokerStore: ObservableObject {
 
     public func setConnection(_ endpoint: EndpointRecord, enabled: Bool) {
         performMutationWithPayload(
-            path: "api/v1/endpoints/\(endpoint.id)/connection", method: "PUT", payload: ["enabled": enabled]
+            path: "api/v2/endpoints/\(endpoint.id)/connection", method: "PUT", payload: ["enabled": enabled]
         ) { [weak self] _, error in
             if let error { self?.errorMessage = error }
             self?.reload()
@@ -553,7 +553,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         performMutationWithPayload(
-            path: "api/v1/claims",
+            path: "api/v2/claims",
             payload: [
                 "project_id": project,
                 "task_ref": task,
@@ -598,7 +598,7 @@ public final class BrokerStore: ObservableObject {
         // outcome is known here rather than "正在确认状态" and a red row a
         // minute later.
         performMutationWithPayload(
-            path: "api/v1/endpoints",
+            path: "api/v2/endpoints",
             payload: Self.endpointCreatePayload(draft)
         ) { [weak self] payload, error in
             guard let self else { return }
@@ -669,7 +669,7 @@ public final class BrokerStore: ObservableObject {
         }
         mutatingEndpointIDs.insert(endpointID)
         performMutationWithPayload(
-            path: "api/v1/endpoints/\(endpointID)/leases/\(leaseID)/release-empty",
+            path: "api/v2/endpoints/\(endpointID)/leases/\(leaseID)/release-empty",
             method: "POST",
             payload: [:]
         ) { [weak self] _, error in
@@ -754,7 +754,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         performMutationWithPayload(
-            path: "api/v1/endpoints/\(endpoint.id)",
+            path: "api/v2/endpoints/\(endpoint.id)",
             method: "DELETE",
             payload: [:]
         ) { [weak self] _, error in
@@ -782,7 +782,7 @@ public final class BrokerStore: ObservableObject {
         }
         performEndpointMutation(
             endpoint,
-            path: "api/v1/endpoints/\(endpoint.id)",
+            path: "api/v2/endpoints/\(endpoint.id)",
             method: "PATCH",
             payload: Self.endpointUpdatePayload(draft),
             successMessage: "已更新服务器设置，正在确认状态。",
@@ -803,7 +803,7 @@ public final class BrokerStore: ObservableObject {
         }
         performEndpointMutation(
             endpoint,
-            path: "api/v1/endpoints/\(endpoint.id)/keepalive",
+            path: "api/v2/endpoints/\(endpoint.id)/keepalive",
             method: "POST",
             payload: ["enabled": enabled],
             successMessage: enabled
@@ -824,7 +824,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         performMutation(
-            path: "api/v1/server-groups",
+            path: "api/v2/server-groups",
             payload: [
                 "id": draft.id,
                 "display_name": draft.displayName,
@@ -849,7 +849,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         performMutationWithPayload(
-            path: "api/v1/server-groups/\(group.id)",
+            path: "api/v2/server-groups/\(group.id)",
             method: "PATCH",
             payload: [
                 "display_name": draft.displayName,
@@ -881,7 +881,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         performMutationWithPayload(
-            path: "api/v1/server-groups/\(group.id)",
+            path: "api/v2/server-groups/\(group.id)",
             method: "DELETE",
             payload: [:]
         ) { [weak self] _, error in
@@ -1023,7 +1023,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         guard let url = baseURL?
-            .appendingPathComponent("api/v1/operator/leases")
+            .appendingPathComponent("api/v2/operator/leases")
             .appendingPathComponent(lease.id)
             .appendingPathComponent("release")
         else {
@@ -1095,7 +1095,7 @@ public final class BrokerStore: ObservableObject {
         }
         reassigningLeaseIDs.insert(lease.id)
         performMutationWithPayload(
-            path: "api/v1/operator/leases/\(lease.id)/gpus",
+            path: "api/v2/operator/leases/\(lease.id)/gpus",
             method: "PATCH",
             payload: ["gpu_ids": gpuIDs],
             desktopClient: true
@@ -1134,7 +1134,7 @@ public final class BrokerStore: ObservableObject {
     }
 
     public func requestObservationProfiles() {
-        guard let url = baseURL?.appendingPathComponent("api/v1/observation-profiles") else {
+        guard let url = baseURL?.appendingPathComponent("api/v2/observation-profiles") else {
             return
         }
         var request = URLRequest(url: url)
@@ -1554,7 +1554,7 @@ public final class BrokerStore: ObservableObject {
     /// the Python client budgets this call.
     static func mutationTimeout(forPath path: String) -> TimeInterval {
         if path.hasSuffix("/connection") { return 70 }
-        return path == "api/v1/endpoints" ? 60 : 10
+        return path == "api/v2/endpoints" ? 60 : 10
     }
 
     private func performMutationWithPayload(

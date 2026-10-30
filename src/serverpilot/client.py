@@ -31,9 +31,8 @@ CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS = 60.0
 # budget is a ceiling on waiting, not a wait: a healthy loopback call returns
 # in milliseconds whichever entry it matches.
 _CONTROL_PLANE_PATH_TIMEOUTS = {
-    "/api/v1/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
-    "/api/v1/routine/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
-    "/api/v1/endpoints": CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS,
+    "/api/v2/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+    "/api/v2/endpoints": CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS,
     "/api/v2/leases": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
 }
 
@@ -255,7 +254,7 @@ class BrokerClient:
         deadline = time.monotonic() + timeout_seconds
         previous_revision = self._last_state_revision
         while True:
-            payload = self.get("/api/v1/state")
+            payload = self.get("/api/v2/state")
             revision = payload.get("snapshot_revision")
             if isinstance(revision, bool) or not isinstance(revision, int):
                 raise BrokerClientError("broker state returned an invalid snapshot_revision")
@@ -328,10 +327,10 @@ class BrokerClient:
             params["endpoint_id"] = endpoint_id
         if state:
             params["state"] = state
-        return self.get("/api/v1/snapshot", params=params)
+        return self.get("/api/v2/snapshot", params=params)
 
     def endpoints(self) -> dict[str, Any]:
-        return self.get("/api/v1/endpoints")
+        return self.get("/api/v2/endpoints")
 
     def endpoint_history(
         self,
@@ -341,7 +340,7 @@ class BrokerClient:
         points: int = 120,
     ) -> dict[str, Any]:
         return self.get(
-            f"/api/v1/endpoints/{endpoint_id}/history",
+            f"/api/v2/endpoints/{endpoint_id}/history",
             params={"window_seconds": window_seconds, "points": points},
         )
 
@@ -362,11 +361,11 @@ class BrokerClient:
         if endpoint_id:
             params["endpoint_id"] = endpoint_id
         # The REST GPU projection is already revision-consistent. Ask
-        # /api/v1/gpus for that list; do not derive GPUs from /api/v1/state.
-        return self.get("/api/v1/gpus", params=params)
+        # /api/v2/gpus for that list; do not derive GPUs from /api/v2/state.
+        return self.get("/api/v2/gpus", params=params)
 
     def leases(self, *, project_id: str | None = None) -> dict[str, Any]:
-        payload = self.get("/api/v1/leases")
+        payload = self.get("/api/v2/leases")
         leases = payload.get("data")
         if not isinstance(leases, list):
             raise BrokerClientError("broker leases response is invalid")

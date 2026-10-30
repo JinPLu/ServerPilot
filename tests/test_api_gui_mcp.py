@@ -43,7 +43,7 @@ def test_actual_request_body_limit_rejects_stream_without_content_length(build_a
     client = TestClient(app, raise_server_exceptions=False)
 
     response = client.post(
-        "/api/v1/routine/claims",
+        "/api/v2/claims",
         content=iter([b'{"project_id":"project-a",', b'"padding":"' + b"x" * 128 + b'"}']),
         headers={
             "Content-Type": "application/json",
@@ -105,12 +105,12 @@ def test_api_gui_and_idempotency(build_app) -> None:
             "min_total_vram_mib": 80 * 1024,
         },
     }
-    first = client.post("/api/v1/claims", json=payload, headers=headers)
-    second = client.post("/api/v1/claims", json=payload, headers=headers)
+    first = client.post("/api/v2/claims", json=payload, headers=headers)
+    second = client.post("/api/v2/claims", json=payload, headers=headers)
     assert first.status_code == second.status_code == 200
     assert first.json() == second.json()
     assert first.json()["lease"]["duration_seconds"] == 8 * 60 * 60
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "test-agent"})
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "test-agent"})
     assert snapshot.status_code == 200
     assert snapshot.json()["data"]["gpus"][0]["state"] == "HELD"
     capabilities = client.get("/health/live").json()["capabilities"]
@@ -119,20 +119,20 @@ def test_api_gui_and_idempotency(build_app) -> None:
     assert "server_deletion" not in capabilities
     assert {"endpoint_update", "endpoint_keepalive", "telemetry_recent_averages"}.issubset(capabilities)
     compact = client.get(
-        "/api/v1/gpus?compact=true",
+        "/api/v2/gpus?compact=true",
         headers={"X-ServerPilot-Actor": "test-agent"},
     )
     assert compact.status_code == 200
     assert "processes" not in compact.json()["data"][0]
     assert compact.json()["data"][0]["owner"] == "test-agent"
     endpoint_history = client.get(
-        "/api/v1/endpoints/endpoint-a/history?window_seconds=3600&points=120",
+        "/api/v2/endpoints/endpoint-a/history?window_seconds=3600&points=120",
         headers={"X-ServerPilot-Actor": "test-agent"},
     )
     assert endpoint_history.status_code == 200
     assert endpoint_history.json()["data"]["point_count"] <= 120
     invalid_endpoint_history = client.get(
-        "/api/v1/endpoints/endpoint-a/history?window_seconds=300",
+        "/api/v2/endpoints/endpoint-a/history?window_seconds=300",
         headers={"X-ServerPilot-Actor": "test-agent"},
     )
     assert invalid_endpoint_history.status_code == 422
@@ -220,15 +220,15 @@ def test_operator_release_can_correct_another_agents_lease_but_generic_release_c
     headers = {"X-ServerPilot-Actor": "human", "Idempotency-Key": "operator-release"}
 
     forbidden = client.post(
-        f"/api/v1/leases/{lease_id}/release",
+        f"/api/v2/leases/{lease_id}/release",
         headers=headers,
-        json={"reason": "desktop release"},
+        json={},
     )
     assert forbidden.status_code == 403
     assert forbidden.json()["error"]["code"] == "lease_forbidden"
 
     unauthorized_operator_route = client.post(
-        f"/api/v1/operator/leases/{lease_id}/release",
+        f"/api/v2/operator/leases/{lease_id}/release",
         headers=headers,
         json={"reason": "desktop release"},
     )
@@ -236,7 +236,7 @@ def test_operator_release_can_correct_another_agents_lease_but_generic_release_c
     assert unauthorized_operator_route.json()["error"]["code"] == "operator_client_required"
 
     released = client.post(
-        f"/api/v1/operator/leases/{lease_id}/release",
+        f"/api/v2/operator/leases/{lease_id}/release",
         headers={**headers, "X-ServerPilot-Client": "desktop-app"},
         json={"reason": "desktop release"},
     )
@@ -277,14 +277,14 @@ def test_operator_reassignment_uses_a_separate_app_correction_route(
     }
 
     missing_app_marker = client.patch(
-        f"/api/v1/operator/leases/{lease['id']}/gpus",
+        f"/api/v2/operator/leases/{lease['id']}/gpus",
         headers=headers,
         json={"gpu_ids": [target_gpu]},
     )
     assert missing_app_marker.status_code == 403
     assert missing_app_marker.json()["error"]["code"] == "operator_client_required"
     moved = client.patch(
-        f"/api/v1/operator/leases/{lease['id']}/gpus",
+        f"/api/v2/operator/leases/{lease['id']}/gpus",
         headers={**headers, "X-ServerPilot-Client": "desktop-app"},
         json={"gpu_ids": [target_gpu]},
     )
@@ -300,7 +300,7 @@ def test_snapshot_api_uses_latest_complete_gpu_set(build_app) -> None:
     service.ingest_observation(observation(gpu_uuids=["GPU-new-0", "GPU-stays"]))
 
     client = TestClient(app)
-    snapshot = client.get("/api/v1/snapshot", headers={"X-ServerPilot-Actor": "test-agent"})
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "test-agent"})
 
     assert snapshot.status_code == 200
     data = snapshot.json()["data"]
@@ -319,7 +319,7 @@ def test_control_plane_state_api_exposes_current_and_history_contract(
     app.state.service.ingest_observation(observation(count=1))
     client = TestClient(app)
 
-    response = client.get("/api/v1/state", headers={"X-ServerPilot-Actor": "test-agent"})
+    response = client.get("/api/v2/state", headers={"X-ServerPilot-Actor": "test-agent"})
 
     assert response.status_code == 200
     payload = response.json()
@@ -370,7 +370,7 @@ def test_lease_api_suppresses_executable_resources_when_claimed_gpu_absent(
     service.ingest_observation(observation(gpu_uuids=["GPU-new"]))
 
     client = TestClient(app)
-    leases = client.get("/api/v1/leases", headers={"X-ServerPilot-Actor": "test-agent"})
+    leases = client.get("/api/v2/leases", headers={"X-ServerPilot-Actor": "test-agent"})
 
     assert leases.status_code == 200
     lease = leases.json()["data"][0]
@@ -384,7 +384,7 @@ def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
     app.state.service.ingest_observation(observation(count=1))
     client = TestClient(app)
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "s",
             "task_ref": "api-claim",
@@ -401,7 +401,7 @@ def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
     # A claim either fits now or answers no_capacity; there is no request row
     # and no route that would create one.
     exhausted = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "s",
             "task_ref": "second-claim-no-capacity",
@@ -414,12 +414,12 @@ def test_api_claim_starts_held_without_a_duration_estimate(build_app) -> None:
     assert exhausted.json()["error"]["code"] == "no_capacity"
     assert exhausted.json()["error"]["details"]["excluded"] == {"held": 1}
 
-    for gone in ("/api/v1/requests", "/api/v1/requests/missing-request/cancel"):
+    for gone in ("/api/v2/requests", "/api/v2/requests/missing-request/cancel"):
         assert (
             client.post(gone, json={}, headers={"X-ServerPilot-Actor": "claim-agent"}).status_code
             == 404
         )
-    assert client.get("/api/v1/requests", headers={"X-ServerPilot-Actor": "claim-agent"}).status_code == 404
+    assert client.get("/api/v2/requests", headers={"X-ServerPilot-Actor": "claim-agent"}).status_code == 404
     assert client.get("/metrics").status_code == 404
 
 
@@ -441,7 +441,7 @@ def test_api_claim_bootstraps_an_empty_project_registry(build_app) -> None:
     client = TestClient(app)
 
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "x",
             "task_ref": "unregistered-project",
@@ -465,7 +465,7 @@ def test_coordination_api_and_observed_binding(build_app) -> None:
         "Idempotency-Key": "coordination-claim",
     }
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "coordination-api-run",
@@ -475,22 +475,11 @@ def test_coordination_api_and_observed_binding(build_app) -> None:
         headers=claim_headers,
     )
     assert claimed.status_code == 200
-    lease_id = claimed.json()["lease"]["id"]
     gpu = service.list_gpus(service.local_actor("coordination-agent"))["data"][0]
     service.ingest_observation(observation(count=1, processes=[process_for_gpu(gpu["gpu_uuid"])]))
 
-    bound = client.post(
-        f"/api/v1/leases/{lease_id}/bind-observed-workload",
-        json={},
-        headers={
-            "X-ServerPilot-Actor": "coordination-agent",
-            "Idempotency-Key": "coordination-bind",
-        },
-    )
-    assert bound.status_code == 200
-    assert bound.json()["lease"]["workloads"][0]["run_id"] == f"explicit:lease:{lease_id}"
     current = client.get(
-        "/api/v1/state",
+        "/api/v2/state",
         headers={"X-ServerPilot-Actor": "coordination-agent"},
     ).json()["data"]["current"]
     host = current["host_capacity"][0]["capacity"]
@@ -505,7 +494,7 @@ def test_endpoint_project_grant_route_is_not_exposed(build_app) -> None:
     app = build_app("endpoint-project")
     client = TestClient(app)
     response = client.post(
-        "/api/v1/endpoints/endpoint-a/projects",
+        "/api/v2/endpoints/endpoint-a/projects",
         json={"project_id": "storyboard"},
         headers={"X-ServerPilot-Actor": "endpoint-admin", "Idempotency-Key": "unused"},
     )
@@ -518,7 +507,7 @@ def test_collector_observation_ingestion_is_not_a_public_actor_route(
     app = build_app("collector-private")
     client = TestClient(app)
     response = client.post(
-        "/api/v1/internal/observations",
+        "/api/v2/internal/observations",
         json=observation(count=1).model_dump(mode="json"),
         headers={"X-ServerPilot-Actor": "arbitrary-actor"},
     )
@@ -532,7 +521,7 @@ def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_lea
     client = TestClient(app)
     actor = {"X-ServerPilot-Actor": "endpoint-admin"}
     created = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json={
             "id": "endpoint-delete-me",
             "host": "127.0.0.1",
@@ -544,13 +533,13 @@ def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_lea
     )
     assert created.status_code == 200
     deleted = client.delete(
-        "/api/v1/endpoints/endpoint-delete-me",
+        "/api/v2/endpoints/endpoint-delete-me",
         headers={**actor, "Idempotency-Key": "endpoint-delete"},
     )
     assert deleted.status_code == 200
     assert deleted.json()["changed"] is True
     assert deleted.json()["endpoint_id"] == "endpoint-delete-me"
-    listed = client.get("/api/v1/endpoints", headers=actor)
+    listed = client.get("/api/v2/endpoints", headers=actor)
     endpoints = {endpoint["id"]: endpoint for endpoint in listed.json()["data"]}
     assert "endpoint-delete-me" not in endpoints
     assert "endpoint-b" in endpoints
@@ -558,7 +547,7 @@ def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_lea
     service = app.state.service
     service.ingest_observation(observation(endpoint_id="endpoint-a", count=1))
     claimed = client.post(
-        "/api/v1/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "keep-endpoint-a",
@@ -570,12 +559,12 @@ def test_endpoint_delete_rest_route_removes_idle_endpoint_and_rejects_active_lea
     assert claimed.status_code == 200
     assert claimed.json()["lease"] is not None
     blocked = client.delete(
-        "/api/v1/endpoints/endpoint-a",
+        "/api/v2/endpoints/endpoint-a",
         headers={**actor, "Idempotency-Key": "endpoint-a-delete-blocked"},
     )
     assert blocked.status_code == 409
     assert blocked.json()["error"]["code"] == "endpoint_has_active_leases"
-    still_listed = client.get("/api/v1/endpoints", headers=actor)
+    still_listed = client.get("/api/v2/endpoints", headers=actor)
     assert "endpoint-a" in {endpoint["id"] for endpoint in still_listed.json()["data"]}
 
 
@@ -593,32 +582,32 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
         "workspace_path": "/srv/endpoint-lifecycle",
     }
     created = client.post(
-        "/api/v1/endpoints", json=endpoint, headers={**actor, "Idempotency-Key": "endpoint-create"}
+        "/api/v2/endpoints", json=endpoint, headers={**actor, "Idempotency-Key": "endpoint-create"}
     )
     assert created.status_code == 200
     assert created.json()["endpoint"]["observation_profile"] == "linux"
     assert created.json()["endpoint"]["workspace_path"] == "/srv/endpoint-lifecycle"
     duplicate = client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json=endpoint,
         headers={**actor, "Idempotency-Key": "endpoint-create-new"},
     )
     assert duplicate.status_code == 409
     identity_patch = client.patch(
-        "/api/v1/endpoints/endpoint-lifecycle",
+        "/api/v2/endpoints/endpoint-lifecycle",
         json={"host": "127.0.0.2"},
         headers={**actor, "Idempotency-Key": "endpoint-host-change"},
     )
     assert identity_patch.status_code == 422
     updated = client.patch(
-        "/api/v1/endpoints/endpoint-lifecycle",
+        "/api/v2/endpoints/endpoint-lifecycle",
         json={"ssh_alias": "lab-script", "labels": ["lab"]},
         headers={**actor, "Idempotency-Key": "endpoint-update"},
     )
     assert updated.status_code == 200
     assert updated.json()["endpoint"]["ssh_alias"] == "lab-script"
     workspace_updated = client.patch(
-        "/api/v1/endpoints/endpoint-lifecycle",
+        "/api/v2/endpoints/endpoint-lifecycle",
         json={"workspace_path": "/srv/endpoint-lifecycle-updated"},
         headers={**actor, "Idempotency-Key": "endpoint-workspace-update"},
     )
@@ -627,7 +616,7 @@ def test_endpoint_rest_uses_explicit_create_and_update_without_delete(
         workspace_updated.json()["endpoint"]["workspace_path"] == "/srv/endpoint-lifecycle-updated"
     )
     later_update = client.patch(
-        "/api/v1/endpoints/endpoint-lifecycle",
+        "/api/v2/endpoints/endpoint-lifecycle",
         json={"ssh_user": "other"},
         headers={**actor, "Idempotency-Key": "endpoint-update-later"},
     )
@@ -639,7 +628,7 @@ def test_removed_maintenance_and_delete_routes(build_app) -> None:
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "human", "Idempotency-Key": "endpoint-maintenance"}
     created = client.post(
-        "/api/v1/maintenance",
+        "/api/v2/maintenance",
         json={
             "endpoint_id": "endpoint-b",
             "start_at": "2026-07-20T00:00:00+00:00",
@@ -656,7 +645,7 @@ def test_project_creation_route_and_gui_are_not_exposed(build_app) -> None:
     client = TestClient(app)
 
     response = client.post(
-        "/api/v1/projects",
+        "/api/v2/projects",
         json={"id": "storyboard", "display_name": "Storyboard"},
         headers={"X-ServerPilot-Actor": "project-admin", "Idempotency-Key": "unused"},
     )
@@ -842,7 +831,7 @@ def test_app_starts_with_projects_and_no_endpoints(build_app) -> None:
     app = build_app("empty", inventory_config=inventory)
     client = TestClient(app)
     assert client.get("/").status_code == 404
-    response = client.get("/api/v1/endpoints", headers={"X-ServerPilot-Actor": "agent"})
+    response = client.get("/api/v2/endpoints", headers={"X-ServerPilot-Actor": "agent"})
     assert response.status_code == 200
     assert response.json()["data"] == []
 
@@ -980,7 +969,7 @@ def _register(client: TestClient, server_id: str, **extra: object):  # noqa: ANN
         **extra,
     }
     return client.post(
-        "/api/v1/endpoints",
+        "/api/v2/endpoints",
         json=body,
         headers={"X-ServerPilot-Actor": "operator", "Idempotency-Key": f"create-{server_id}"},
     )
@@ -1010,7 +999,7 @@ def test_registering_a_host_reports_that_it_could_not_be_reached(build_app, inve
     assert "Host key verification failed" in result["error"]
     # The endpoint is kept: a host key is the operator's to fix, and the next
     # cycle picks the machine up with no second registration.
-    listed = client.get("/api/v1/endpoints", headers={"X-ServerPilot-Actor": "operator"})
+    listed = client.get("/api/v2/endpoints", headers={"X-ServerPilot-Actor": "operator"})
     assert "server-unreachable" in {item["id"] for item in listed.json()["data"]}
 
 
@@ -1045,7 +1034,7 @@ def test_a_registered_host_can_join_a_group_without_the_desktop_app(build_app, i
     client = TestClient(app)
     actor = {"X-ServerPilot-Actor": "operator"}
     client.post(
-        "/api/v1/server-groups",
+        "/api/v2/server-groups",
         json={
             "id": "baidu-baige",
             "display_name": "Baidu Baige",

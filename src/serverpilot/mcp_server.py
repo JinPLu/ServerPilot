@@ -141,7 +141,7 @@ class _AsyncBroker:
             params["endpoint_id"] = endpoint_id
         if state:
             params["state"] = state
-        return await self.get("/api/v1/snapshot", params=params)
+        return await self.get("/api/v2/snapshot", params=params)
 
 
 def _broker(actor: str | None) -> BrokerClient | _AsyncBroker:
@@ -1286,7 +1286,7 @@ async def gpu_server(
             if not host or not workspace_path:
                 raise ValueError("adding a server needs host and workspace_path")
             generated = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96] + f"-p{port}"
-            return {"ok": True, **await _client_call(client, "post", "/api/v1/endpoints", {
+            return {"ok": True, **await _client_call(client, "post", "/api/v2/endpoints", {
                 "id": server_id or generated, "host": host, "port": port,
                 "ssh_user": ssh_user or "root", "ssh_alias": ssh_alias,
                 "workspace_path": workspace_path, "server_group_id": server_group_id,
@@ -1304,7 +1304,7 @@ async def gpu_server(
         if not body:
             raise ValueError("updating a server needs at least one field")
         return {"ok": True, **await _client_call(
-            client, "patch", f"/api/v1/endpoints/{server_id}", body, idempotency_key=replay_key
+            client, "patch", f"/api/v2/endpoints/{server_id}", body, idempotency_key=replay_key
         )}
     except BrokerClientError as exc:
         return _refusal(exc)

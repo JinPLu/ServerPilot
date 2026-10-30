@@ -176,18 +176,6 @@ class RequestCreate(StrictModel):
         return self
 
 
-class LeaseBind(StrictModel):
-    run_id: str = Field(min_length=1, max_length=255)
-    process_keys: list[str] = Field(default_factory=list)
-
-    @field_validator("process_keys")
-    @classmethod
-    def process_key_count(cls, value: list[str]) -> list[str]:
-        if len(value) > 1024:
-            raise ValueError("too many process keys")
-        return value
-
-
 class LeaseObservedBind(StrictModel):
     """Bind every fresh observed process on a lease to one already-started run."""
 

@@ -181,7 +181,7 @@ def test_mcp_entry_endpoint_returns_resolved_entry(
         assert "mcp_entry" in live.json()["capabilities"]
         assert "mcp_entry" in API_CAPABILITIES
 
-        response = client.get("/api/v1/mcp-entry", headers=headers)
+        response = client.get("/api/v2/mcp-entry", headers=headers)
         assert response.status_code == 200
         payload = response.json()
         assert payload["data"]["available"] is True
@@ -203,7 +203,7 @@ def test_mcp_entry_endpoint_returns_not_found_instead_of_500(
     headers = {"X-ServerPilot-Actor": "desktop-app"}
 
     with _client(tmp_path, inventory) as client:
-        response = client.get("/api/v1/mcp-entry", headers=headers)
+        response = client.get("/api/v2/mcp-entry", headers=headers)
         assert response.status_code == 200
         payload = response.json()["data"]
         assert payload["available"] is False
@@ -223,7 +223,7 @@ def test_mcp_entry_endpoint_uses_packaged_sibling(
     monkeypatch.setattr(mcp_entry.sys, "executable", str(python))
 
     with _client(tmp_path, inventory) as client:
-        response = client.get("/api/v1/mcp-entry", headers={"X-ServerPilot-Actor": "desktop-app"})
+        response = client.get("/api/v2/mcp-entry", headers={"X-ServerPilot-Actor": "desktop-app"})
         assert response.status_code == 200
         payload = response.json()["data"]
         assert payload["available"] is True

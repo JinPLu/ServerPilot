@@ -26,7 +26,7 @@ def test_control_plane_state_route_groups_current_and_history(build_app) -> None
     service.create_request(actor, _request("state-lease"), idempotency_key="state-lease")
 
     response = TestClient(app).get(
-        "/api/v1/state",
+        "/api/v2/state",
         headers={"X-ServerPilot-Actor": "state-agent"},
     )
 
@@ -83,12 +83,12 @@ def test_control_plane_state_has_no_include_advanced_switch(build_app) -> None:
     client = TestClient(app)
     headers = {"X-ServerPilot-Actor": "state-agent"}
 
-    payload = client.get("/api/v1/state", headers=headers).json()["data"]
+    payload = client.get("/api/v2/state", headers=headers).json()["data"]
     assert payload["history"] == {}
     parameters = (
         app.openapi()
         .get("paths", {})
-        .get("/api/v1/state", {})
+        .get("/api/v2/state", {})
         .get("get", {})
         .get("parameters", [])
     )

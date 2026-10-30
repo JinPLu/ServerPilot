@@ -131,7 +131,7 @@ def test_claim_applies_plugin_once_on_no_capacity(
     )
     client = TestClient(app)
     response = client.post(
-        "/api/v1/routine/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "need-plugin",
@@ -336,7 +336,7 @@ def test_claim_applies_plugin_when_only_server_group_is_selected(
     )
     client = TestClient(app)
     response = client.post(
-        "/api/v1/routine/claims",
+        "/api/v2/claims",
         json={
             "project_id": "project-a",
             "task_ref": "need-group-plugin",

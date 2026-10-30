@@ -299,7 +299,7 @@ import Testing
 
         let snapshot = try await client.snapshot(actorID: "tester")
 
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/state")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/state")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
         #expect(snapshot.snapshotRevision == 101)
         #expect(snapshot.summary.totalGPUs == 1)
@@ -354,7 +354,7 @@ import Testing
 
         let history = try await client.history(endpointID: "gpu-node-01", range: .oneHour, actorID: "tester")
 
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/gpu-node-01/history")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints/gpu-node-01/history")
         #expect(StateRouteURLProtocol.lastRequest?.url?.query == "window_seconds=3600&points=120")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
         #expect(history.endpointID == "gpu-node-01")
@@ -726,7 +726,7 @@ import Testing
         try await waitUntil { updateRecorder.success != nil }
         #expect(updateRecorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints/fixture-1")
         let updateBody = try #require(StateRouteURLProtocol.lastBody)
         let updatePayload = try #require(try JSONSerialization.jsonObject(with: updateBody) as? [String: Any])
         #expect(updatePayload["ssh_user"] as? String == "collector")
@@ -741,7 +741,7 @@ import Testing
         try await waitUntil { keepaliveRecorder.success != nil }
         #expect(keepaliveRecorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1/keepalive")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints/fixture-1/keepalive")
         let keepaliveBody = try #require(StateRouteURLProtocol.lastBody)
         let keepalivePayload = try #require(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
         #expect(keepalivePayload["enabled"] as? Bool == true)
@@ -758,7 +758,7 @@ import Testing
         try await waitUntil { conflictRecorder.success != nil }
         #expect(conflictRecorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1/leases/lease-conflict/release-empty")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints/fixture-1/leases/lease-conflict/release-empty")
 
         let deleteRecorder = CompletionRecorder()
         store.deleteEndpoints([endpoint]) { result in
@@ -768,7 +768,7 @@ import Testing
         try await waitUntil { deleteRecorder.success != nil }
         #expect(deleteRecorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "DELETE")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/endpoints/fixture-1")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/endpoints/fixture-1")
 
     }
 
@@ -811,7 +811,7 @@ import Testing
         try await waitUntil { recorder.success != nil }
         #expect(recorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/operator/leases/lease-manual-move/gpus")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/operator/leases/lease-manual-move/gpus")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client") == "desktop-app")
         let body = try #require(StateRouteURLProtocol.lastBody)
         let payload = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
@@ -858,7 +858,7 @@ import Testing
         try await waitUntil { recorder.success != nil }
         #expect(recorder.success == true)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "POST")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/operator/leases/lease-owned-by-agent/release")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/operator/leases/lease-owned-by-agent/release")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "human")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Client") == "desktop-app")
     }
@@ -892,7 +892,7 @@ import Testing
         store.requestCollectorSettings()
         try await waitUntil { store.collectorSettings?.intervalSeconds == 10 }
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "GET")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/settings/collector")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/settings/collector")
 
         StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
             "snapshot_revision": 102,
@@ -912,7 +912,7 @@ import Testing
         #expect(store.collectorSettings?.intervalSeconds == 5)
         #expect(store.collectorSettings?.staleAfterSeconds == 15)
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "PATCH")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/settings/collector")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/settings/collector")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "Idempotency-Key") != nil)
     }
 
@@ -991,7 +991,7 @@ import Testing
         store.requestMcpEntry()
         try await waitUntil { store.mcpEntry?.available == true }
         #expect(StateRouteURLProtocol.lastRequest?.httpMethod == "GET")
-        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v1/mcp-entry")
+        #expect(StateRouteURLProtocol.lastRequest?.url?.path == "/api/v2/mcp-entry")
         #expect(StateRouteURLProtocol.lastRequest?.value(forHTTPHeaderField: "X-ServerPilot-Actor") == "tester")
         #expect(store.mcpEntry?.command == "/opt/serverpilot/bin/serverpilot-mcp")
         #expect(store.mcpEntry?.configJSON?.contains("\"mcpServers\"") == true)
@@ -1101,7 +1101,7 @@ import Testing
         #expect(recorder.success == true)
         #expect(recorder.message == targets.map(\.id).joined(separator: ","))
         #expect(StateRouteURLProtocol.requests.filter { $0.httpMethod == "DELETE" }.map { "DELETE \($0.url?.path ?? "")" }
-            == targets.map { "DELETE /api/v1/endpoints/\($0.id)" })
+            == targets.map { "DELETE /api/v2/endpoints/\($0.id)" })
         #expect(store.notice == "已从本机控制面移除 2 台服务器。")
         #expect(store.mutatingEndpointIDs.isEmpty)
     }
@@ -1760,7 +1760,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         // a local write. The app used to give every mutation ten seconds, so
         // adding a server would have timed out while the control plane was
         // still connecting to it.
-        #expect(BrokerStore.mutationTimeout(forPath: "api/v1/endpoints") > 45)
-        #expect(BrokerStore.mutationTimeout(forPath: "api/v1/endpoints/server-a") == 10)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints") > 45)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints/server-a") == 10)
     }
 }

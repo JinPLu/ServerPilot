@@ -85,7 +85,7 @@ def test_cli_doctor_prints_version_table(monkeypatch) -> None:
 
     class FakeClient:
         def get(self, path):  # type: ignore[no-untyped-def]
-            assert path == "/api/v1/doctor"
+            assert path == "/api/v2/doctor"
             return payload
 
     monkeypatch.setattr(cli_module, "_client", lambda url, actor: FakeClient())

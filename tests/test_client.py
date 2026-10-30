@@ -28,7 +28,7 @@ def test_client_returns_first_gateway_error_without_retry(monkeypatch) -> None: 
         BrokerClientError,
         match="broker HTTP 502: gateway_unavailable: temporarily unavailable",
     ):
-        BrokerClient("http://127.0.0.1:8787").get("/api/v1/snapshot")
+        BrokerClient("http://127.0.0.1:8787").get("/api/v2/snapshot")
     assert len(calls) == 1
     assert all(call[1]["trust_env"] is False for call in calls)
 
@@ -42,7 +42,7 @@ def test_client_patch_sends_endpoint_update_over_rest(monkeypatch) -> None:  # t
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
     response = BrokerClient("http://127.0.0.1:8787", actor="endpoint-admin").patch(
-        "/api/v1/endpoints/server-a",
+        "/api/v2/endpoints/server-a",
         {"ssh_user": "gpu"},
         idempotency_key="endpoint-update-key",
     )
@@ -51,7 +51,7 @@ def test_client_patch_sends_endpoint_update_over_rest(monkeypatch) -> None:  # t
     assert calls == [
         (
             "PATCH",
-            "http://127.0.0.1:8787/api/v1/endpoints/server-a",
+            "http://127.0.0.1:8787/api/v2/endpoints/server-a",
             {
                 "headers": {
                     "X-ServerPilot-Actor": "endpoint-admin",
@@ -100,8 +100,8 @@ def test_control_plane_state_waits_for_minimum_revision(monkeypatch) -> None:  #
 
     assert result["snapshot_revision"] == 6
     assert paths == [
-        ("GET", "http://127.0.0.1:8787/api/v1/state", None),
-        ("GET", "http://127.0.0.1:8787/api/v1/state", None),
+        ("GET", "http://127.0.0.1:8787/api/v2/state", None),
+        ("GET", "http://127.0.0.1:8787/api/v2/state", None),
     ]
     assert sleeps == [pytest.approx(0.1)]
 
@@ -167,16 +167,16 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
             "snapshot_revision": 11,
             "server_time": "2026-08-06T00:00:00Z",
         }
-        if url.endswith("/api/v1/gpus"):
+        if url.endswith("/api/v2/gpus"):
             return httpx.Response(
                 200,
                 json={**envelope, "data": [
                     {"id": "gpu-a", "endpoint_id": "server-a", "state": "AVAILABLE"}
                 ]},
             )
-        if url.endswith("/api/v1/endpoints"):
+        if url.endswith("/api/v2/endpoints"):
             return httpx.Response(200, json={**envelope, "data": current["endpoints"]})
-        if url.endswith("/api/v1/leases"):
+        if url.endswith("/api/v2/leases"):
             return httpx.Response(200, json={**envelope, "data": current["leases"]})
         raise AssertionError(url)
 
@@ -190,8 +190,8 @@ def test_operational_read_aliases_project_from_state(monkeypatch) -> None:  # ty
     assert client.leases(project_id="project-a")["data"] == [
         {"id": "lease-a", "project_id": "project-a"}
     ]
-    assert calls.count(("GET", "http://127.0.0.1:8787/api/v1/gpus")) == 1
-    assert all(not url.endswith("/api/v1/state") for _method, url in calls)
+    assert calls.count(("GET", "http://127.0.0.1:8787/api/v2/gpus")) == 1
+    assert all(not url.endswith("/api/v2/state") for _method, url in calls)
 
 
 def test_claim_timeout_outlasts_every_budget_the_server_can_spend() -> None:
@@ -209,8 +209,8 @@ def test_claim_timeout_outlasts_every_budget_the_server_can_spend() -> None:
     assert CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS > MAX_PROFILE_APPLY_SECONDS
     assert direct_claim_budget_seconds() < CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
 
-    assert control_plane_request_timeout("/api/v1/snapshot") == CONTROL_PLANE_READ_TIMEOUT_SECONDS
-    for path in ("/api/v1/claims", "/api/v1/routine/claims"):
+    assert control_plane_request_timeout("/api/v2/snapshot") == CONTROL_PLANE_READ_TIMEOUT_SECONDS
+    for path in ("/api/v2/claims", "/api/v2/claims"):
         for gpu_count in (1, 8, 16):
             assert (
                 control_plane_request_timeout(path, {"constraints": {"gpu_count": gpu_count}})
@@ -232,7 +232,7 @@ def test_registration_timeout_outlasts_the_collection_it_waits_for() -> None:
     assert CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS > PLUGIN_OBSERVE_TIMEOUT_SECONDS
     assert CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS > CONTROL_PLANE_READ_TIMEOUT_SECONDS
     assert (
-        control_plane_request_timeout("/api/v1/endpoints")
+        control_plane_request_timeout("/api/v2/endpoints")
         == CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS
     )
 
@@ -246,18 +246,18 @@ def test_broker_client_claim_uses_the_claim_timeout(monkeypatch) -> None:  # typ
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
     client = BrokerClient("http://127.0.0.1:8787")
-    client.get("/api/v1/snapshot")
+    client.get("/api/v2/snapshot")
     client.post(
-        "/api/v1/routine/claims",
+        "/api/v2/claims",
         {"constraints": {"gpu_count": 8}},
         idempotency_key="claim-eight",
     )
 
     assert calls == [
-        ("GET", "http://127.0.0.1:8787/api/v1/snapshot", CONTROL_PLANE_READ_TIMEOUT_SECONDS),
+        ("GET", "http://127.0.0.1:8787/api/v2/snapshot", CONTROL_PLANE_READ_TIMEOUT_SECONDS),
         (
             "POST",
-            "http://127.0.0.1:8787/api/v1/routine/claims",
+            "http://127.0.0.1:8787/api/v2/claims",
             CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
         ),
     ]
@@ -290,7 +290,7 @@ def test_both_clients_carry_the_error_details_a_documented_outcome_needs(monkeyp
 
     monkeypatch.setattr("serverpilot.client.httpx.request", request)
     with pytest.raises(BrokerClientError) as sync_error:
-        BrokerClient("http://127.0.0.1:8787").post("/api/v1/claims", {}, idempotency_key="k")
+        BrokerClient("http://127.0.0.1:8787").post("/api/v2/claims", {}, idempotency_key="k")
 
     class FakeHttp:
         async def request(self, _method: str, _url: str, **_kwargs: object) -> httpx.Response:
@@ -302,7 +302,7 @@ def test_both_clients_carry_the_error_details_a_documented_outcome_needs(monkeyp
             url="http://127.0.0.1:8787",
             actor="agent",
         )
-        await broker.post("/api/v1/claims", {})
+        await broker.post("/api/v2/claims", {})
 
     with pytest.raises(BrokerClientError) as async_error:
         asyncio.run(run())

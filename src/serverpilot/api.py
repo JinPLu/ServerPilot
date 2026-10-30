@@ -20,7 +20,6 @@ from fastapi import Depends, FastAPI, Header, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from pydantic import ValidationError
 
 from serverpilot import API_CAPABILITIES, SCHEMA_VERSION, __version__
 from serverpilot.adapters import (
@@ -43,9 +42,7 @@ from serverpilot.schemas import (
     EndpointKeepaliveRequest,
     EndpointUpdate,
     HeartbeatBody,
-    LeaseBind,
     LeaseGPUAssignment,
-    LeaseObservedBind,
     ReleaseBody,
     RequestCreate,
     ResizeBody,
@@ -1181,7 +1178,7 @@ def create_app(
             },
         )
 
-    @app.get("/api/v1/snapshot")
+    @app.get("/api/v2/snapshot")
     def snapshot(
         actor: ApiActor,
         compact: bool = False,
@@ -1197,29 +1194,29 @@ def create_app(
             only_available=only_available,
         )
 
-    @app.get("/api/v1/state", response_model=ControlPlaneSnapshot)
+    @app.get("/api/v2/state", response_model=ControlPlaneSnapshot)
     def control_plane_state(
         actor: ApiActor,
     ) -> dict[str, Any]:
         return service.control_plane_state(actor)
 
-    @app.get("/api/v1/observation-profiles")
+    @app.get("/api/v2/observation-profiles")
     def observation_profiles(actor: ApiActor) -> dict[str, Any]:
         from serverpilot.plugins import list_observation_profiles
 
         _ = actor
         return {"data": list_observation_profiles()}
 
-    @app.get("/api/v1/mcp-entry")
+    @app.get("/api/v2/mcp-entry")
     def mcp_entry(actor: ApiActor) -> dict[str, Any]:
         _ = actor
         return {"data": mcp_entry_status()}
 
-    @app.get("/api/v1/endpoints")
+    @app.get("/api/v2/endpoints")
     def endpoints(actor: ApiActor) -> dict[str, Any]:
         return service.list_endpoints(actor)
 
-    @app.get("/api/v1/endpoints/{endpoint_id}/history")
+    @app.get("/api/v2/endpoints/{endpoint_id}/history")
     def endpoint_history(
         endpoint_id: str,
         actor: ApiActor,
@@ -1233,7 +1230,7 @@ def create_app(
             max_points=points,
         )
 
-    @app.get("/api/v1/gpus")
+    @app.get("/api/v2/gpus")
     def gpus(
         actor: ApiActor,
         state: str | None = None,
@@ -1249,26 +1246,26 @@ def create_app(
             compact=compact,
         )
 
-    @app.get("/api/v1/leases")
+    @app.get("/api/v2/leases")
     def leases(actor: ApiActor) -> dict[str, Any]:
         return service.list_leases(actor)
 
 
-    @app.get("/api/v1/events")
+    @app.get("/api/v2/events")
     def events(actor: ApiActor, after_id: int = 0, limit: int = 200) -> dict[str, Any]:
         return service.list_events(actor, after_id=after_id, limit=limit)
 
-    @app.get("/api/v1/settings/collector")
+    @app.get("/api/v2/settings/collector")
     def collector_settings(actor: ApiActor) -> dict[str, Any]:
         return service.collector_settings(actor)
 
-    @app.get("/api/v1/doctor")
+    @app.get("/api/v2/doctor")
     def doctor(actor: ApiActor) -> dict[str, Any]:
         return service.doctor(actor)
 
     # ---- REST mutation routes --------------------------------------------------
 
-    @app.patch("/api/v1/settings/collector")
+    @app.patch("/api/v2/settings/collector")
     def update_collector_settings(
         settings_data: CollectorSettingsUpdate,
         actor: ApiActor,
@@ -1398,7 +1395,7 @@ def create_app(
             actor, body.alert_ids, notified=body.notified, acked=body.acked
         )}
 
-    @app.post("/api/v1/claims")
+    @app.post("/api/v2/claims")
     async def claim_now(
         request_data: RequestCreate,
         actor: ApiActor,
@@ -1412,84 +1409,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.post("/api/v1/routine/claims")
-    async def routine_claim_now(
-        request_data: RequestCreate,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        """Create a persistent routine GPU claim through the shared handoff."""
-
-        if not request_data.constraints.same_host:
-            payload = request_data.model_dump(mode="json")
-            payload["constraints"]["same_host"] = True
-            try:
-                request_data = RequestCreate.model_validate(payload)
-            except ValidationError as exc:
-                raise RequestValidationError(exc.errors()) from exc
-        return await claim_request_now(
-            actor,
-            request_data,
-            idempotency_key=_idempotency_key(idempotency_key),
-            persistent_lease=True,
-        )
-
-    @app.post("/api/v1/leases/{lease_id}/activate")
-    def activate_lease(
-        lease_id: str,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.activate_lease(
-            actor, lease_id, idempotency_key=_idempotency_key(idempotency_key)
-        )
-
-    @app.post("/api/v1/leases/{lease_id}/renew")
-    def renew_lease(
-        lease_id: str,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.renew_lease(
-            actor, lease_id, idempotency_key=_idempotency_key(idempotency_key)
-        )
-
-    @app.post("/api/v1/leases/{lease_id}/release")
-    def release_lease(
-        lease_id: str,
-        body: dict[str, str],
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.release_lease(
-            actor,
-            lease_id,
-            reason=body.get("reason", ""),
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-
-    @app.post("/api/v1/routine/leases/{lease_id}/release")
-    def routine_release_lease(
-        lease_id: str,
-        actor: ApiActor,
-    ) -> dict[str, Any]:
-        return service.release_lease(
-            actor,
-            lease_id,
-            reason="workload_completed",
-            idempotency_key=None,
-        )
-
-    @app.post("/api/v1/routine/leases/{lease_id}/heartbeat")
-    def routine_lease_heartbeat(
-        lease_id: str,
-        actor: ApiActor,
-    ) -> dict[str, Any]:
-        """Record that this lease's holder is still asking about its own hold."""
-
-        return service.record_lease_heartbeat(actor, lease_id)
-
-    @app.post("/api/v1/operator/leases/{lease_id}/release")
+    @app.post("/api/v2/operator/leases/{lease_id}/release")
     def operator_release_lease(
         request: Request,
         lease_id: str,
@@ -1567,7 +1487,7 @@ def create_app(
                     raise exc
                 return reassigned
 
-    @app.patch("/api/v1/operator/leases/{lease_id}/gpus")
+    @app.patch("/api/v2/operator/leases/{lease_id}/gpus")
     async def operator_reassign_lease_gpus(
         request: Request,
         lease_id: str,
@@ -1593,8 +1513,8 @@ def create_app(
             operator_override=True,
         )
 
-    @app.post("/api/v1/endpoints/{endpoint_id}/leases/{lease_id}/release-empty")
-    @app.post("/api/v1/endpoints/{endpoint_id}/conflicted-leases/{lease_id}/release-empty")
+    @app.post("/api/v2/endpoints/{endpoint_id}/leases/{lease_id}/release-empty")
+    @app.post("/api/v2/endpoints/{endpoint_id}/conflicted-leases/{lease_id}/release-empty")
     async def release_empty_conflicted_lease(
         endpoint_id: str,
         lease_id: str,
@@ -1624,35 +1544,7 @@ def create_app(
             idempotency_key=mutation_key,
         )
 
-    @app.post("/api/v1/leases/{lease_id}/bind-workload")
-    def bind_workload(
-        lease_id: str,
-        binding: LeaseBind,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.bind_workload(
-            actor,
-            lease_id,
-            binding,
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-
-    @app.post("/api/v1/leases/{lease_id}/bind-observed-workload")
-    def bind_observed_workload(
-        lease_id: str,
-        binding: LeaseObservedBind,
-        actor: ApiActor,
-        idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
-    ) -> dict[str, Any]:
-        return service.bind_observed_workload(
-            actor,
-            lease_id,
-            binding,
-            idempotency_key=_idempotency_key(idempotency_key),
-        )
-
-    @app.post("/api/v1/endpoints")
+    @app.post("/api/v2/endpoints")
     async def create_endpoint(
         endpoint_data: EndpointCreate,
         actor: ApiActor,
@@ -1683,7 +1575,7 @@ def create_app(
         observation = await service.in_domain(service.endpoint_reachability, endpoint_data.id)
         return {**created, "observation": observation}
 
-    @app.post("/api/v1/server-groups")
+    @app.post("/api/v2/server-groups")
     def create_server_group(
         group_data: ServerGroupCreate,
         actor: ApiActor,
@@ -1695,7 +1587,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.patch("/api/v1/server-groups/{group_id}")
+    @app.patch("/api/v2/server-groups/{group_id}")
     def update_server_group(
         group_id: str,
         group_data: ServerGroupUpdate,
@@ -1709,7 +1601,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.delete("/api/v1/server-groups/{group_id}")
+    @app.delete("/api/v2/server-groups/{group_id}")
     def delete_server_group(
         group_id: str,
         actor: ApiActor,
@@ -1721,17 +1613,17 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.get("/api/v1/endpoints/{endpoint_id}/connection")
+    @app.get("/api/v2/endpoints/{endpoint_id}/connection")
     def endpoint_connection(endpoint_id: str, actor: ApiActor) -> dict[str, Any]:
         return service.connection_status(actor, endpoint_id)
 
-    @app.put("/api/v1/endpoints/{endpoint_id}/connection")
+    @app.put("/api/v2/endpoints/{endpoint_id}/connection")
     async def update_endpoint_connection(
         endpoint_id: str, update: ProviderConnectionUpdate, actor: ApiActor,
     ) -> dict[str, Any]:
         return await service.set_connection(actor, endpoint_id, enabled=update.enabled)
 
-    @app.patch("/api/v1/endpoints/{endpoint_id}")
+    @app.patch("/api/v2/endpoints/{endpoint_id}")
     def update_endpoint(
         endpoint_id: str,
         endpoint_data: EndpointUpdate,
@@ -1745,7 +1637,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.delete("/api/v1/endpoints/{endpoint_id}")
+    @app.delete("/api/v2/endpoints/{endpoint_id}")
     def delete_endpoint(
         endpoint_id: str,
         actor: ApiActor,
@@ -1757,7 +1649,7 @@ def create_app(
             idempotency_key=_idempotency_key(idempotency_key),
         )
 
-    @app.post("/api/v1/endpoints/{endpoint_id}/keepalive")
+    @app.post("/api/v2/endpoints/{endpoint_id}/keepalive")
     async def set_endpoint_keepalive(
         endpoint_id: str,
         state: EndpointKeepaliveRequest,

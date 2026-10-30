@@ -42,6 +42,9 @@ def test_a_repeated_apply_is_the_same_lease(rest) -> None:  # type: ignore[no-un
     rest.service.ingest_observation(observation(count=2))
     agent = Agent(rest, "session-one")
     first = agent.apply()
+    # A task keeps its cards until it says otherwise, however long it runs.
+    assert first["lease"]["expires_at"] is None
+    assert first["lease"]["task_ref"] == "train"
     again = agent.apply()
     assert again["existing"] is True
     assert again["lease"]["id"] == first["lease"]["id"]
@@ -138,3 +141,10 @@ def test_pulse_is_small_and_moves_with_the_state(rest) -> None:  # type: ignore[
     after = rest.get("/api/v2/pulse").json()
     assert after["revision"] > before["revision"]
     assert len(rest.get("/api/v2/pulse").content) < 200
+
+
+def test_every_route_is_health_or_v2(build_app) -> None:  # type: ignore[no-untyped-def]
+    paths = {route.path for route in build_app("routes").routes if hasattr(route, "methods")}
+    served = {path for path in paths if not path.startswith(("/docs", "/redoc", "/openapi"))}
+    assert served
+    assert all(path.startswith(("/health/", "/api/v2/")) for path in served), sorted(served)

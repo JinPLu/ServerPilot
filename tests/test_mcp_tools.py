@@ -228,7 +228,7 @@ def test_replies_stay_within_budget_on_a_realistic_fleet(build_app, inventory, m
         headers = {"X-ServerPilot-Actor": "claude-code", "X-ServerPilot-Session": "budget-session"}
 
         def snapshot(self, **params):  # type: ignore[no-untyped-def]
-            return parse_broker_response(rest.get("/api/v1/snapshot", headers=self.headers))
+            return parse_broker_response(rest.get("/api/v2/snapshot", headers=self.headers))
 
         def get(self, path, *, params=None):  # type: ignore[no-untyped-def]
             return parse_broker_response(rest.get(path, params=params, headers=self.headers))
