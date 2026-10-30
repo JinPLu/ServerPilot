@@ -36,6 +36,7 @@ def test_apply_tells_the_agent_how_to_enter_without_assembling_anything(mcp_agen
     server = reply["servers"][0]
     assert server["env"] == {"CUDA_DEVICE_ORDER": "PCI_BUS_ID", "CUDA_VISIBLE_DEVICES": "0,1"}
     assert [card["selector"] for card in server["cards"]] == [0, 1]
+    assert reply["heartbeat_within_seconds"] == mcp_agent.inventory.idle_lease_reclaim_seconds
     assert server["ssh"]
 
 
@@ -101,6 +102,14 @@ def test_a_repeated_task_returns_its_lease(mcp_agent) -> None:  # type: ignore[n
     again = tools.gpu_apply(task="train", duration_seconds=3600)
     assert again["lease_id"] == first["lease_id"]
     assert again["existing"] is True
+
+
+def test_every_reply_about_a_lease_carries_its_current_epoch(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    fleet(mcp_agent, ("endpoint-a",), 2)
+    lease_id = tools.gpu_apply(task="train", duration_seconds=3600)["lease_id"]
+    grown = tools.gpu_resize(lease_id=lease_id, add_count=1)
+    assert tools.gpu_apply(task="train", duration_seconds=3600, gpu_count=2)["resource_epoch"] == grown["resource_epoch"]
+    assert tools.gpu_take_over(reason="重启", lease_id=lease_id)["resource_epoch"] == grown["resource_epoch"]
 
 
 def test_a_held_task_points_at_the_tool_that_resolves_it(mcp_agent) -> None:  # type: ignore[no-untyped-def]

@@ -299,6 +299,7 @@ enum DesignTokens {
 }
 
 enum DashboardSection: Hashable {
+    case overview
     case resources
     case leases
     case alerts

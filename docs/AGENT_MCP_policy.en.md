@@ -20,9 +20,9 @@ gpu_apply needs task and duration_seconds. Choose server_group_id for grouped ho
 
 no_capacity is final for now; nothing queues. details gives reason, alternatives and eta; eta=null means no honest estimate. Wait retry_after_seconds, then try again or use an alternative.
 
-Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directory, never a code repository. Allocation entries require entering the existing provider allocation first: follow entry and its verified flag; verified=false means probe before use. Never guess a selector; ask gpu_lease(include=[entry]) after a restart.
+Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directory, never a code repository. Allocation entries require entering the existing provider allocation first: entry.argv opens a terminal; without one, prefix commands with entry.exec_prefix. verified=false means probe before use. Never guess a selector; ask gpu_lease(include=[entry]) after a restart.
 
-Call gpu_lease during preparation and quiet phases: it is the heartbeat and it reports at_risk (cards with reclaim_at), changes (what happened to your lease) and resource_epoch. gpu_status is not a heartbeat. A card with no process next to a working card on its server is reclaimed unless you pass keep_idle=true, which lasts three windows at most. Whole-allocation providers reclaim only after lost heartbeats and observed idle; respect their deadline.
+Call gpu_lease during preparation and quiet phases, within heartbeat_within_seconds: it is the heartbeat and it reports at_risk (cards with reclaim_at), changes (what happened to your lease) and resource_epoch. gpu_status is not a heartbeat. A card with no process next to a working card on its server is reclaimed unless you pass keep_idle=true, which lasts three windows at most. Whole-allocation providers reclaim only after lost heartbeats and observed idle; respect their deadline.
 
 gpu_resize is all or nothing and grows where the lease already is unless server_id or server_group_id is named. Pass expected_epoch to refuse a stale view. A running process cannot see added cards: restart_required=true. Provider allocations cannot resize: apply a new task.
 

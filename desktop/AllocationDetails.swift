@@ -40,7 +40,10 @@ struct AllocationFactsView: View {
                 if !entry.argv.isEmpty {
                     Text(entry.verified ? "进入已有分配" : "进入方式尚未通过现场验证")
                         .font(Typography.annotation).foregroundStyle(entry.verified ? DesignTokens.mutedInk : DesignTokens.warning)
-                    Text(entry.commandText).font(Typography.command).textSelection(.enabled)
+                    HStack(spacing: 6) {
+                        Text(entry.commandText).font(Typography.command).textSelection(.enabled)
+                        CopyTextButton(text: entry.commandText)
+                    }
                 }
                 Text(entry.instructions).font(Typography.annotation).foregroundStyle(DesignTokens.mutedInk)
             }
@@ -69,6 +72,7 @@ struct NodeAllocationSheet: View {
     @ObservedObject var store: BrokerStore
     let endpoint: EndpointRecord
     let node: SchedulerNodeRecord
+    let openServer: () -> Void
     @Environment(\.dismiss) private var dismiss
 
     private var leases: [LeaseRecord] {
@@ -80,6 +84,11 @@ struct NodeAllocationSheet: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             SheetTitle(icon: "server.rack", title: node.name, subtitle: endpoint.connectionAddress)
+            Button("查看服务器详情") {
+                dismiss()
+                openServer()
+            }
+            .buttonStyle(.link)
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     if let sample = endpoint.resourceNodes.first(where: { $0.id == node.name }) {

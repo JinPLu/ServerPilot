@@ -27,6 +27,8 @@ struct DashboardView: View {
 
             Group {
                 switch selectedSection {
+                case .overview:
+                    OverviewDashboard(store: store, openEndpoint: openEndpoint) { selectedSection = $0 }
                 case .resources:
                     ResourcesDashboard(
                         store: store,

@@ -1401,12 +1401,24 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         return delegated.isEmpty ? gpuIDs.count : delegated.flatMap(\.locations).reduce(0) { $0 + $1.gpuCount }
     }
 
+    /// Who holds this, in words a person would use for their own tools.
+    public var holderLabel: String {
+        switch actorID {
+        case "agent": return "待认领"
+        case "human": return "人工"
+        case "claude-code": return "Claude"
+        case "codex-mcp-client": return "Codex"
+        case "cursor-vscode": return "Cursor"
+        default: return actorID
+        }
+    }
+
     public var stateLabel: String {
         switch state {
         case "ACTIVE", "HELD": return "使用中"
         case "CONFLICT": return "归属冲突"
-        case "ORPHANED_BUSY": return "释放后仍占用"
-        case "RELEASED": return "已释放"
+        case "ORPHANED_BUSY": return "归还后仍占用"
+        case "RELEASED": return "已归还"
         case "EXPIRED": return "已过期"
         default: return state
         }

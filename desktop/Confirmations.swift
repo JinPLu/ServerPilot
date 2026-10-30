@@ -37,11 +37,11 @@ enum ServiceProbeResult {
 func confirmLeaseRelease(_ lease: LeaseRecord) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "释放 \(lease.gpuCount) 张 GPU？"
+    alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
     alert.informativeText = lease.allocations.contains { $0.releaseGranularity == "allocation" }
         ? "将归还整个资源分配，提供方可能终止其中仍在运行的程序。请先确认任务已结束。"
-        : "请先确认任务已结束。释放不会停止任务。"
-    alert.addButton(withTitle: "释放")
+        : "请先确认任务已结束。归还不会停止任务。"
+    alert.addButton(withTitle: "归还")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
 }
@@ -93,13 +93,13 @@ private func processObservationSummary(_ isoTimestamp: String?) -> String {
 func confirmEmptyLeaseCleanup(_ lease: LeaseRecord, conflict: Bool) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = conflict ? "确认任务已结束后清理记录？" : "释放这笔空闲占用？"
+    alert.messageText = conflict ? "确认任务已结束后清理记录？" : "归还这笔空闲占用？"
     alert.informativeText = """
-    ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会释放。此操作不会停止远端任务。
+    ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会归还。此操作不会停止远端任务。
 
     \(processObservationSummary(lease.lastProcessObservedAt))
     """
-    alert.addButton(withTitle: conflict ? "确认任务已结束后清理" : "释放空闲占用")
+    alert.addButton(withTitle: conflict ? "确认任务已结束后清理" : "归还空闲占用")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
 }
@@ -109,9 +109,9 @@ func confirmEmptyLeaseCleanup(_ lease: LeaseRecord, conflict: Bool) -> Bool {
 func confirmEmptyKeepaliveCleanup(gpuCount: Int) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "释放遗留占卡？"
-    alert.informativeText = "ServerPilot 会先重新采集这台服务器；只有确认 \(gpuCount) 张占卡 GPU 都没有运行中的进程时才会释放。"
-    alert.addButton(withTitle: "释放遗留占卡")
+    alert.messageText = "归还遗留占卡？"
+    alert.informativeText = "ServerPilot 会先重新采集这台服务器；只有确认 \(gpuCount) 张占卡 GPU 都没有运行中的进程时才会归还。"
+    alert.addButton(withTitle: "归还遗留占卡")
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
 }

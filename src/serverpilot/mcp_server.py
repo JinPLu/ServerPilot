@@ -1129,6 +1129,7 @@ async def gpu_apply(
         "lease_id": lease["id"],
         "existing": bool(payload.get("existing")),
         "resource_epoch": lease.get("resource_epoch", 0),
+        "heartbeat_within_seconds": payload.get("heartbeat_within_seconds"),
         "servers": _cards_by_server(lease),
     }
 

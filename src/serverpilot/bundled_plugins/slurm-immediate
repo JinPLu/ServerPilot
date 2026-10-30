@@ -511,6 +511,7 @@ def entry(job_id):
             "user": os.environ.get("USER") or Path.home().name,
             "workspace_path": CONFIG["workspace_path"] or str(Path.home()),
             "argv": ["srun", "--jobid=" + job_id, "--overlap", "--pty", "bash"],
+            "exec_prefix": ["srun", "--jobid=" + job_id, "--overlap"],
             "instructions": "先连接登录入口，再用上述命令进入已有分配；在该环境中使用 CUDA 设备编号。",
             "verified": CONFIG["entry_verified"]}
 

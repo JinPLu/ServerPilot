@@ -883,7 +883,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # widths fold columns from the right instead of dropping to a compact row
     # variant, and the SSH lane keeps a floor no tier may cross.
     table_layout = dashboard_source.split(
-        "private enum EndpointTableLayout", maxsplit=1
+        "enum EndpointTableLayout", maxsplit=1
     )[1].split("struct EndpointTableDivider", maxsplit=1)[0]
     assert "static let sshLane: CGFloat = 304" in table_layout
     assert "static func tier(width: CGFloat) -> Tier" in table_layout
@@ -938,7 +938,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     # row and present in the sheet so the split cannot drift back by accident.
     detail_body = dashboard_source.split(
         "struct ServerDetailSheet", maxsplit=1
-    )[1].split("struct ServerGPUMemoryStatusGrid", maxsplit=1)[0]
+    )[1].split("struct GPUMemoryGlyph", maxsplit=1)[0]
     for fact in ("CPU 核数", "内存总量", "最高温度", "远端工作区"):
         assert fact in detail_body, fact
         assert fact not in row_body, fact

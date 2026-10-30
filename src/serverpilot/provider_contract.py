@@ -46,10 +46,13 @@ class AllocationEntry(ProviderModel):
     user: str = Field(pattern=r"^[A-Za-z_][A-Za-z0-9_-]{0,31}$")
     workspace_path: str = Field(min_length=1, max_length=2000, pattern=r"^/")
     argv: list[str] = Field(default_factory=list, max_length=64)
+    #: argv opens a terminal, which an agent has none of. A command appended to
+    #: this runs inside the allocation without one.
+    exec_prefix: list[str] = Field(default_factory=list, max_length=64)
     instructions: str = Field(max_length=1000)
     verified: bool
 
-    @field_validator("argv")
+    @field_validator("argv", "exec_prefix")
     @classmethod
     def bounded_arguments(cls, value: list[str]) -> list[str]:
         if any(not item or len(item) > 2000 or any(c in item for c in "\x00\n\r") for item in value):

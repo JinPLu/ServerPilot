@@ -1319,13 +1319,16 @@ def create_app(
             duration_seconds=body.duration_seconds, constraints=constraints,
         )
         try:
-            return await claim_request_now(
+            claimed = await claim_request_now(
                 actor, request_data, idempotency_key=None, persistent_lease=True
             )
         except BrokerError as exc:
             if exc.code != "no_capacity":
                 raise
             raise explained_no_capacity(exc, body.gpu_count) from None
+        # Only a quiet lease needs this, and a holder cannot pace itself
+        # against a limit nobody told it.
+        return {**claimed, "heartbeat_within_seconds": service.inventory.idle_lease_reclaim_seconds}
 
     @app.post("/api/v2/leases/heartbeat")
     def heartbeat(body: HeartbeatBody, actor: ApiActor) -> dict[str, Any]:

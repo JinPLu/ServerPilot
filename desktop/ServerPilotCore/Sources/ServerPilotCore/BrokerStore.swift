@@ -573,7 +573,7 @@ public final class BrokerStore: ObservableObject {
             let message: String
             if let leaseID {
                 let gpuIDs = lease?["gpu_ids"] as? [String] ?? []
-                message = "已申领，待使用：\(max(gpuIDs.count, draft.gpuCount)) 个 GPU，租约 \(leaseID) 已生效。这里只分配资源，不会启动任务。"
+                message = "已申请，待使用：\(max(gpuIDs.count, draft.gpuCount)) 个 GPU，租约 \(leaseID) 已生效。这里只分配资源，不会启动任务。"
             } else {
                 message = "当前没有可用的 GPU，本次申请未排队。未分配到卡，请勿启动任务。"
             }
@@ -650,7 +650,7 @@ public final class BrokerStore: ObservableObject {
         completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
     ) {
         guard supportsEndpointConflictCleanup else {
-            let message = endpointCompatibilityMessage("释放空闲占用", capability: "endpoint_conflict_cleanup")
+            let message = endpointCompatibilityMessage("归还空闲占用", capability: "endpoint_conflict_cleanup")
             errorMessage = message
             completion(false, message)
             return
@@ -679,7 +679,7 @@ public final class BrokerStore: ObservableObject {
                 completion(false, error)
                 return
             }
-            self.notice = "已提交释放空闲占用，正在确认 GPU 状态。"
+            self.notice = "已提交归还空闲占用，正在确认 GPU 状态。"
             self.errorMessage = nil
             self.reload()
             completion(true, nil)
@@ -1011,7 +1011,7 @@ public final class BrokerStore: ObservableObject {
 
     public func releaseLease(_ lease: LeaseRecord, completion: @escaping @MainActor @Sendable (Bool, String?) -> Void) {
         guard supportsOperatorLeaseRelease else {
-            let message = "当前本机服务版本不支持人工释放其他 Agent 的租约，请先升级并重启 ServerPilot。"
+            let message = "当前本机服务版本不支持人工归还其他 Agent 的租约，请先升级并重启 ServerPilot。"
             errorMessage = message
             completion(false, message)
             return
@@ -1033,7 +1033,7 @@ public final class BrokerStore: ObservableObject {
             return
         }
         guard let body = try? JSONSerialization.data(withJSONObject: ["reason": "desktop release"]) else {
-            let message = "无法编码释放请求。"
+            let message = "无法编码归还请求。"
             errorMessage = message
             completion(false, message)
             return
@@ -1052,25 +1052,25 @@ public final class BrokerStore: ObservableObject {
                 guard let self else { return }
                 self.releasingLeaseIDs.remove(lease.id)
                 if let error {
-                    let message = "释放失败：\(error.localizedDescription)"
+                    let message = "归还失败：\(error.localizedDescription)"
                     self.errorMessage = message
                     completion(false, message)
                     return
                 }
                 guard let response = response as? HTTPURLResponse else {
-                    let message = "释放失败：未收到有效响应。"
+                    let message = "归还失败：未收到有效响应。"
                     self.errorMessage = message
                     completion(false, message)
                     return
                 }
                 guard (200..<300).contains(response.statusCode) else {
-                    let message = "释放失败：\(self.apiErrorMessage(from: data) ?? "服务拒绝了此操作。")"
+                    let message = "归还失败：\(self.apiErrorMessage(from: data) ?? "服务拒绝了此操作。")"
                     self.errorMessage = message
                     completion(false, message)
                     return
                 }
                 self.raiseMinimumRequiredSnapshotRevision(from: data)
-                self.notice = "已释放租约 \(lease.id)。"
+                self.notice = "已归还租约 \(lease.id)。"
                 self.errorMessage = nil
                 self.reload()
                 completion(true, nil)
@@ -1711,7 +1711,7 @@ public final class BrokerStore: ObservableObject {
         case "endpoint_not_found":
             return "这台服务器已经不在本机资源池中。"
         case "endpoint_has_active_leases":
-            return "这台服务器上还有进行中的租约，请先释放后再删除。"
+            return "这台服务器上还有进行中的租约，请先归还后再删除。"
         case "endpoint_has_active_allocations":
             return "这台服务器上还有进行中的资源分配，请先结束后再删除。"
         case "server_group_not_found":

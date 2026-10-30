@@ -2253,6 +2253,8 @@ class BrokerService:
             "absent_gpu_ids": absent_gpu_ids,
             "resources": executable_resources,
             "issued_at": _iso(lease.issued_at),
+            "resource_epoch": lease.resource_epoch,
+            "owner_session_id": lease.owner_session_id,
             "expires_at": _iso(lease.expires_at),
             "last_heartbeat_at": _iso(lease.last_heartbeat_at),
             "activated_at": _iso(lease.activated_at),

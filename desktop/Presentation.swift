@@ -329,7 +329,7 @@ func localizedStateReason(_ reason: String) -> String {
         return "本次更新未检测到这块 GPU"
     }
     if reason == "lease/process attribution conflict" {
-        return "此前观测到的任务进程与租约绑定不匹配；请由所属任务确认当前观测，或在任务结束后释放租约"
+        return "此前观测到的任务进程与租约绑定不匹配；请由所属任务确认当前观测，或在任务结束后归还租约"
     }
     if reason == "lease expired while a compute process remains" {
         return "资源使用记录已到期，但服务器上仍有任务运行"

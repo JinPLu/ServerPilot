@@ -241,7 +241,7 @@ private struct ClaimGroupPicker: View {
         if let ends = group.limits?.leaseEnds {
             switch ends {
             case .onRelease:
-                parts.append("直到显式释放")
+                parts.append("直到显式归还")
             case .hardKillAtTimeLimit:
                 if let seconds = group.limits?.maxLeaseSeconds {
                     parts.append("\(durationLabel(seconds))，到期硬杀")
