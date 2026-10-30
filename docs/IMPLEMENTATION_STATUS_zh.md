@@ -15,7 +15,12 @@
 空档中位 1 分钟，4% 超过 30 分钟，12% 超过 15 分钟。样本短，阈值在 `idle_card_reclaim_seconds`。
 再次申请同样卡数可保留空闲卡，上限三个窗口。
 
-契约 3,322 → 2,159 字符。未在真实客户端上验证新工具。
+契约 3,322 → 2,159 字符。
+
+本机已部署。用全新 stdio MCP 客户端对真实 daemon 跑通申请、重复申请、卡数不同被拒、`change` 加减卡、
+遥测、归还，无工作负载。接管老租约已在生产库由真实 Agent 完成。已知问题：Claude Code 重连后仍用
+缓存的工具 schema，已开始的会话要开新会话或重连 MCP 才能看到三个工具；旧调用 `gpu_lease`、
+`gpu_resize` 返回 Unknown tool，`gpu_status(lease_id=...)` 的多余参数被忽略且不算心跳。
 
 ## 4.0 Agent 与 App 重设计（2026-10-31 发布）
 
@@ -45,7 +50,7 @@
 
 未验证：系统通知横幅是否真的弹出（投递已执行，授权结果未确认）；菜单栏的外观；Slurm 节点详情
 入口；键盘、VoiceOver、缩放（已修一处：服务器行的辅助功能按下动作曾被吞掉，其余行未逐一核查）；
-Cursor 的 clientInfo/roots；真实接管老租约（只在数据库副本上做过）；Slurm `exec_prefix` 与真实分配、进入、归还（`entry_verified=false`）。
+Cursor 的 clientInfo/roots；Slurm `exec_prefix` 与真实分配、进入、归还（`entry_verified=false`）。
 
 已知差异：MCP 文本仍是带缩进的 JSON，实测比紧凑形式约长 30%。全局规则未安装，因为 Codex 和
 Claude 的全局规则里本来就没有 ServerPilot 块，新契约经 MCP instructions 送达。
