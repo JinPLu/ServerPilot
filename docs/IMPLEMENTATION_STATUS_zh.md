@@ -5,6 +5,13 @@
 当前包装版本为 `4.0.1`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
 
+## 同项目会话共享任务（2026-10-31，未发布）
+
+上线后 Agent 反复失败。日志 201 次调用里 44 次失败：`lease_forbidden` 为 0，主要是旧缓存 schema
+（`Unknown tool`、用 `lease_id` 归还）和 Claude Code auto mode 分类器（5 次）。ServerPilot 放宽：
+同项目会话互相可操作，`gpu_release` 接受 `lease_id`，`task` 也可填租约 ID，worktree 归属其仓库。
+分类器在 ServerPilot 之外，要在 Claude Code 权限里放行。
+
 ## MCP 收为三个工具（2026-10-31，4.0.1）
 
 4.0 的七个工具是按操作拆的，不是按 Agent 的用法设计的。30 天用量：96% 的申请是 1–2 张卡，

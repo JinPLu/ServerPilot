@@ -51,7 +51,7 @@
 - **端点「无响应」的根因已定位并修完**：见[端点连通性状态的两条轴与单一判据](records/endpoint-reachability-axes-and-single-criterion.md)——不是阈值太敏感，而是 `last_error`（一次尝试的事件）被当成主机状态、且 monitor 枚举把连通轴与人为轴压成一个值。已收敛为单一年龄判据并删除零调用的重复副本；两条 keepalive/释放路径的同类判据仍未决。
 - **p8908 占卡/任务同卡相撞的四条修法已落地**：见
   [占卡程序与 agent 工作负载相撞（p8908）](records/keepalive-workload-collision-p8908.md)——
-  控制面新增唯一存活原语 `_lease_liveness_age_seconds`（4.0 起心跳是 `gpu_lease`），进程缺席改由 `process_observations.absent_since` 的证据链计时——
+  控制面新增唯一存活原语 `_lease_liveness_age_seconds`（现在查询任务 `gpu_status(task)` 即心跳），进程缺席改由 `process_observations.absent_since` 的证据链计时——
   完整采集缺席则起表，被观测到或采集失败则清零，断连不计入而是让缺席重来，
   窗口因此收到 60 秒；人工「释放空闲占用」与自动回收共用 `_manual_release_verdict`
   （App 只读服务端答案），占卡起卡新增 `keepalive_start_cooldown_seconds`。

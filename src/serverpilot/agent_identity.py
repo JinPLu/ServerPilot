@@ -33,9 +33,27 @@ def project_slug(value: str) -> str | None:
 
 def _git_top_level(path: Path) -> Path:
     for candidate in (path, *path.parents):
-        if (candidate / ".git").exists():
+        marker = candidate / ".git"
+        if marker.is_file():
+            return _worktree_repository(marker) or candidate
+        if marker.exists():
             return candidate
     return path
+
+
+def _worktree_repository(marker: Path) -> Path | None:
+    """The repository a git worktree belongs to, so it stays the same project.
+
+    A worktree's name is a branch or a generated word. Taken as the project, it
+    would split one project's sessions from each other.
+    """
+
+    try:
+        content = marker.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = re.match(r"gitdir:\s*(.+?)/\.git/worktrees/", content.strip())
+    return Path(match.group(1)) if match else None
 
 
 def _from_directory(path: Path, home: Path) -> str | None:

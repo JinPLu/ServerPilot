@@ -141,6 +141,13 @@ def test_a_smaller_count_gives_up_idle_cards_and_never_a_busy_one(mcp_agent) -> 
     assert {card["gpu_id"] for card in shrunk["servers"][0]["cards"]} == {cards[0]["gpu_id"], cards[1]["gpu_id"]}
 
 
+def test_a_lease_id_works_wherever_a_task_does(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    fleet(mcp_agent, ("endpoint-a",), 1)
+    lease_id = tools.gpu_apply(task="train")["lease_id"]
+    assert tools.gpu_status(task=lease_id)["task"] == "train"
+    assert tools.gpu_release(lease_id=lease_id)["ended"] is True
+
+
 def test_returning_every_card_ends_the_task(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 1)
     card = tools.gpu_apply(task="train")["servers"][0]["cards"][0]["gpu_id"]
@@ -213,8 +220,12 @@ def test_an_unclaimed_task_is_refused_until_it_is_taken_over(mcp_agent) -> None:
     fleet(mcp_agent, ("endpoint-a",), 1)
     lease_id = tools.gpu_apply(task="old")["lease_id"]
 
+    legacy = mcp_agent.local_actor("legacy-agent")
+
     def disown(session):  # type: ignore[no-untyped-def]
-        session.get(Lease, lease_id).owner_session_id = None
+        lease = session.get(Lease, lease_id)
+        lease.owner_session_id = None
+        lease.actor_id = legacy.id
 
     mcp_agent._write(disown)
     status = tools.gpu_status()

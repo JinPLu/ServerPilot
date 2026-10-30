@@ -148,6 +148,8 @@ class ActorContext:
     project_ids: frozenset[str]
     #: The MCP process asking. Absent for the App and CLI.
     session_id: str | None = None
+    #: The project that session works in.
+    session_project: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -1008,8 +1010,14 @@ class BrokerService:
 
     @staticmethod
     def _can_manage_lease(actor: ActorContext, lease: Lease) -> bool:
+        # Sessions of one project are one person's agents on one piece of work:
+        # a coordinator and the sessions it starts, or a restart of either.
+        # Separating them only made them take leases from each other.
         if lease.owner_session_id is not None and actor.session_id is not None:
-            return lease.owner_session_id == actor.session_id
+            return (
+                lease.owner_session_id == actor.session_id
+                or lease.project_id == actor.session_project
+            )
         return lease.actor_id == actor.id
 
     @classmethod
@@ -6118,6 +6126,13 @@ class BrokerService:
 
     # ---- task sessions -----------------------------------------------------------
 
+    def session_project(self, session_id: str) -> str | None:
+        return self._read(
+            lambda session: session.scalar(
+                select(AgentSession.project_id).where(AgentSession.id == session_id)
+            )
+        )
+
     def register_agent_session(
         self,
         actor: ActorContext,
@@ -6170,7 +6185,7 @@ class BrokerService:
         if lease is None:
             return None
         count = self._lease_card_count(session, lease)
-        mine = lease.owner_session_id == actor.session_id
+        mine = self._can_manage_lease(actor, lease)
         if mine and count == request_data.constraints.gpu_count:
             return {"lease": self._lease_dict(session, lease), "existing": True,
                     "snapshot_revision": self._revision(session)}
@@ -6202,7 +6217,7 @@ class BrokerService:
                 return None
             return {
                 "lease_id": lease.id,
-                "mine": lease.owner_session_id == actor.session_id,
+                "mine": self._can_manage_lease(actor, lease),
                 "gpu_count": self._lease_card_count(session, lease),
             }
 
@@ -6273,8 +6288,10 @@ class BrokerService:
             now = utcnow()
             before = {"session": lease.owner_session_id, "actor": lease.actor_id,
                       "project": lease.project_id}
-            if unclaimed:
-                # Rows from before sessions all say project "agent".
+            if lease.project_id != project_id:
+                # Rows from before sessions all say project "agent", and a lease
+                # taken across projects has to leave the one it came from, or
+                # that project's sessions would still hold it.
                 self._ensure_claim_project(session, project_id, now)
                 clash = session.scalar(select(Lease).where(
                     Lease.project_id == project_id, Lease.task_ref == lease.task_ref,
@@ -6503,6 +6520,9 @@ class BrokerService:
                 lease = session.scalar(select(Lease).where(
                     Lease.project_id == project_id, Lease.task_ref == task,
                 ).order_by(Lease.issued_at.desc()))
+            if lease is None and task is not None:
+                # Every reply carries the lease id, so agents reach for it.
+                lease = session.get(Lease, task)
             if lease is None:
                 raise BrokerError("lease_not_found", "找不到这个租约", status_code=404)
             lease = self._agent_lease(session, actor, lease.id)
@@ -6585,7 +6605,10 @@ class BrokerService:
                 }
                 if actor.session_id is not None and lease.owner_session_id == actor.session_id:
                     mine.append(row)
-                elif lease.owner_session_id is None or lease.project_id == project_id:
+                elif lease.owner_session_id is not None and lease.project_id == project_id:
+                    # The project's other sessions can act on these directly.
+                    mine.append(row)
+                elif lease.owner_session_id is None:
                     recoverable.append(row)
                 else:
                     other_cards += row["gpu_count"]

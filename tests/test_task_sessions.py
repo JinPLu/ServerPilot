@@ -9,11 +9,12 @@ from tests.helpers import observation, process_for_gpu
 
 
 class Agent:
-    def __init__(self, rest: TestClient, session_id: str, client: str = "claude-code") -> None:
+    def __init__(self, rest: TestClient, session_id: str, client: str = "claude-code", project: str = "storyboard") -> None:
         self.rest = rest
+        self.project = project
         self.headers = {"X-ServerPilot-Actor": client, "X-ServerPilot-Session": session_id}
         opened = rest.post("/api/v2/sessions", headers=self.headers, json={
-            "session_id": session_id, "client": client, "project": "storyboard",
+            "session_id": session_id, "client": client, "project": project,
         })
         assert opened.status_code == 200, opened.text
 
@@ -25,7 +26,7 @@ class Agent:
     def apply(self, task: str = "train", gpu_count: int = 1, **extra) -> dict:  # type: ignore[no-untyped-def]
         expect = extra.pop("expect", 200)
         return self.post("/api/v2/leases", {
-            "project": "storyboard", "task": task, "duration_seconds": 3600,
+            "project": self.project, "task": task, "duration_seconds": 3600,
             "gpu_count": gpu_count, **extra,
         }, expect=expect)
 
@@ -52,16 +53,28 @@ def test_a_repeated_apply_is_the_same_lease(rest) -> None:  # type: ignore[no-un
     assert refused["error"]["code"] == "task_already_held"
 
 
-def test_a_new_session_cannot_touch_a_lease_until_it_takes_over(rest) -> None:  # type: ignore[no-untyped-def]
+def test_sessions_of_one_project_share_its_tasks(rest) -> None:  # type: ignore[no-untyped-def]
     rest.service.ingest_observation(observation(count=2))
-    old, new = Agent(rest, "session-old"), Agent(rest, "session-new")
+    coordinator, worker = Agent(rest, "session-lead"), Agent(rest, "session-worker")
+    lease_id = coordinator.apply()["lease"]["id"]
+
+    assert worker.apply()["lease"]["id"] == lease_id
+    assert worker.post("/api/v2/leases/heartbeat", {"lease_id": lease_id})["lease_id"] == lease_id
+    grown = worker.post(f"/api/v2/leases/{lease_id}/resize", {"add_count": 1})
+    assert grown["resource_epoch"] == 1
+    assert worker.post(f"/api/v2/leases/{lease_id}/release", {})["lease"]["state"] == "RELEASED"
+
+
+def test_another_project_cannot_touch_a_lease_until_it_takes_over(rest) -> None:  # type: ignore[no-untyped-def]
+    rest.service.ingest_observation(observation(count=2))
+    old, new = Agent(rest, "session-old"), Agent(rest, "session-new", project="worldmodel")
     lease_id = old.apply()["lease"]["id"]
 
     assert new.post("/api/v2/leases/heartbeat", {"lease_id": lease_id}, expect=403)["error"]["code"] == "lease_forbidden"
     assert new.post(f"/api/v2/leases/{lease_id}/release", {}, expect=403)
 
     taken = new.post("/api/v2/leases/take-over", {
-        "task": "train", "project": "storyboard", "reason": "旧会话崩溃",
+        "lease_id": lease_id, "project": "worldmodel", "reason": "接手", "force": True,
     })
     assert taken["lease"]["id"] == lease_id
     assert new.post("/api/v2/leases/heartbeat", {"lease_id": lease_id})["changes"][-1]["action"] == "taken_over"

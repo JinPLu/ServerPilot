@@ -1131,7 +1131,8 @@ async def gpu_apply(
 
 @mcp.tool(annotations=_RETURNS)
 async def gpu_release(
-    task: str,
+    task: str | None = None,
+    lease_id: str | None = None,
     gpu_ids: Annotated[list[str] | None, Field(description="Return only these cards; omit to end the task")] = None,
     outcome: Literal["completed", "failed", "abandoned"] = "completed",
     context: Context | None = None,
@@ -1140,7 +1141,10 @@ async def gpu_release(
 
     try:
         client, project = await _identity(context)
-        view = await _task_view(client, project, task)
+        name = task or lease_id
+        if name is None:
+            raise ValueError("gpu_release needs task or lease_id")
+        view = await _task_view(client, project, name)
         lease_id = view["lease_id"]
         if "ended" in view:
             return {"ok": True, "lease_id": lease_id, "ended": True}

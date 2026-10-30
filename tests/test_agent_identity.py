@@ -21,6 +21,15 @@ def test_a_root_resolves_to_its_repository_not_a_subfolder(tmp_path: Path) -> No
     assert resolve(tmp_path, roots=[(repo / "experiments").as_uri()]) == "worldmodel"
 
 
+def test_a_worktree_belongs_to_its_repository(tmp_path: Path) -> None:
+    repo = tmp_path / "Storyboard"
+    (repo / ".git" / "worktrees" / "brave-otter").mkdir(parents=True)
+    worktree = tmp_path / "worktrees" / "brave-otter"
+    worktree.mkdir(parents=True)
+    (worktree / ".git").write_text(f"gitdir: {repo}/.git/worktrees/brave-otter\n", encoding="utf-8")
+    assert resolve(tmp_path, cwd=worktree) == "storyboard"
+
+
 def test_codex_has_no_roots_and_falls_back_to_the_environment_then_cwd(tmp_path: Path) -> None:
     project = tmp_path / "Lingbot"
     project.mkdir()

@@ -4,6 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- Agent sessions of one project now share its tasks: a coordinator, the sessions it starts, and a restarted session can act directly without taking over, and git worktrees count as the same project.
+- `gpu_release` accepts `lease_id` again.
+
 ## 4.0.1 - 2026-10-31
 
 **Before upgrading:** the MCP surface drops from seven tools to three; `gpu_lease`, `gpu_resize`, `gpu_take_over` and `gpu_server` are gone. Restart the daemon and every MCP client after upgrading.

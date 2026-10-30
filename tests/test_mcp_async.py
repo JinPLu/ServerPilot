@@ -177,7 +177,7 @@ def test_tool_parameter_names_match_the_contract() -> None:
         "task", "gpu_count", "server_group_id", "server_id", "duration_seconds", "change",
         "take_over", "project",
     }
-    assert set(listed["gpu_release"].inputSchema["properties"]) == {"task", "gpu_ids", "outcome"}
+    assert set(listed["gpu_release"].inputSchema["properties"]) == {"task", "lease_id", "gpu_ids", "outcome"}
 
 
 def test_async_broker_claim_waits_out_the_server_budget() -> None:

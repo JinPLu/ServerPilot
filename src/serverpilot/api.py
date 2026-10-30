@@ -1154,7 +1154,11 @@ def create_app(
                 details={"client_version": client_version, "server_version": __version__},
             )
         session_id = request.headers.get("x-serverpilot-session")
-        return dataclasses.replace(actor, session_id=session_id) if session_id else actor
+        if not session_id:
+            return actor
+        return dataclasses.replace(
+            actor, session_id=session_id, session_project=service.session_project(session_id)
+        )
 
     ApiActor = Annotated[ActorContext, Depends(api_actor)]
 
