@@ -4,7 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 3.1.0 - 2026-10-30
+
+**Before upgrading:**
+- **Agents must pass `duration_seconds` to `gpu_apply`** (expected task length in seconds); a call without it is rejected. Reconnecting the MCP refreshes the tool description.
+- **Local plugins must upgrade to plugin protocol v5**; a plugin still on an older protocol is listed as a discovery failure and is no longer loaded.
 
 - **The desktop app no longer keeps reporting "resource refresh timed out / connection interrupted · showing last data".**
   - Cause: the app reads the resource state every 12 seconds and waits at most 6, but the control plane periodically froze for several seconds up to twenty. Only one thread at a time runs Python in the control plane, and two kinds of waste competed with state reads for that lock. A state read looked up a profile's plugin per server, per GPU and per connection, and every lookup rescanned the local plugin folder and resolved every path -- about 2,500 filesystem calls per read -- so whenever anything else was running, a 0.05-second read took more than 10 seconds. And the keepalive reconciliation after every collection computed a full keepalive summary that collection never read, about a third of the control plane's processing time.
