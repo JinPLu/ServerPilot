@@ -955,9 +955,10 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     assert "memoryLabel" in gpu_grid_body
     assert "显存合计" not in dashboard_source
     # A 44 pt row prints no second line, so everything it drops stays reachable
-    # through the hover tooltip.
+    # through the hover tooltip.  Bulk removal borrows the hover text to say
+    # what a click does there; outside that mode the row tooltip is the help.
     assert "private var tooltip: String" in row_body
-    assert ".help(tooltip)" in row_body
+    assert ".help(removalMark == nil ? tooltip :" in row_body
 
 
 def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry_claims() -> None:

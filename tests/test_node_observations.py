@@ -83,7 +83,7 @@ def test_standalone_plugin_embeds_the_shared_probe():
 
     from serverpilot.observation_probe import RAW_SSH_COMBINED_QUERY
 
-    tree = ast.parse((Path(__file__).parents[1] / "src/serverpilot/bundled_plugins/slurm-immediate").read_text())
+    tree = ast.parse((Path(__file__).parents[1] / "src/serverpilot/bundled_plugins/slurm-immediate").read_text(encoding="utf-8"))
     probe = next(ast.literal_eval(node.value) for node in tree.body if isinstance(node, ast.Assign)
                  and any(isinstance(target, ast.Name) and target.id == "NODE_PROBE" for target in node.targets))
     assert probe == RAW_SSH_COMBINED_QUERY

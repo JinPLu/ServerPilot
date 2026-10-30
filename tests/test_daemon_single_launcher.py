@@ -47,15 +47,19 @@ def test_a_missing_install_is_an_error_not_a_fallback(tmp_path: Path) -> None:
     assert "uv tool install" in str(excinfo.value)
 
 
-def test_install_removes_the_retired_agents_plist(tmp_path: Path) -> None:
+def test_install_removes_the_retired_agents_plist(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Unloading a plist that stays on disk only postpones it to the next login.
 
     The retired agent binds the same port this daemon wants, and the loser logs
     an address conflict that nothing traces back to a plist nobody remembers.
     """
 
+    from serverpilot import daemon
     from serverpilot.daemon import DaemonConfig, MacOSDaemonManager
 
+    monkeypatch.setattr(daemon.sys, "platform", "darwin")
     launch_agents = tmp_path / "LaunchAgents"
     launch_agents.mkdir(parents=True)
     legacy_plist = launch_agents / f"{LEGACY_DAEMON_LABEL}.plist"
