@@ -71,6 +71,7 @@ import Testing
         let client = ScriptedClient(results: [
             .success(initial),
             .failure(BrokerRefreshError.invalidSnapshot),
+            .failure(BrokerRefreshError.invalidSnapshot),
             .success(equivalent)
         ])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
@@ -78,6 +79,8 @@ import Testing
         store.connectForTesting(snapshotClient: client)
         try await waitUntil { store.snapshot.snapshotRevision == initial.snapshotRevision && !store.isRefreshing }
 
+        store.reload()
+        try await waitUntil { !store.isRefreshing }
         store.reload()
         try await waitUntil { store.freshness == .stale && !store.isRefreshing }
         #expect(!(store.isConnected))
@@ -116,12 +119,19 @@ import Testing
         let client = ScriptedClient(results: [
             .success(try Self.snapshot(named: "1")),
             .failure(BrokerRefreshError.invalidSnapshot),
+            .failure(BrokerRefreshError.invalidSnapshot),
             .success(try Self.snapshot(named: "8"))
         ])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
 
         store.connectForTesting(snapshotClient: client)
         try await waitUntil { store.snapshot.summary.totalGPUs == 1 }
+
+        store.reload()
+        try await waitUntil { !store.isRefreshing }
+        // One slow answer is not an outage.
+        #expect(store.freshness == .fresh)
+        #expect(store.errorMessage == nil)
 
         store.reload()
         try await waitUntil { store.freshness == .stale }
@@ -133,6 +143,30 @@ import Testing
         try await waitUntil { store.snapshot.summary.totalGPUs == 8 }
         #expect(store.freshness == .fresh)
         #expect(store.errorMessage == nil)
+    }
+
+    @Test func testAFailedActionOutlivesTheRefreshAfterIt() async throws {
+        let client = ScriptedClient(results: [
+            .success(try Self.snapshot(named: "1")),
+            .success(try Self.snapshot(named: "8"))
+        ])
+        let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
+        store.connectForTesting(snapshotClient: client)
+        try await waitUntil { store.snapshot.summary.totalGPUs == 1 }
+
+        store.errorMessage = "提交失败：连接被拒绝"
+        store.reload()
+        try await waitUntil { store.snapshot.summary.totalGPUs == 8 }
+
+        #expect(store.errorMessage == "提交失败：连接被拒绝")
+        #expect(store.feedback == Feedback(.failure, "提交失败：连接被拒绝"))
+    }
+
+    @Test func testAlertsDecodeAndIgnoreCategoriesFromTheFuture() {
+        let known = AlertRecord(["id": "a", "category": "capacity_available", "message": "m"])
+        #expect(known?.category.title == "有卡可用")
+        #expect(known?.alertIDs == ["a"])
+        #expect(AlertRecord(["id": "b", "category": "new_kind", "message": "m"]) == nil)
     }
 
     @Test func testFailureBeforeAnySnapshotHasFailedFreshness() async throws {

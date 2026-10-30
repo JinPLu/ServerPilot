@@ -148,8 +148,22 @@ public final class BrokerStore: ObservableObject {
     @Published public private(set) var endpointTelemetryHistoryLoading: Set<String> = []
     @Published public private(set) var endpointTelemetryHistoryErrors: [String: String] = [:]
     @Published public var actorID: String
-    @Published public var notice: String?
-    @Published public var errorMessage: String?
+    @Published public var notice: String? {
+        didSet {
+            if let notice { feedback = Feedback(.success, notice) }
+        }
+    }
+    @Published public var errorMessage: String? {
+        didSet {
+            if let errorMessage, !refreshOwnsError { feedback = Feedback(.failure, errorMessage) }
+        }
+    }
+    @Published public var feedback: Feedback?
+    @Published public private(set) var alerts: [AlertRecord] = []
+    @Published public private(set) var openAlertCount = 0
+    /// How often to ask whether anything changed: quickly while someone is
+    /// looking, slowly from the menu bar.
+    @Published public var windowVisible = true
 
     private var baseURL: URL?
     private var snapshotClient: BrokerSnapshotClient?
@@ -162,6 +176,12 @@ public final class BrokerStore: ObservableObject {
     private var endpointTelemetryHistoryCacheRecency: [EndpointTelemetryHistoryCacheKey] = []
     private var activeEndpointTelemetryHistoryKey: EndpointTelemetryHistoryCacheKey?
     private var pendingRefresh = false
+    private var pulseTask: Task<Void, Never>?
+    private var lastPulse: PulseRecord?
+    private var consecutiveRefreshFailures = 0
+    /// True while `errorMessage` describes a refresh, the one kind of error a
+    /// later successful refresh may clear.
+    private var refreshOwnsError = false
     private var refreshGeneration: UInt64 = 0
     private var discardedRefreshGeneration: UInt64?
     private var minimumRequiredSnapshotRevision: Int?
@@ -170,6 +190,9 @@ public final class BrokerStore: ObservableObject {
     private let dateProvider: () -> Date
     private let mutationSession: URLSession
 
+    private static let failuresBeforeStale = 2
+    private static let pulseIntervalVisibleSeconds: TimeInterval = 3
+    private static let pulseIntervalHiddenSeconds: TimeInterval = 15
     private static let endpointTelemetryHistoryCacheMaximumAge: TimeInterval = 30
     private static let endpointTelemetryHistoryCacheLimit = 12
 
@@ -189,6 +212,7 @@ public final class BrokerStore: ObservableObject {
 
     deinit {
         periodicRefreshTask?.cancel()
+        pulseTask?.cancel()
         activeRefreshTask?.cancel()
         endpointTelemetryHistoryTasks.values.forEach { $0.cancel() }
     }
@@ -551,10 +575,13 @@ public final class BrokerStore: ObservableObject {
                 let gpuIDs = lease?["gpu_ids"] as? [String] ?? []
                 message = "已申领，待使用：\(max(gpuIDs.count, draft.gpuCount)) 个 GPU，租约 \(leaseID) 已生效。这里只分配资源，不会启动任务。"
             } else {
-                message = "当前无可用容量（no_capacity），本次申请未排队。未获得租约，请勿启动任务。"
+                message = "当前没有可用的 GPU，本次申请未排队。未分配到卡，请勿启动任务。"
             }
-            self.notice = message
-            self.errorMessage = nil
+            if allocated {
+                self.notice = message
+            } else {
+                self.feedback = Feedback(.refused, message)
+            }
             self.reload()
             completion(ClaimSubmissionResult(allocated: allocated, message: message, allocations: (lease?["allocations"] as? [[String: Any]] ?? []).compactMap(ResourceAllocationRecord.init)), nil)
         }
@@ -580,8 +607,7 @@ public final class BrokerStore: ObservableObject {
                 return
             }
             let outcome = Self.registrationOutcome(id: draft.id, payload: payload)
-            self.notice = outcome.message
-            self.errorMessage = outcome.reachable ? nil : outcome.message
+            self.feedback = Feedback(outcome.reachable ? .success : .refused, outcome.message)
             self.reload()
             completion(true, nil)
         }
@@ -1101,6 +1127,7 @@ public final class BrokerStore: ObservableObject {
         self.serviceInfo = serviceInfo
         if startPeriodicRefresh {
             startPeriodicRefreshLoop()
+            startPulseLoop()
         }
         requestRefresh()
         requestObservationProfiles()
@@ -1318,6 +1345,7 @@ public final class BrokerStore: ObservableObject {
                         self.freshness = failedFreshness
                     }
                     let message = "无法更新资源：\(revisionError.localizedDescription)"
+                    refreshOwnsError = true
                     if errorMessage != message {
                         self.errorMessage = message
                     }
@@ -1341,8 +1369,10 @@ public final class BrokerStore: ObservableObject {
                         self.isConnected = true
                     }
                     self.lastUpdated = dateProvider()
-                    if errorMessage != nil {
+                    consecutiveRefreshFailures = 0
+                    if refreshOwnsError {
                         self.errorMessage = nil
+                        refreshOwnsError = false
                     }
                     if let requiredRevision = minimumRequiredSnapshotRevision,
                        let snapshotRevision = snapshot.snapshotRevision,
@@ -1351,6 +1381,12 @@ public final class BrokerStore: ObservableObject {
                     }
                 }
             case .failure(let error):
+                consecutiveRefreshFailures += 1
+                // One slow answer is not an outage. Everything a person can do
+                // stops once this flips, so it takes two in a row.
+                if lastGoodSnapshot != nil, consecutiveRefreshFailures < Self.failuresBeforeStale {
+                    break
+                }
                 if isConnected {
                     self.isConnected = false
                 }
@@ -1359,6 +1395,7 @@ public final class BrokerStore: ObservableObject {
                     self.freshness = failedFreshness
                 }
                 let message = "无法更新资源：\(error.localizedDescription)"
+                refreshOwnsError = true
                 if errorMessage != message {
                     self.errorMessage = message
                 }
@@ -1370,6 +1407,82 @@ public final class BrokerStore: ObservableObject {
         } else {
             isRefreshing = false
         }
+    }
+
+    // ---- pulse and reminders ----
+
+    private func startPulseLoop() {
+        pulseTask?.cancel()
+        guard refreshIntervalSeconds > 0 else { return }
+        pulseTask = Task { [weak self] in
+            while !Task.isCancelled {
+                await self?.checkPulse()
+                let interval = (self?.windowVisible ?? true)
+                    ? Self.pulseIntervalVisibleSeconds : Self.pulseIntervalHiddenSeconds
+                do {
+                    try await Task.sleep(nanoseconds: Self.secondsToNanoseconds(interval))
+                } catch {
+                    break
+                }
+            }
+        }
+    }
+
+    public func checkPulse() async {
+        guard let payload = await requestJSON(path: "api/v2/pulse"),
+              let pulse = PulseRecord(payload) else { return }
+        let previous = lastPulse
+        lastPulse = pulse
+        if openAlertCount != pulse.openAlerts {
+            openAlertCount = pulse.openAlerts
+        }
+        guard pulse != previous else { return }
+        if previous?.revision != pulse.revision {
+            requestRefresh()
+        }
+        await reloadAlerts()
+    }
+
+    public func reloadAlerts() async {
+        guard let payload = await requestJSON(path: "api/v2/alerts"),
+              let rows = payload["alerts"] as? [[String: Any]] else { return }
+        let decoded = rows.compactMap(AlertRecord.init)
+        if alerts != decoded {
+            alerts = decoded
+        }
+    }
+
+    /// Alerts nobody has been told about yet, already folded together.
+    public func pendingNotifications() async -> [AlertRecord] {
+        guard let payload = await requestJSON(path: "api/v2/alerts", query: "pending=true"),
+              let rows = payload["alerts"] as? [[String: Any]] else { return [] }
+        return rows.compactMap(AlertRecord.init)
+    }
+
+    public func markAlerts(_ ids: [String], notified: Bool = false, acked: Bool = false) async {
+        _ = await requestJSON(
+            path: "api/v2/alerts/mark",
+            body: ["alert_ids": ids, "notified": notified, "acked": acked]
+        )
+        await reloadAlerts()
+    }
+
+    private func requestJSON(path: String, query: String? = nil, body: [String: Any]? = nil) async -> [String: Any]? {
+        guard let baseURL else { return nil }
+        var components = URLComponents(url: baseURL.appendingPathComponent(path), resolvingAgainstBaseURL: false)
+        components?.query = query
+        guard let url = components?.url else { return nil }
+        var request = URLRequest(url: url)
+        request.timeoutInterval = refreshTimeoutSeconds
+        request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
+        if let body, let data = try? JSONSerialization.data(withJSONObject: body) {
+            request.httpMethod = "POST"
+            request.httpBody = data
+            request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        }
+        guard let (data, response) = try? await mutationSession.data(for: request),
+              (response as? HTTPURLResponse)?.statusCode == 200 else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
     }
 
     private func startPeriodicRefreshLoop() {
@@ -1391,6 +1504,8 @@ public final class BrokerStore: ObservableObject {
     private func invalidateRefreshWork() {
         periodicRefreshTask?.cancel()
         periodicRefreshTask = nil
+        pulseTask?.cancel()
+        pulseTask = nil
         invalidateActiveRefresh()
     }
 
