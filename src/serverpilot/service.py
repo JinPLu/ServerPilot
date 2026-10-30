@@ -867,7 +867,9 @@ class BrokerService:
     def _write(self, operation: Callable[[Session], T]) -> T:
         """Execute one serialized SQLite write."""
 
-        with self.database.session() as session:
+        from serverpilot.plugins import one_discovery
+
+        with one_discovery(), self.database.session() as session:
             try:
                 session.execute(text("BEGIN IMMEDIATE"))
                 result = operation(session)
@@ -878,7 +880,9 @@ class BrokerService:
                 raise
 
     def _read(self, operation: Callable[[Session], T]) -> T:
-        with self.database.session() as session:
+        from serverpilot.plugins import one_discovery
+
+        with one_discovery(), self.database.session() as session:
             return operation(session)
 
     @staticmethod

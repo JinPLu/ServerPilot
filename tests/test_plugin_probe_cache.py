@@ -12,6 +12,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import serverpilot.plugins as plugins
+from tests.helpers import observation
 
 
 def _write_plugin(path: Path, *, working: bool) -> None:
@@ -49,7 +50,7 @@ def test_a_failure_is_not_remembered(tmp_path: Path) -> None:
 
     first = plugins._probe_plugin_cached(plugin, source="local")
     assert isinstance(first, str)
-    assert str(plugin.resolve()) not in plugins._PROBE_CACHE
+    assert str(plugin) not in plugins._PROBE_CACHE
 
     second = plugins._probe_plugin_cached(plugin, source="local")
     assert isinstance(second, str)
@@ -67,5 +68,35 @@ def test_a_success_is_remembered(tmp_path: Path) -> None:
         # The reference plugin contract may reject this fixture for a reason
         # unrelated to caching; the failure path is covered by the test above.
         return
-    assert str(plugin.resolve()) in plugins._PROBE_CACHE
+    assert str(plugin) in plugins._PROBE_CACHE
     assert plugins._probe_plugin_cached(plugin, source="local") is first
+
+
+def test_a_state_read_discovers_plugins_once(service, admin, monkeypatch) -> None:
+    """Every endpoint, GPU and connection asks for its profile's plugin.
+
+    Each ask used to rescan the plugin directories, resolving every path, so a
+    state read made about two thousand filesystem calls. Each one gives up the
+    GIL, and with any other busy thread that turned a 50 ms read into ten
+    seconds and froze the event loop behind it -- the desktop app's six-second
+    refresh then reported the control plane as gone.
+    """
+
+    for endpoint_id in ("endpoint-a", "endpoint-b"):
+        service.ingest_observation(observation(endpoint_id, count=4))
+    scans = 0
+    discover = plugins._discover
+
+    def counting_discover(**kwargs):
+        nonlocal scans
+        scans += 1
+        return discover(**kwargs)
+
+    monkeypatch.setattr(plugins, "_discover", counting_discover)
+    service.control_plane_state(admin)
+    assert scans == 1
+    # Outside a domain operation every lookup still sees the directory as it is
+    # now, so a plugin dropped in while the daemon runs is found.
+    plugins.get_plugin("linux")
+    plugins.get_plugin("linux")
+    assert scans == 3

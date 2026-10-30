@@ -8,13 +8,15 @@ state. Output is validated or rejected; there is no downgrade path.
 
 from __future__ import annotations
 
+import contextlib
+import contextvars
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
-from collections.abc import Mapping
+from collections.abc import Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Literal
@@ -118,11 +120,17 @@ class PluginInfo:
     limits: dict[str, Any] = field(default_factory=lambda: dict(DIRECT_PROFILE_LIMITS))
 
 
+# Where this module is installed does not change while it runs. Resolving it
+# again on every discovery cost an lstat per path component, and discovery
+# runs several times per state read.
+_PACKAGE_DIR = Path(__file__).resolve().parent
+
+
 def bundled_plugin_dir() -> Path:
     meipass = getattr(sys, "_MEIPASS", None)
     if meipass:
         return Path(meipass) / "serverpilot" / "bundled_plugins"
-    return Path(__file__).resolve().parent / "bundled_plugins"
+    return _PACKAGE_DIR / "bundled_plugins"
 
 
 def user_plugin_dir(
@@ -140,7 +148,7 @@ def user_plugin_dir(
 
 
 def checkout_plugin_dir() -> Path | None:
-    candidate = Path(__file__).resolve().parents[2] / "plugins"
+    candidate = _PACKAGE_DIR.parents[1] / "plugins"
     return candidate if candidate.is_dir() else None
 
 
@@ -151,7 +159,7 @@ def plugin_search_dirs(
 ) -> list[tuple[Path, PluginSource]]:
     dirs: list[tuple[Path, PluginSource]] = [(bundled_plugin_dir(), "builtin")]
     checkout = checkout_plugin_dir()
-    if checkout is not None and checkout.resolve() != bundled_plugin_dir().resolve():
+    if checkout is not None and checkout.resolve() != bundled_plugin_dir():
         dirs.append((checkout, "builtin"))
     dirs.append((user_plugin_dir(home=home, environment=environment), "local"))
     return dirs
@@ -216,19 +224,25 @@ def discover_plugins(
 # and on every claim, so re-forking an interpreter per candidate per call is
 # what stalled the control plane. The directory listing stays live so a plugin
 # dropped in while the daemon runs is still found; only the fork is remembered.
-_PROBE_CACHE: dict[str, tuple[tuple[int, int, PluginSource], PluginInfo | str]] = {}
+#
+# The key is the path as listed, and the stat follows a symlink, so the device
+# and inode name the file actually run: a retargeted link is a new fingerprint
+# without resolving the path. Resolving cost an lstat per component per plugin
+# per discovery -- about two thousand syscalls per state read, each one giving
+# up the GIL, which under any other busy thread turned a 50 ms read into ten
+# seconds and stalled the event loop with it.
+_PROBE_CACHE: dict[str, tuple[tuple[int, int, int, int, PluginSource], PluginInfo | str]] = {}
 
 
 def _probe_plugin_cached(path: Path, *, source: PluginSource) -> PluginInfo | str:
     """Return the plugin's ``info``, or the failure text, without re-forking."""
 
-    resolved = path.resolve()
     try:
-        stat = resolved.stat()
+        stat = path.stat()
     except OSError as exc:
         return f"plugin could not be read: {type(exc).__name__}"
-    fingerprint = (stat.st_mtime_ns, stat.st_size, source)
-    cached = _PROBE_CACHE.get(str(resolved))
+    fingerprint = (stat.st_dev, stat.st_ino, stat.st_mtime_ns, stat.st_size, source)
+    cached = _PROBE_CACHE.get(str(path))
     if cached is not None and cached[0] == fingerprint:
         return cached[1]
     try:
@@ -241,11 +255,47 @@ def _probe_plugin_cached(path: Path, *, source: PluginSource) -> PluginInfo | st
         # plugin costs one fork per discovery; a name that is not a plugin
         # candidate never reaches this function at all.
         return str(exc)
-    _PROBE_CACHE[str(resolved)] = (fingerprint, verdict)
+    _PROBE_CACHE[str(path)] = (fingerprint, verdict)
     return verdict
 
 
+# One discovery per domain operation. A state read asked which plugin owns a
+# profile once per endpoint, per GPU and per connection -- a score of full
+# directory scans for an answer that cannot usefully change mid-read.
+_DISCOVERY_SCOPE: contextvars.ContextVar[
+    list[tuple[list[PluginInfo], list[PluginDiscoveryFailure]]] | None
+] = contextvars.ContextVar("serverpilot_plugin_discovery", default=None)
+
+
+@contextlib.contextmanager
+def one_discovery() -> Iterator[None]:
+    """Let every plugin lookup inside see the same, single discovery."""
+
+    if _DISCOVERY_SCOPE.get() is not None:
+        yield
+        return
+    token = _DISCOVERY_SCOPE.set([])
+    try:
+        yield
+    finally:
+        _DISCOVERY_SCOPE.reset(token)
+
+
 def discover_plugins_with_failures(
+    *,
+    home: Path | None = None,
+    environment: Mapping[str, str] | None = None,
+) -> tuple[list[PluginInfo], list[PluginDiscoveryFailure]]:
+    scope = _DISCOVERY_SCOPE.get()
+    if scope is None or home is not None or environment is not None:
+        return _discover(home=home, environment=environment)
+    if not scope:
+        scope.append(_discover())
+    plugins, failures = scope[0]
+    return list(plugins), list(failures)
+
+
+def _discover(
     *,
     home: Path | None = None,
     environment: Mapping[str, str] | None = None,

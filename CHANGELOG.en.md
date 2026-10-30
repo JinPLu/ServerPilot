@@ -6,6 +6,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+- The desktop app no longer keeps dropping to "connection interrupted · showing last data" while the control plane is busy. With local observation plugins installed, one state read rescanned the plugin folder thousands of times; whenever anything else was running, a 50 ms read took ten seconds or more and stalled every other request with it.
 - Add bulk removal to the server list: tick several servers (for example filter to connection failures and select all), confirm once, and they are all removed from ServerPilot; any that fail are named with their reason and stay selected.
 - Ordinary servers and plugin compute nodes share GPU, CPU, memory and process observations. Node tables show current resource usage; job accounting stays separate and missing samples include a reason.
 
