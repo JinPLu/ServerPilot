@@ -33,7 +33,7 @@
 
 > 🤖 Agent 会写代码、跑实验了，GPU 还需要一张张指定吗？
 
-对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还，以及登记或更新主机。对人，它是一个 macOS App：看多台服务器的空闲、占用、任务和异常。CLI 和 MCP 在 Windows 上同样可用，桌面 App 仅 macOS。没有浏览器界面。
+对 Agent，ServerPilot 是一个 MCP：查卡、申请、归还，以及登记或更新主机。对人，它是一个 macOS App：看多台服务器的空闲、占用、任务和异常。目前只支持 macOS。没有浏览器界面。
 
 一个本机用户，管理多台服务器与协作 Agent；资源状态、申请和人工纠错始终围绕同一份本机控制面快照。
 
@@ -88,7 +88,7 @@ serverpilot daemon reclaim                             # 端口被非 launchd �
 
 ## 🚀 快速开始
 
-从源码启动需要 [Python 3.12+](https://www.python.org/)、[uv](https://docs.astral.sh/uv/) 和 macOS 或 Windows。桌面 App 仅 macOS；Windows 上使用 CLI 和 MCP。
+从源码启动需要 [Python 3.12+](https://www.python.org/)、[uv](https://docs.astral.sh/uv/) 和 macOS。
 
 ### 1. 🧰 启动本机控制面
 
@@ -105,8 +105,6 @@ serverpilot daemon status
 ```
 
 `daemon install` 注册用户 LaunchAgent，由它拉起这份 `uv tool` 安装，且只在 macOS 上可用。以后升级包装后，还要确认 `http://127.0.0.1:8787/health/live` 里的进程版本确实换了，见[升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)。
-
-**Windows**：桌面 App 仅 macOS，但 CLI 和 MCP 入口在 Windows 上同样可用。从源码跑，使用 `serverpilot serve --db <path> --inventory <path>` 并保持该进程在线；Windows 上还没有受监管的 daemon 安装。
 
 无论哪边，服务都监听 `http://127.0.0.1:8787`。
 
@@ -138,7 +136,7 @@ serverpilot mcp policy --install --client codex
 }
 ```
 
-CLI 和 MCP 入口在 Windows 上用法相同；桌面 App 仅 macOS。三个客户端的完整说明见 [Agent / MCP 指南](docs/AGENT_MCP_zh.md)。
+三个客户端的完整说明见 [Agent / MCP 指南](docs/AGENT_MCP_zh.md)。
 
 ## 🤖 Agent 用法
 
@@ -157,7 +155,7 @@ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, tas
 
 ## 🖥️ 打开桌面 App
 
-桌面 App 仅 macOS；CLI 和 MCP 入口在 Windows 上同样可用。设置页会显示本机 MCP 入口的绝对路径和可直接粘贴的 `mcpServers` JSON。复制后即可交给 Codex、Claude Code 或 Cursor。找不到可执行文件时，同一处会说明原因并给出安装提示，而不会编造路径。
+设置页会显示本机 MCP 入口的绝对路径和可直接粘贴的 `mcpServers` JSON。复制后即可交给 Codex、Claude Code 或 Cursor。找不到可执行文件时，同一处会说明原因并给出安装提示，而不会编造路径。
 
 ### macOS
 

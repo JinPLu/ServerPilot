@@ -98,8 +98,8 @@ stops, those GPUs stay occupied until it comes back and reconciles, or until
 someone stops them. There is no automatic release on shutdown.
 
 When the control plane is unreachable, these commands put things back. None of
-them needs the daemon to be running. They act on the macOS control plane's data
-directory, so they do not apply to a Windows install:
+them needs the daemon to be running. They act on the control plane's data
+directory:
 
 ```bash
 serverpilot keepalive inspect --endpoint <server-id>   # what is still holding cards
@@ -136,11 +136,6 @@ install, and is macOS-only. After a later upgrade, confirm the process on
 `http://127.0.0.1:8787/health/live` actually reports the new version — see the
 [upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
 (Chinese).
-
-**Windows**: the desktop app is macOS-only, but the CLI and MCP entry points
-work on Windows. From source, use
-`serverpilot serve --db <path> --inventory <path>` and keep that process
-running; there is no supervised install on Windows yet.
 
 Either way it listens on `http://127.0.0.1:8787`.
 
@@ -203,8 +198,7 @@ registration without writing anything. The standard block is:
 }
 ```
 
-The CLI and MCP entry points work the same way on Windows; the desktop app is
-macOS-only. Full per-client notes are in the
+Full per-client notes are in the
 [Agent / MCP guide](https://github.com/JinPLu/ServerPilot/blob/master/docs/AGENT_MCP_zh.md).
 
 ## 🤖 How an agent uses it
@@ -247,8 +241,7 @@ gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<g
 
 ## 🖥️ The desktop app
 
-The desktop app is macOS-only; the CLI and MCP entry points work on Windows
-too. The Settings page shows this installation's MCP entry as an absolute path
+The Settings page shows this installation's MCP entry as an absolute path
 and the pasteable `mcpServers` JSON. Copy either into Codex, Claude Code, or
 Cursor. If the executable is missing, the same panel says so and repeats the
 install hint instead of inventing a path.

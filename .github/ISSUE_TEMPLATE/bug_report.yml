@@ -26,7 +26,6 @@ body:
       options:
         - MCP (an agent calling gpu_status / gpu_apply / gpu_release)
         - Desktop app (macOS)
-        - Desktop app (Windows)
         - CLI
         - Collector or keepalive on a remote server
         - Somewhere else

@@ -16,6 +16,7 @@
 
 ## 修改与验证
 
+- 目前只维护 macOS：Windows 不进 CI，也不是发布门槛；现有跨平台代码不主动删除。
 - Python 3.12；依赖改动同步 `uv.lock`。持久化或公共行为改动同步 migration、文档和测试。
 - 运行最贴近改动面的测试与 Ruff；除非用户明确要求只读 shadow 采集，否则不得连接真实 GPU。
 - 仓库中的唯一桌面应用固定为根目录 `ServerPilot.app`。不得在 `dist/`、`build/`、`~/Applications` 或仓库其他位置创建、复制或保留第二个 `ServerPilot*.app`，也不得用编号副本规避覆盖。
@@ -24,7 +25,7 @@
 ## 发布与版本
 
 - 推送含用户可见行为的改动前，先在 `CHANGELOG.md` 和 `CHANGELOG.en.md` 的 `Unreleased` 中用简短、面向结果的文字记录；不要把测试、内部 gate 或提交历史写成发布说明。
-- 仅推送提交不等于正式发布。正式版本发布须经用户明确要求，并完成所需验证后：更新 `src/serverpilot/__init__.py` 的 `__version__`（打包与桌面版本都从它派生）、将两边 changelog 的 `Unreleased` 折成该版本条目、提交到获准分支，然后打并推送 `v{version}` tag。推送 tag 即发布：`release.yml` 校验 tag 与版本一致、用 `CHANGELOG.en.md` 对应条目创建 GitHub Release；Windows 工作流再上传 zip。
+- 仅推送提交不等于正式发布。正式版本发布须经用户明确要求，并完成所需验证后：更新 `src/serverpilot/__init__.py` 的 `__version__`（打包与桌面版本都从它派生）、将两边 changelog 的 `Unreleased` 折成该版本条目、提交到获准分支，然后打并推送 `v{version}` tag。推送 tag 即发布：`release.yml` 校验 tag 与版本一致、用 `CHANGELOG.en.md` 对应条目创建 GitHub Release。
 - 获准正式发布时默认使用 `master`；其他 Git 工作流、分支、PR 或发布目标须由用户明确指定。
 
 <!-- TEAMWORK_PROJECT_START -->

@@ -4,6 +4,10 @@
 
 这里只记录用户能感受到的变化；实现细节见 Git 提交。
 
+## Unreleased
+
+- 目前只维护 macOS：不再保证 Windows 可用，Windows 也不再参与 CI。
+
 ## 4.0.0 - 2026-10-31
 
 **升级须知：** MCP 工具已重新设计，旧工具不再可用。升级后需要重启 daemon、重启各 MCP 客户端，并运行 `serverpilot mcp policy --install`。已有租约会保留，由 Agent 用 `gpu_take_over` 认领。

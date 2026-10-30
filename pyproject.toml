@@ -17,8 +17,7 @@ classifiers = [
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
   "Operating System :: MacOS",
-  "Operating System :: Microsoft :: Windows",
-  # The control plane runs on macOS or Windows; the collector and keepalive
+  # The control plane runs on macOS; the collector and keepalive
   # entry points run on the Linux GPU servers it coordinates.
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3.12",

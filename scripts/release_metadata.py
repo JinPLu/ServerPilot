@@ -3,9 +3,7 @@
 
 2.0.0 once shipped as a sealed changelog plus a bumped ``__version__`` with no
 tag and no GitHub Release. These helpers are what notice that state, what the
-tag-push workflow uses to write the Release notes, and what the Windows
-workflow still calls so a dispatched rebuild cannot attach a zip to the wrong
-version.
+tag-push workflow uses to write the Release notes.
 """
 
 from __future__ import annotations
@@ -114,7 +112,7 @@ def unpublished_seal_message(
         f"{UNPUBLISHED_SEAL}。CHANGELOG.md 顶部标题已是正式版本 {version}，"
         f"且与 __version__ 一致，但远程不存在 tag {tag}。"
         f"下一步：git tag {tag} && git push origin {tag}；"
-        "推送 tag 后 release.yml 会创建 GitHub Release，Windows 工作流再上传 zip。"
+        "推送 tag 后 release.yml 会创建 GitHub Release。"
     )
 
 
