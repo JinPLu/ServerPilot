@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.0.1 - 2026-10-31
 
 **Before upgrading:** the MCP surface drops from seven tools to three; `gpu_lease`, `gpu_resize`, `gpu_take_over` and `gpu_server` are gone. Restart the daemon and every MCP client after upgrading.
 

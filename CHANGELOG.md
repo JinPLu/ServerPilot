@@ -4,7 +4,7 @@
 
 这里只记录用户能感受到的变化；实现细节见 Git 提交。
 
-## Unreleased
+## 4.0.1 - 2026-10-31
 
 **升级须知：** MCP 工具从七个收为三个，`gpu_lease`、`gpu_resize`、`gpu_take_over`、`gpu_server` 已移除。升级后要重启 daemon 和各 MCP 客户端。
 
