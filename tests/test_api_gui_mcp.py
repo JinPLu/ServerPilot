@@ -680,7 +680,7 @@ def test_routine_status_projects_per_gpu_recent_telemetry_average() -> None:
                         "total_vram_mib": 80_000,
                         "state": "RUNNING_MANAGED",
                         "publicly_available": False,
-                        "public_status": "任务占用",
+                        "public_status": "运行中",
                         "lease": {"id": "lease-mine", "task_ref": "训练"},
                         "telemetry": {
                             "memory_used_mib": 4_000,
@@ -738,7 +738,7 @@ def test_routine_status_names_the_gpu_holding_a_multi_gpu_lease_back() -> None:
             "total_vram_mib": 80_000,
             "state": "RUNNING_MANAGED",
             "publicly_available": False,
-            "public_status": "任务占用",
+            "public_status": "运行中",
             "lease": {"id": "lease-mine", "task_ref": "训练"},
             "telemetry": {
                 "observed_at": "2026-08-15T00:02:00Z",
@@ -793,7 +793,7 @@ def test_routine_status_keeps_a_disagreeing_telemetry_window_on_its_own_gpu() ->
             "total_vram_mib": 80_000,
             "state": "RUNNING_MANAGED",
             "publicly_available": False,
-            "public_status": "任务占用",
+            "public_status": "运行中",
             "lease": {"id": "lease-mine", "task_ref": "训练"},
             "telemetry": {
                 "observed_at": "2026-08-15T00:02:00Z",
@@ -905,7 +905,7 @@ def _routine_status_fixture(gpu_count: int) -> dict[str, object]:
                     "total_vram_mib": 97_887,
                     "state": "KEEPALIVE",
                     "publicly_available": True,
-                    "public_status": "可用 · 空闲占卡",
+                    "public_status": "空闲 · 占卡中",
                     "keepalive": {"desired": "ON", "actual": "ON"},
                     "telemetry": {
                         "observed_at": "2026-08-21T11:50:42.163448+00:00",

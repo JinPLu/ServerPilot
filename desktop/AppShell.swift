@@ -315,6 +315,7 @@ private struct SidebarSelection: View {
         .buttonStyle(.plain)
         .focusable()
         .padding(.horizontal, compact ? 12 : 10)
+        .focusEffectDisabled()
         .help(title)
         .accessibilityLabel(title)
         .accessibilityValue(selected ? "当前页面" : "未选中")
@@ -369,17 +370,14 @@ private struct AppToolbar: View {
                         .accessibilityValue(claimHint)
                     }
                     Button(action: refresh) {
-                        Label(store.isRefreshing ? "刷新中" : "刷新", systemImage: "arrow.clockwise")
+                        // Pulse refreshes every few seconds, so this must not
+                        // react to a refresh a person did not ask for.
+                        Label("刷新", systemImage: "arrow.clockwise")
                             .font(.callout.weight(.semibold))
-                            .rotationEffect(.degrees(store.isRefreshing && !reduceMotion ? 360 : 0))
-                            .animation(
-                                store.isRefreshing && !reduceMotion ? .linear(duration: 0.8).repeatForever(autoreverses: false) : .easeOut(duration: 0.15),
-                                value: store.isRefreshing
-                            )
                     }
                     .buttonStyle(SecondaryActionButtonStyle())
                     .focusable()
-                    .disabled(store.isRefreshing || !store.canRefresh)
+                    .disabled(!store.canRefresh)
                     .keyboardShortcut("r", modifiers: [.command])
                     .help(store.canRefresh ? "更新资源数据" : "测试数据不能刷新")
                     .accessibilityLabel("更新资源数据")
@@ -397,8 +395,8 @@ private struct AppToolbar: View {
             }
         }
         .padding(.horizontal, 28)
-        .padding(.vertical, 14)
-        .background(DesignTokens.surface)
+        .padding(.top, 22)
+        .padding(.bottom, 10)
     }
 
     private var statusText: String {

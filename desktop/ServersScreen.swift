@@ -18,8 +18,8 @@ private enum EndpointFilter: String, CaseIterable, Identifiable {
         switch self {
         case .all: return "全部"
         case .available: return "有空闲 GPU"
-        case .taskOccupied: return "任务占用"
-        case .keepalive: return "占卡"
+        case .taskOccupied: return "使用中"
+        case .keepalive: return "占卡中"
         case .connectionFailed: return "连接失败"
         }
     }
@@ -669,7 +669,7 @@ enum EndpointTableLayout {
     static let rowHeight: CGFloat = 44
     static let headerHeight: CGFloat = 34
     /// Percentage lane inside a pressure cell; the bar takes what is left.
-    static let percentageWidth: CGFloat = 30
+    static let percentageWidth: CGFloat = 40
 
     enum Tier {
         /// Every column.
@@ -1204,8 +1204,8 @@ private struct EndpointTableRow: View {
 
     private var assignmentTitle: String {
         if let primaryLease { return primaryLease.projectID }
-        if endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning { return "可用 · 空闲占卡" }
-        if hasUnattributedWorkload { return "任务占用" }
+        if endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning { return "空闲 · 占卡中" }
+        if hasUnattributedWorkload { return "外部进程" }
         if !isSnapshotFresh { return "任务未确认" }
         return "—"
     }
@@ -1335,7 +1335,7 @@ private struct EndpointTableRow: View {
         if availableGPUCount > 0, legacyWorkloadReviewGPUCount > 0 {
             return "\(availableGPUCount) 张可申请 · \(legacyWorkloadReviewGPUCount) 张任务待核对"
         }
-        if gpus.contains(where: { ["BUSY_UNMANAGED", "ORPHANED_BUSY"].contains($0.state) }) { return "任务占用" }
+        if gpus.contains(where: { ["BUSY_UNMANAGED", "ORPHANED_BUSY"].contains($0.state) }) { return "外部进程" }
         if legacyWorkloadReviewGPUCount > 0 { return "任务归属待核对" }
         if gpus.contains(where: gpuNeedsAttention) { return "不可分配" }
         if endpointHighPressure(endpoint: endpoint, gpus: gpus) { return "压力较高" }

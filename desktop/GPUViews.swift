@@ -11,9 +11,9 @@ enum GPUStatusSection: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .available: return "空闲"
-        case .keepalive: return "占卡"
-        case .busy: return "繁忙"
-        case .error: return "错误"
+        case .keepalive: return "占卡中"
+        case .busy: return "使用中"
+        case .error: return "需关注"
         }
     }
 
@@ -173,7 +173,7 @@ struct GPUMemoryStatusRow: View {
                         .font(Typography.rowValue.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                     if status != .available {
-                        Label(status.label, systemImage: status.icon)
+                        Label(CardVocabulary.label(forState: gpu.state), systemImage: status.icon)
                             .font(Typography.metricLabel.weight(.semibold))
                             .foregroundStyle(status.tint)
                             .lineLimit(1)

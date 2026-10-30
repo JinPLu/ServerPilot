@@ -2408,11 +2408,11 @@ def test_gpu_public_status_separates_an_idle_claim_from_a_running_task() -> None
             monitor_status="ONLINE",
         )["public_status"]
 
-    assert project("LEASED_IDLE", lease={"id": "lease-a"}) == "占卡"
-    assert project("HELD", lease={"id": "lease-a"}) == "占卡"
-    assert project("RUNNING_MANAGED", lease={"id": "lease-a"}) == "任务占用"
-    assert project("BUSY_UNMANAGED") == "未归属占用"
-    assert project("ORPHANED_BUSY", lease={"id": "lease-a"}) == "未归属占用"
+    assert project("LEASED_IDLE", lease={"id": "lease-a"}) == "已分配未运行"
+    assert project("HELD", lease={"id": "lease-a"}) == "已分配未运行"
+    assert project("RUNNING_MANAGED", lease={"id": "lease-a"}) == "运行中"
+    assert project("BUSY_UNMANAGED") == "外部进程"
+    assert project("ORPHANED_BUSY", lease={"id": "lease-a"}) == "外部进程"
     assert project("CONFLICT", lease={"id": "lease-a"}) == "归属冲突"
 
 

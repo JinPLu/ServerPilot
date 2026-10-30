@@ -846,7 +846,7 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
     /// The states the broker projects as allocatable capacity.
     static let allocatableStates: Set<String> = ["AVAILABLE", "KEEPALIVE"]
     /// The prefix a projected status carries when it claims the card is free.
-    static let availableStatusPrefix = "可用"
+    static let availableStatusPrefix = "空闲"
 
     public let processes: [GPUProcessRecord]
     public let id: String

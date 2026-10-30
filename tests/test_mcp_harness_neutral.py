@@ -109,7 +109,7 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
                         "total_vram_mib": 80_000,
                         "state": "HELD",
                         "publicly_available": False,
-                        "public_status": "任务占用",
+                        "public_status": "运行中",
                         "keepalive": {"state": "OFF", "reason": None},
                         "lease": {"id": "lease-other", "task_ref": "训练任务"},
                         "telemetry": {"memory_used_mib": 70_000, "gpu_utilization_pct": 90},

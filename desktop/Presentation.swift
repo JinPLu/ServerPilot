@@ -261,12 +261,12 @@ func gpuPresentationLabel(_ gpu: GPURecord) -> String {
     }
     if gpuHasLegacyWorkloadProcessReview(gpu) {
         let task = gpu.taskReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        return task.map { "任务占用 · \($0)" } ?? "任务占用 · 进程已更新"
+        return task.map { "运行中 · \($0)" } ?? "运行中 · 进程已更新"
     }
     if gpu.keepalive.state == "ERROR" {
         let reason = gpu.keepalive.reason.map(localizedStateReason) ?? "未知原因"
         return gpu.isPubliclyAvailable
-            ? "可用 · 占卡异常：\(reason)"
+            ? "空闲 · 占卡异常：\(reason)"
             : "占卡异常：\(reason)"
     }
     if gpu.state == "AVAILABLE" {

@@ -548,6 +548,20 @@ private struct ResourceLeaseDetailRow: View {
     let lease: LeaseRecord
     let release: () -> Void
 
+    /// One line per server: a lease of eight cards is one fact, not eight.
+    private var leaseServers: [(id: String, address: String, summary: String, gpus: [GPURecord])] {
+        let cards = lease.gpuIDs.compactMap { store.snapshot.gpu(id: $0) }
+        return Dictionary(grouping: cards, by: \.endpointID).keys.sorted().map { endpointID in
+            let gpus = cards.filter { $0.endpointID == endpointID }.sorted { $0.index < $1.index }
+            let address = store.snapshot.endpoints.first { $0.id == endpointID }?.connectionAddress ?? endpointID
+            let summary = Dictionary(grouping: gpus) { CardVocabulary.label(forState: $0.state) }
+                .sorted { $0.key < $1.key }
+                .map { "\($0.value.count) 张\($0.key)" }
+                .joined(separator: " · ")
+            return (endpointID, address, summary, gpus)
+        }
+    }
+
     var body: some View {
         ResourceUsageRecordShell {
             HStack(spacing: 10) {
@@ -586,20 +600,18 @@ private struct ResourceLeaseDetailRow: View {
                 .disabled(!store.allowsMutations || store.releasingLeaseIDs.contains(lease.id))
                 .help(store.allowsMutations ? (lease.allocations.contains { $0.releaseGranularity == "allocation" } ? "归还整个分配，提供方可能终止其中的程序" : "归还 GPU；不会停止任务") : store.mutationUnavailableReason)
             }
-            ForEach(lease.gpuIDs, id: \.self) { gpuID in
-                if let gpu = store.snapshot.gpu(id: gpuID) {
-                    HStack(spacing: 6) {
-                        RoundedRectangle(cornerRadius: 2, style: .continuous)
-                            .fill(cardStatusColor(gpu.state))
-                            .frame(width: 10, height: 10)
-                        Text("\(gpu.endpointID) · GPU \(gpu.index)")
-                        Spacer()
-                        Text(CardVocabulary.label(forState: gpu.state))
-                            .foregroundStyle(DesignTokens.mutedInk)
-                    }
-                    .font(Typography.annotation)
-                    .accessibilityElement(children: .combine)
+            ForEach(leaseServers, id: \.id) { server in
+                HStack(spacing: 10) {
+                    CardSquares(gpus: server.gpus, size: 12)
+                    Text(server.address)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                    Spacer(minLength: 8)
+                    Text(server.summary)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
                 }
+                .accessibilityElement(children: .combine)
             }
             ForEach(lease.allocations.filter { $0.releaseGranularity == "allocation" }) { allocation in
                 AllocationFactsView(allocation: allocation)

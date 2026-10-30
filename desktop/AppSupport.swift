@@ -81,14 +81,14 @@ enum Typography {
     static let label = Font.headline
     /// 13 · The one explanatory sentence in an error or empty state.
     static let prose = Font.body
-    /// 12 · Percentages, counts, ratios inside a row.
-    static let rowValue = Font.callout.weight(.medium).monospacedDigit()
-    /// 11 · Project, task, model.
-    static let identity = Font.subheadline.weight(.medium)
-    /// 11 · SSH commands and GPU identifiers stay monospaced.
-    static let command = Font.system(.subheadline, design: .monospaced).weight(.medium)
-    /// 10 · Units, timestamps, status words, null markers.
-    static let annotation = Font.caption.weight(.medium)
+    /// 13 · Percentages, counts, ratios inside a row.
+    static let rowValue = Font.body.weight(.medium).monospacedDigit()
+    /// 12 · Project, task, model.
+    static let identity = Font.callout.weight(.medium)
+    /// 12 · SSH commands and GPU identifiers stay monospaced.
+    static let command = Font.system(.callout, design: .monospaced).weight(.medium)
+    /// 11 · Units, timestamps, status words, null markers.
+    static let annotation = Font.subheadline.weight(.medium)
 
     // Retired names kept only so no call site silently changes meaning during
     // the migration; both resolved to 10pt, which was the duplicate pair.

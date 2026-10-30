@@ -1216,7 +1216,7 @@ import Testing
             "total_vram_mib": 81920,
             "state": "CONFLICT",
             "publicly_available": false,
-            "public_status": "任务占用",
+            "public_status": "运行中",
             "keepalive": [
                 "configured": true,
                 "policy": "idle_keepalive",
@@ -1226,7 +1226,7 @@ import Testing
                 "lease_id": "keepalive-conflicted-lease"
             ],
         ]))
-        #expect(conflictedKeeper.publicStatus == "任务占用")
+        #expect(conflictedKeeper.publicStatus == "运行中")
         #expect(conflictedKeeper.projectedPubliclyAvailable == false)
         #expect(!(conflictedKeeper.isPubliclyAvailable))
         #expect(conflictedKeeper.keepalive.desired == "ON")
@@ -1241,7 +1241,7 @@ import Testing
             "total_vram_mib": 81920,
             "state": "CONFLICT",
             "publicly_available": false,
-            "public_status": "可用 · 占卡异常",
+            "public_status": "空闲 · 占卡异常",
             "keepalive": [
                 "configured": true,
                 "policy": "idle_keepalive",

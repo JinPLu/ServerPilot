@@ -60,30 +60,55 @@ struct AlertsDashboard: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
-                HStack {
-                    Text(open.isEmpty ? "没有待处理的提醒" : "\(open.count) 条待处理")
-                        .font(.headline)
-                    Spacer()
-                    if !open.isEmpty {
-                        Button("全部确认") {
-                            let ids = open.map(\.id)
-                            Task { await store.markAlerts(ids, acked: true) }
+                if store.alerts.isEmpty {
+                    HomeCard {
+                        VStack(spacing: 10) {
+                            Image(systemName: "bell.badge")
+                                .font(.largeTitle)
+                                .foregroundStyle(DesignTokens.mutedInk)
+                            Text("没有提醒").font(Typography.label)
+                            Text("任务受影响、服务器异常、资源闲置或有卡可用时，会出现在这里。")
+                                .font(Typography.identity)
+                                .foregroundStyle(DesignTokens.mutedInk)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 40)
+                    }
+                }
+                if !open.isEmpty {
+                    HomeCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            HStack {
+                                Text("\(open.count) 条待处理").font(Typography.label)
+                                Spacer()
+                                Button("全部确认") {
+                                    let ids = open.map(\.id)
+                                    Task { await store.markAlerts(ids, acked: true) }
+                                }
+                            }
+                            ForEach(open) { alert in
+                                Divider().opacity(DesignTokens.Alpha.muted)
+                                AlertRow(alert: alert) {
+                                    Task { await store.markAlerts([alert.id], acked: true) }
+                                }
+                            }
                         }
                     }
                 }
-                ForEach(open) { alert in
-                    AlertRow(alert: alert) {
-                        Task { await store.markAlerts([alert.id], acked: true) }
-                    }
-                }
                 if !earlier.isEmpty {
-                    Text("更早").font(.subheadline.weight(.semibold)).foregroundStyle(DesignTokens.mutedInk)
-                    ForEach(earlier) { alert in
-                        AlertRow(alert: alert, acknowledge: nil)
+                    HomeCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("更早").font(Typography.label).foregroundStyle(DesignTokens.mutedInk)
+                            ForEach(earlier) { alert in
+                                Divider().opacity(DesignTokens.Alpha.muted)
+                                AlertRow(alert: alert, acknowledge: nil)
+                            }
+                        }
                     }
                 }
             }
-            .padding(24)
+            .padding(.horizontal, 28)
+            .padding(.vertical, 16)
         }
     }
 }

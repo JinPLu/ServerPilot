@@ -130,7 +130,7 @@ def test_one_gpu_keepalive_does_not_block_sibling_gpu_or_hide_public_state(servi
     assert second["keepalive"]["actual"] == "OFF"
     assert second["keepalive"]["reason"] is None
     assert second["publicly_available"] is True
-    assert second["public_status"] == "可用 · 占卡未运行"
+    assert second["public_status"] == "空闲 · 占卡未运行"
     assert endpoint["keepalive"] == {
         "configured": True,
         "policy": "idle_keepalive",

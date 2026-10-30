@@ -3026,30 +3026,30 @@ class BrokerService:
         if monitor_status in {"ERROR", "STALE"}:
             status = "连接失败"
         elif available and (gpu.get("state") == "KEEPALIVE" or keepalive.get("actual") == "ON"):
-            status = "可用 · 空闲占卡"
+            status = "空闲 · 占卡中"
         elif available and keepalive.get("actual") == "ERROR":
-            status = f"可用 · 占卡异常：{keepalive.get('reason') or '未知原因'}"
+            status = f"空闲 · 占卡异常：{keepalive.get('reason') or '未知原因'}"
         elif available and keepalive.get("desired") == "ON":
-            status = "可用 · 占卡未运行"
+            status = "空闲 · 占卡未运行"
         elif available:
-            status = "可用 · 未开启占卡"
+            status = "空闲"
         elif keepalive.get("actual") == "ERROR":
             status = "占卡校验失败，暂不可申请"
         elif gpu.get("state") == "CONFLICT":
             status = "归属冲突"
         elif gpu.get("state") in {"BUSY_UNMANAGED", "ORPHANED_BUSY"}:
-            status = "未归属占用"
+            status = "外部进程"
         elif gpu.get("state") == "SCHEDULER_MANAGED":
             status = "需调度申请"
         elif gpu.get("state") == "RUNNING_MANAGED":
-            status = "任务占用"
+            status = "运行中"
         elif gpu.get("state") in {"HELD", "LEASED_IDLE"}:
             # Claimed, but no compute process has been observed.  The design
             # contract keeps this distinct from a running task so an idle claim
             # is visible instead of reading as work in progress.
-            status = "占卡"
+            status = "已分配未运行"
         elif gpu.get("lease") is not None:
-            status = "任务占用"
+            status = "运行中"
         else:
             status = "连接失败"
         return {

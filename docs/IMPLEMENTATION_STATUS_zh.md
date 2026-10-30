@@ -22,10 +22,19 @@
 保留未删：`import-servers`、`history` 无使用证据但也无删除依据。`bind_observed_workload` 无路由
 可达，但其测试守护仍作用于已有绑定记录的进程归属逻辑。
 
-未验证：App 新页面、菜单栏和系统通知只通过编译，没有看过实际画面，通知授权未走通；Cursor 的
-clientInfo/roots 未实测（`cursor-agent` 未登录）；真实采集下的提醒触发；Slurm `exec_prefix`、
-真实分配、进入、归还未现场验证（`entry_verified=false`）。本机插件 `hanhai22` 是独立副本，
-尚未带上 `exec_prefix`。不要把这些写成已验证。
+本机实机验证（2026-10-30，已切换到 `v4` 构建，包装版本号仍是 3.1.0）：迁移在实时库完成，3,263 条
+租约保留，6/6 在线，占卡正常。总览、服务器、任务、提醒页和 GPU 详情看过实际画面。第一条真实
+“资源闲置”提醒自动产生并写入 `notified_at`。关窗后窗口数为 0、进程保留、状态项显示提醒数，
+再次打开恢复单窗口。真实 stdio 下 `serverpilot-mcp` 握手、工具清单、项目解析、`gpu_status` 和
+`if_changed` 通过。备份在 `~/Library/Application Support/ServerPilot/backups/`。
+
+未验证：系统通知横幅是否真的弹出（投递已执行，授权结果未确认）；菜单栏的外观；服务器表行
+的点击（后台 AXPress 未触发，总览入口正常，未判定是工具限制还是缺陷）；Slurm 节点详情入口；
+键盘、VoiceOver、缩放；Cursor 的 clientInfo/roots；真实 Agent 的 `gpu_apply`、改卡、接管；
+Slurm `exec_prefix` 与真实分配、进入、归还（`entry_verified=false`）。
+
+已知差异：MCP 文本仍是带缩进的 JSON，实测比紧凑形式约长 30%。全局规则未安装，因为 Codex 和
+Claude 的全局规则里本来就没有 ServerPilot 块，新契约经 MCP instructions 送达。
 
 ## 状态读取被插件发现拖慢（2026-10-30）
 
