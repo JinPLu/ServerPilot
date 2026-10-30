@@ -29,7 +29,7 @@ Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directo
 
 Call gpu_lease during preparation and quiet phases, within heartbeat_within_seconds: it is the heartbeat and it reports at_risk (cards with reclaim_at), changes (what happened to your lease) and resource_epoch. gpu_status is not a heartbeat. A card with no process next to a working card on its server is reclaimed unless you pass keep_idle=true, which lasts three windows at most. Whole-allocation providers reclaim only after lost heartbeats and observed idle; respect their deadline.
 
-gpu_resize is all or nothing and grows where the lease already is unless server_id or server_group_id is named. Pass expected_epoch to refuse a stale view. A running process cannot see added cards: restart_required=true. Provider allocations cannot resize: apply a new task.
+gpu_resize is all or nothing and grows where the lease already is unless server_id or server_group_id is named. Pass expected_epoch to refuse a stale view. A running process cannot see added cards: restart_required=true. Provider allocations cannot resize: apply a new task. When a card has no work left for this task, as a batch winds down, return it with remove_gpu_ids at once rather than waiting for reclaim: idle cards you hold are unavailable to everyone else.
 
 gpu_release with outcome when the task ends or fails. Zero running GPUs alone does not mean a task is finished. allocation_unconfirmed means repeat the same gpu_apply, never apply differently.
 

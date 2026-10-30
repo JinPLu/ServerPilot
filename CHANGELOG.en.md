@@ -6,6 +6,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+- Agents are now told to return cards they no longer need as a batch winds down, instead of waiting for reclaim.
 - Only macOS is maintained for now: Windows is no longer supported or tested in CI.
 
 ## 4.0.0 - 2026-10-31
