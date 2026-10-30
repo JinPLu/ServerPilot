@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import dataclasses
 import functools
 import hashlib
 import logging
@@ -34,17 +35,24 @@ from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
 from serverpilot.provider_contract import ProviderConnectionUpdate
 from serverpilot.schemas import (
+    AlertMark,
+    ApplyBody,
     CollectorSettingsUpdate,
     ControlPlaneSnapshot,
     EndpointCreate,
     EndpointKeepaliveRequest,
     EndpointUpdate,
+    HeartbeatBody,
     LeaseBind,
     LeaseGPUAssignment,
     LeaseObservedBind,
+    ReleaseBody,
     RequestCreate,
+    ResizeBody,
     ServerGroupCreate,
     ServerGroupUpdate,
+    SessionOpen,
+    TakeOverBody,
 )
 from serverpilot.service import SYSTEM_ACTOR_ID, ActorContext, BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
@@ -1133,7 +1141,8 @@ def create_app(
     def api_actor(request: Request) -> ActorContext:
         actor = service.local_actor(request.headers.get("x-serverpilot-actor", "agent"))
         limiter.check(actor.id)
-        return actor
+        session_id = request.headers.get("x-serverpilot-session")
+        return dataclasses.replace(actor, session_id=session_id) if session_id else actor
 
     ApiActor = Annotated[ActorContext, Depends(api_actor)]
 
@@ -1261,6 +1270,117 @@ def create_app(
             settings_data,
             idempotency_key=_idempotency_key(idempotency_key),
         )
+
+    # ---- task sessions (v2) ------------------------------------------------------
+
+    RELEASE_REASONS = {
+        "completed": "workload_completed",
+        "failed": "workload_failed",
+        "abandoned": "workload_abandoned",
+    }
+
+    def explained_no_capacity(exc: BrokerError, needed: int) -> BrokerError:
+        details = {**(exc.details or {}), **service.explain_no_capacity(needed, exc.details or {})}
+        return BrokerError(exc.code, exc.message, status_code=exc.status_code, details=details)
+
+    @app.post("/api/v2/sessions")
+    def open_session(body: SessionOpen, actor: ApiActor) -> dict[str, Any]:
+        return service.register_agent_session(
+            actor, session_id=body.session_id, client=body.client,
+            client_version=body.client_version, project_id=body.project,
+        )
+
+    @app.get("/api/v2/pulse")
+    def pulse() -> dict[str, Any]:
+        return service.pulse()
+
+    @app.get("/api/v2/capacity")
+    def capacity(actor: ApiActor) -> dict[str, Any]:
+        return {"groups": service.capacity_groups()}
+
+    @app.post("/api/v2/leases")
+    async def apply_lease(body: ApplyBody, actor: ApiActor) -> dict[str, Any]:
+        constraints: dict[str, Any] = {"gpu_count": body.gpu_count, "same_host": True}
+        if body.server_group_id is not None:
+            constraints["server_group_ids"] = [body.server_group_id]
+        if body.server_id is not None:
+            constraints["endpoint_ids"] = [body.server_id]
+        request_data = RequestCreate(
+            project_id=body.project, task_ref=body.task, purpose=body.task,
+            duration_seconds=body.duration_seconds, constraints=constraints,
+        )
+        try:
+            return await claim_request_now(
+                actor, request_data, idempotency_key=None, persistent_lease=True
+            )
+        except BrokerError as exc:
+            if exc.code != "no_capacity":
+                raise
+            raise explained_no_capacity(exc, body.gpu_count) from None
+
+    @app.post("/api/v2/leases/heartbeat")
+    def heartbeat(body: HeartbeatBody, actor: ApiActor) -> dict[str, Any]:
+        return service.lease_view(
+            actor, lease_id=body.lease_id, task=body.task, project_id=body.project,
+            keep_idle=body.keep_idle,
+        )
+
+    @app.post("/api/v2/leases/take-over")
+    def take_over(body: TakeOverBody, actor: ApiActor) -> dict[str, Any]:
+        return service.take_over_lease(
+            actor, lease_id=body.lease_id, task=body.task, project_id=body.project,
+            reason=body.reason, force=body.force,
+        )
+
+    @app.post("/api/v2/leases/{lease_id}/resize")
+    async def resize_lease(lease_id: str, body: ResizeBody, actor: ApiActor) -> dict[str, Any]:
+        if not body.add_count:
+            return await service.in_domain(
+                service.resize_lease, actor, lease_id, add_request=None,
+                remove_gpu_ids=body.remove_gpu_ids, expected_epoch=body.expected_epoch,
+            )
+        request_data = await service.in_domain(
+            service.resize_request_data, actor, lease_id, add_count=body.add_count,
+            server_id=body.server_id, server_group_id=body.server_group_id,
+        )
+        endpoint_ids = claim_candidate_endpoint_ids(
+            request_data, await service.in_domain(service.collector_endpoints)
+        )
+        resize = functools.partial(
+            service.in_domain, service.resize_lease, actor, lease_id, add_request=request_data,
+            remove_gpu_ids=body.remove_gpu_ids, expected_epoch=body.expected_epoch,
+        )
+        # The same handoff a claim uses: a keeper must not start on a card in
+        # the gap between stopping its neighbour and writing the new owner.
+        async with keepalive_endpoint_locks(endpoint_ids):
+            try:
+                return await resize()
+            except BrokerError as exc:
+                if exc.code != "no_capacity":
+                    raise
+                resized = await reclaim_keepalive_for_claim(
+                    actor, lambda: request_data, resize,
+                    idempotency_key=None, locked_endpoint_ids=endpoint_ids,
+                )
+                if resized is not None:
+                    return resized
+                raise explained_no_capacity(exc, body.add_count) from None
+
+    @app.post("/api/v2/leases/{lease_id}/release")
+    def release_v2(lease_id: str, body: ReleaseBody, actor: ApiActor) -> dict[str, Any]:
+        return service.release_lease(
+            actor, lease_id, reason=RELEASE_REASONS[body.outcome], idempotency_key=None
+        )
+
+    @app.get("/api/v2/alerts")
+    def alerts_inbox(pending: bool = False) -> dict[str, Any]:
+        return {"alerts": service.pending_notifications() if pending else service.list_reminders()}
+
+    @app.post("/api/v2/alerts/mark")
+    def alerts_mark(body: AlertMark, actor: ApiActor) -> dict[str, Any]:
+        return {"updated": service.mark_reminders(
+            actor, body.alert_ids, notified=body.notified, acked=body.acked
+        )}
 
     @app.post("/api/v1/claims")
     async def claim_now(

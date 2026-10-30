@@ -528,3 +528,55 @@ class EndpointObservation(StrictModel):
     @property
     def processes(self) -> list[ProcessInput]:
         return [process for node in self.nodes for process in node.processes]
+
+
+# ---- task sessions (v2) ----
+
+
+class SessionOpen(StrictModel):
+    session_id: str = Field(min_length=8, max_length=64)
+    client: str = Field(min_length=1, max_length=120)
+    client_version: str | None = Field(default=None, max_length=64)
+    project: str = Field(min_length=1, max_length=64)
+
+
+class ApplyBody(StrictModel):
+    project: str = Field(min_length=1, max_length=64)
+    task: str = Field(min_length=1, max_length=255)
+    duration_seconds: int = Field(ge=60, le=60 * 60 * 24 * 30)
+    gpu_count: int = Field(default=1, ge=1, le=1024)
+    server_group_id: str | None = None
+    server_id: str | None = None
+
+
+class HeartbeatBody(StrictModel):
+    lease_id: str | None = None
+    task: str | None = None
+    project: str | None = None
+    keep_idle: bool = False
+
+
+class ResizeBody(StrictModel):
+    add_count: int = Field(default=0, ge=0, le=1024)
+    server_id: str | None = None
+    server_group_id: str | None = None
+    remove_gpu_ids: list[str] = Field(default_factory=list)
+    expected_epoch: int | None = None
+
+
+class ReleaseBody(StrictModel):
+    outcome: Literal["completed", "failed", "abandoned"] = "completed"
+
+
+class TakeOverBody(StrictModel):
+    lease_id: str | None = None
+    task: str | None = None
+    project: str = Field(min_length=1, max_length=64)
+    reason: str = Field(min_length=1, max_length=300)
+    force: bool = False
+
+
+class AlertMark(StrictModel):
+    alert_ids: list[str] = Field(min_length=1, max_length=200)
+    notified: bool = False
+    acked: bool = False

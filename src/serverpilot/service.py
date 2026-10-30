@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import functools
 import logging
+import random
 import re
 import secrets
 import threading
@@ -34,6 +35,7 @@ from serverpilot.freshness import Freshness, freshness_of
 from serverpilot.models import (
     Actor,
     ActorProject,
+    AgentSession,
     Alert,
     AuditEvent,
     Endpoint,
@@ -81,6 +83,19 @@ SYSTEM_PROJECT_ID = RESERVED_SYSTEM_ID
 TERMINAL_LEASE_STATES = {"RELEASED", "EXPIRED_EMPTY"}
 #: How long a holder may keep idle cards, in reclaim windows.
 MAX_KEEP_IDLE_WINDOWS = 3
+#: What a holder is told about on its next heartbeat.
+LEASE_CHANGE_ACTIONS = (
+    "lease.idle_gpu_reclaimed",
+    "lease.idle_reclaimed",
+    "lease.resized",
+    "lease.taken_over",
+    "lease.operator_released",
+    "lease.reassigned",
+)
+ETA_SAMPLE_DAYS = 30
+ETA_MIN_SAMPLES = 50
+RETRY_MIN_SECONDS = 60
+RETRY_MAX_SECONDS = 1800
 # Alerts that describe one lease and become meaningless once that lease can no
 # longer own resources. `idle_lease` belongs here: a released lease is not idle,
 # it is gone, and nothing else was closing its warning.
@@ -130,6 +145,8 @@ class ActorContext:
     id: str
     role: str
     project_ids: frozenset[str]
+    #: The MCP process asking. Absent for the App and CLI.
+    session_id: str | None = None
 
     @property
     def is_admin(self) -> bool:
@@ -990,6 +1007,8 @@ class BrokerService:
 
     @staticmethod
     def _can_manage_lease(actor: ActorContext, lease: Lease) -> bool:
+        if lease.owner_session_id is not None and actor.session_id is not None:
+            return lease.owner_session_id == actor.session_id
         return lease.actor_id == actor.id
 
     @classmethod
@@ -1938,6 +1957,7 @@ class BrokerService:
                     constraints_json=json_dump(constraints.model_dump(mode="json")),
                     duration_seconds=request_data.duration_seconds, state="HELD", issued_at=now,
                     expires_at=allocation.expires_at, last_heartbeat_at=now, issued_revision=revision,
+                    owner_session_id=actor.session_id,
                 )
                 session.add(lease)
                 session.flush()
@@ -2133,6 +2153,7 @@ class BrokerService:
         }
         by_endpoint: dict[str, list[GPUDevice]] = defaultdict(list)
         absent_gpu_ids: list[str] = []
+        absent_endpoint_ids: set[str] = set()
         for resource in active_resources:
             gpu = gpu_by_id.get(resource.gpu_id)
             if gpu is not None:
@@ -2140,52 +2161,56 @@ class BrokerService:
                     by_endpoint[gpu.endpoint_id].append(gpu)
                 else:
                     absent_gpu_ids.append(gpu.id)
+                    absent_endpoint_ids.add(gpu.endpoint_id)
         executable_resources: list[dict[str, Any]] = []
-        if not absent_gpu_ids:
-            for endpoint_id, gpus in sorted(by_endpoint.items()):
-                endpoint = endpoints.get(endpoint_id)
-                if endpoint is None:
-                    continue
-                gpus.sort(
-                    key=lambda item: (
-                        item.cuda_ordinal if item.cuda_ordinal is not None else 1025,
-                        item.gpu_index,
-                    )
+        for endpoint_id, gpus in sorted(by_endpoint.items()):
+            # A missing card makes its own server's selector unsafe, not
+            # another server's.
+            if endpoint_id in absent_endpoint_ids:
+                continue
+            endpoint = endpoints.get(endpoint_id)
+            if endpoint is None:
+                continue
+            gpus.sort(
+                key=lambda item: (
+                    item.cuda_ordinal if item.cuda_ordinal is not None else 1025,
+                    item.gpu_index,
                 )
-                if any(gpu.cuda_ordinal is None for gpu in gpus):
-                    continue
-                selectors = [str(gpu.cuda_ordinal) for gpu in gpus]
-                # Admission rejects unsafe selectors, but never emit an unvalidated
-                # value should historical telemetry predate that invariant.
-                if not all(CUDA_SELECTOR_RE.fullmatch(selector) for selector in selectors):
-                    continue
-                commitment = commitments.get(endpoint_id)
-                executable_resources.append(
-                    {
-                        "endpoint": {
-                            "id": endpoint.id,
-                            "host": endpoint.host,
-                            "port": endpoint.port,
-                            "ssh_user": endpoint.ssh_user,
-                            "workspace_path": self._endpoint_effective_workspace(session, endpoint),
-                        },
-                        "gpus": [
-                            {
-                                "id": gpu.id,
-                                "gpu_uuid": gpu.gpu_uuid,
-                                "gpu_index": gpu.gpu_index,
-                                "cuda_ordinal": gpu.cuda_ordinal,
-                            }
-                            for gpu in gpus
-                        ],
-                        "cuda_visible_devices": ",".join(selectors),
-                        "cuda_device_order": "PCI_BUS_ID",
-                        "commitment": {
-                            "cpu_cores": commitment.cpu_cores if commitment else 0.0,
-                            "memory_mib": commitment.memory_mib if commitment else 0,
-                        },
-                    }
-                )
+            )
+            if any(gpu.cuda_ordinal is None for gpu in gpus):
+                continue
+            selectors = [str(gpu.cuda_ordinal) for gpu in gpus]
+            # Admission rejects unsafe selectors, but never emit an unvalidated
+            # value should historical telemetry predate that invariant.
+            if not all(CUDA_SELECTOR_RE.fullmatch(selector) for selector in selectors):
+                continue
+            commitment = commitments.get(endpoint_id)
+            executable_resources.append(
+                {
+                    "endpoint": {
+                        "id": endpoint.id,
+                        "host": endpoint.host,
+                        "port": endpoint.port,
+                        "ssh_user": endpoint.ssh_user,
+                        "workspace_path": self._endpoint_effective_workspace(session, endpoint),
+                    },
+                    "gpus": [
+                        {
+                            "id": gpu.id,
+                            "gpu_uuid": gpu.gpu_uuid,
+                            "gpu_index": gpu.gpu_index,
+                            "cuda_ordinal": gpu.cuda_ordinal,
+                        }
+                        for gpu in gpus
+                    ],
+                    "cuda_visible_devices": ",".join(selectors),
+                    "cuda_device_order": "PCI_BUS_ID",
+                    "commitment": {
+                        "cpu_cores": commitment.cpu_cores if commitment else 0.0,
+                        "memory_mib": commitment.memory_mib if commitment else 0,
+                    },
+                }
+            )
         allocations = [self._allocation_dict(item, utcnow()) for item in self._allocations(session, lease.id)]
         for allocation in allocations:
             if allocation["provider_id"] == "builtin":
@@ -6085,6 +6110,536 @@ class BrokerService:
             alert.last_seen_at = now
         return alert
 
+    # ---- task sessions -----------------------------------------------------------
+
+    def register_agent_session(
+        self,
+        actor: ActorContext,
+        *,
+        session_id: str,
+        client: str,
+        client_version: str | None,
+        project_id: str,
+    ) -> dict[str, Any]:
+        """Record an MCP process. Its first tool call lands here, once."""
+
+        def operation(session: Session) -> dict[str, Any]:
+            now = utcnow()
+            self._ensure_claim_project(session, project_id, now)
+            row = session.get(AgentSession, session_id)
+            if row is None:
+                row = AgentSession(
+                    id=session_id, client=client[:120], client_version=client_version,
+                    actor_id=actor.id, project_id=project_id, first_seen_at=now, last_seen_at=now,
+                )
+                session.add(row)
+            row.project_id = project_id
+            row.last_seen_at = now
+            return {"session_id": session_id, "client": row.client, "project": project_id}
+
+        return self._write(operation)
+
+    @staticmethod
+    def _lease_card_count(session: Session, lease: Lease) -> int:
+        count = session.scalar(
+            select(func.count()).select_from(LeaseResource).where(
+                LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+            )
+        )
+        return count or int(json_load(lease.constraints_json).get("gpu_count", 0))
+
+    def _held_task(
+        self, session: Session, actor: ActorContext, request_data: RequestCreate
+    ) -> dict[str, Any] | None:
+        """Answer a repeated apply with its lease; refuse one that disagrees."""
+
+        if actor.session_id is None:
+            return None
+        lease = session.scalar(select(Lease).where(
+            Lease.project_id == request_data.project_id,
+            Lease.task_ref == request_data.task_ref,
+            Lease.released_at.is_(None),
+            Lease.owner_session_id.is_not(None),
+        ))
+        if lease is None:
+            return None
+        count = self._lease_card_count(session, lease)
+        mine = lease.owner_session_id == actor.session_id
+        if mine and count == request_data.constraints.gpu_count:
+            return {"lease": self._lease_dict(session, lease), "existing": True,
+                    "snapshot_revision": self._revision(session)}
+        raise BrokerError(
+            "task_already_held",
+            "这个任务已有租约",
+            status_code=409,
+            details={"lease_id": lease.id, "gpu_count": count, "held_by_you": mine},
+        )
+
+    def _find_task_lease(self, session: Session, project_id: str, task: str) -> Lease | None:
+        return session.scalar(select(Lease).where(
+            Lease.project_id == project_id, Lease.task_ref == task, Lease.released_at.is_(None),
+        ).order_by(Lease.issued_at.desc()))
+
+    def _agent_lease(self, session: Session, actor: ActorContext, lease_id: str) -> Lease:
+        """The lease this caller may act on, or a refusal naming why not."""
+
+        lease = session.get(Lease, lease_id)
+        if lease is None or lease.kind != "workload":
+            raise BrokerError("lease_not_found", "找不到这个租约", status_code=404)
+        if self._can_manage_lease(actor, lease):
+            return lease
+        takeovers = session.scalars(select(AuditEvent).where(
+            AuditEvent.resource_type == "lease",
+            AuditEvent.resource_id == lease.id,
+            AuditEvent.action == "lease.taken_over",
+        )).all()
+        if any(json_load(item.summary_json).get("from_session") == actor.session_id for item in takeovers):
+            raise BrokerError("lease_taken_over", "这个租约已被新会话接管", status_code=409)
+        raise BrokerError("lease_forbidden", "这是其他 Agent 的租约", status_code=403)
+
+    def take_over_lease(
+        self,
+        actor: ActorContext,
+        *,
+        lease_id: str | None,
+        task: str | None,
+        project_id: str,
+        reason: str,
+        force: bool = False,
+    ) -> dict[str, Any]:
+        """Move a lease to this session, leaving a record of who took it from whom."""
+
+        self._require_role(actor, MUTATING_ROLES)
+        if actor.session_id is None:
+            raise BrokerError("session_required", "接管需要 Agent 会话", status_code=400)
+
+        def operation(session: Session) -> dict[str, Any]:
+            lease = (
+                session.get(Lease, lease_id)
+                if lease_id is not None
+                else self._find_task_lease(session, project_id, task or "")
+            )
+            if lease is None or lease.kind != "workload" or lease.state in TERMINAL_LEASE_STATES:
+                raise BrokerError("lease_not_found", "没有可接管的租约", status_code=404)
+            unclaimed = lease.owner_session_id is None
+            if not unclaimed and lease.project_id != project_id and not force:
+                raise BrokerError(
+                    "takeover_project_mismatch", "这是其他项目的租约",
+                    status_code=409, details={"project": lease.project_id},
+                )
+            now = utcnow()
+            before = {"session": lease.owner_session_id, "actor": lease.actor_id,
+                      "project": lease.project_id}
+            if unclaimed:
+                # Rows from before sessions all say project "agent".
+                self._ensure_claim_project(session, project_id, now)
+                clash = session.scalar(select(Lease).where(
+                    Lease.project_id == project_id, Lease.task_ref == lease.task_ref,
+                    Lease.released_at.is_(None), Lease.owner_session_id.is_not(None),
+                    Lease.id != lease.id,
+                ))
+                if clash is not None:
+                    raise BrokerError(
+                        "task_already_held", "这个任务已有租约",
+                        status_code=409, details={"lease_id": clash.id},
+                    )
+                lease.project_id = project_id
+            lease.owner_session_id = actor.session_id
+            lease.actor_id = actor.id
+            lease.last_heartbeat_at = now
+            for allocation in self._allocations(session, lease.id):
+                allocation.actor_id = actor.id
+            revision = self._bump_revision(session, now)
+            self._audit(
+                session, actor_id=actor.id, action="lease.taken_over", resource_type="lease",
+                resource_id=lease.id, result="success", before=before,
+                summary={"from_session": before["session"], "reason": reason[:300]}, now=now,
+            )
+            return {"lease": self._lease_dict(session, lease), "snapshot_revision": revision}
+
+        return self._write(operation)
+
+    def resize_request_data(self, actor: ActorContext, lease_id: str, *, add_count: int,
+                            server_id: str | None, server_group_id: str | None) -> RequestCreate:
+        """What adding cards amounts to, as a claim the keepalive handoff can read."""
+
+        def operation(session: Session) -> RequestCreate:
+            lease = self._agent_lease(session, actor, lease_id)
+            constraints: dict[str, Any] = {"gpu_count": add_count, "same_host": True}
+            if server_group_id is not None:
+                constraints["server_group_ids"] = [server_group_id]
+            elif server_id is not None:
+                constraints["endpoint_ids"] = [server_id]
+            else:
+                constraints["endpoint_ids"] = sorted({
+                    session.get(GPUDevice, card.gpu_id).endpoint_id
+                    for card in session.scalars(select(LeaseResource).where(
+                        LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+                    )).all()
+                })
+            return RequestCreate(
+                project_id=lease.project_id, task_ref=lease.task_ref, purpose=lease.purpose,
+                duration_seconds=lease.duration_seconds, constraints=constraints,
+            )
+
+        return self._read(operation)
+
+    def resize_lease(
+        self,
+        actor: ActorContext,
+        lease_id: str,
+        *,
+        add_request: RequestCreate | None,
+        remove_gpu_ids: list[str],
+        expected_epoch: int | None,
+    ) -> dict[str, Any]:
+        """Change a lease's cards in one transaction: all of it, or none of it."""
+
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            lease = self._agent_lease(session, actor, lease_id)
+            if lease.state not in ACTIVE_LEASE_STATES:
+                raise BrokerError("lease_ended", "这个租约已结束", status_code=409)
+            if any(item.provider_id != "builtin" for item in self._allocations(session, lease.id)):
+                raise BrokerError(
+                    "resize_unsupported", "调度器分配不能改卡，请用新任务申请", status_code=409,
+                )
+            if expected_epoch is not None and expected_epoch != lease.resource_epoch:
+                raise BrokerError(
+                    "epoch_conflict", "租约的卡已变化", status_code=409,
+                    details={"resource_epoch": lease.resource_epoch},
+                )
+            now = utcnow()
+            active = session.scalars(select(LeaseResource).where(
+                LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+            )).all()
+            by_gpu = {card.gpu_id: card for card in active}
+            unknown = [gpu_id for gpu_id in remove_gpu_ids if gpu_id not in by_gpu]
+            if unknown:
+                raise BrokerError(
+                    "card_not_held", "租约里没有这张 GPU", status_code=409,
+                    details={"gpu_ids": unknown},
+                )
+            busy = [gpu_id for gpu_id in remove_gpu_ids if self._current_processes(session, gpu_id, now)]
+            if busy:
+                raise BrokerError(
+                    "card_in_use", "这张 GPU 上还有进程", status_code=409, details={"gpu_ids": busy},
+                )
+            if len(remove_gpu_ids) >= len(active) and add_request is None:
+                raise BrokerError("use_release", "归还全部 GPU 请结束任务", status_code=409)
+            added: list[GPUDevice] = []
+            revision = self._bump_revision(session, now)
+            before = self._lease_dict(session, lease)
+            removed = [by_gpu[gpu_id] for gpu_id in remove_gpu_ids]
+            if removed:
+                self._settle_cards(
+                    lease, removed, reason="returned by holder", released_by=actor.id, now=now,
+                )
+                session.flush()
+            if add_request is not None:
+                added = self._add_cards(session, lease, add_request, now)
+            if not removed and not added:
+                raise BrokerError("nothing_to_change", "没有要改的卡", status_code=400)
+            if added and not removed:
+                lease.resource_epoch += 1
+            remaining = session.scalars(select(GPUDevice).join(
+                LeaseResource, LeaseResource.gpu_id == GPUDevice.id
+            ).where(LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True))).all()
+            self._sync_direct_allocations(session, lease, list(remaining), now)
+            self._sync_commitments(session, lease, remaining, now)
+            session.flush()
+            self._audit(
+                session, actor_id=actor.id, action="lease.resized", resource_type="lease",
+                resource_id=lease.id, result="success", before=before,
+                after=self._lease_dict(session, lease),
+                summary={"added": [gpu.id for gpu in added], "removed": remove_gpu_ids,
+                         "resource_epoch": lease.resource_epoch}, now=now,
+            )
+            return {
+                "lease": self._lease_dict(session, lease),
+                "added_gpu_ids": [gpu.id for gpu in added],
+                "removed_gpu_ids": list(remove_gpu_ids),
+                "resource_epoch": lease.resource_epoch,
+                "snapshot_revision": revision,
+            }
+
+        return self._write(operation)
+
+    def _add_cards(
+        self, session: Session, lease: Lease, request_data: RequestCreate, now: datetime
+    ) -> list[GPUDevice]:
+        constraints = request_data.constraints
+        project = session.get(Project, lease.project_id)
+        gpu_usage, _lease_usage = self._project_usage(session)
+        # The concurrency limit counts leases, and this adds none.
+        if project.quota_gpus is not None and (
+            gpu_usage[project.id] + constraints.gpu_count > project.quota_gpus
+        ):
+            raise BrokerError(
+                "no_capacity", f"项目 GPU 配额 {project.quota_gpus} 不足", status_code=409,
+                details={"gpu_count": constraints.gpu_count,
+                         "project_policy": f"quota {project.quota_gpus}"},
+            )
+        candidates, excluded = self._eligible_gpus(session, constraints=constraints, now=now)
+        chosen = self._select_resources_in_group_partitions(session, candidates, constraints)
+        if chosen is None:
+            raise BrokerError(
+                "no_capacity",
+                f"没有足够的可用 GPU（需要 {constraints.gpu_count} 张）",
+                status_code=409,
+                details={"gpu_count": constraints.gpu_count, "candidate_count": len(candidates),
+                         "excluded": excluded},
+            )
+        for gpu in chosen:
+            card = session.scalar(select(LeaseResource).where(
+                LeaseResource.lease_id == lease.id, LeaseResource.gpu_id == gpu.id
+            ))
+            if card is None:
+                card = LeaseResource(lease_id=lease.id, gpu_id=gpu.id)
+                session.add(card)
+            card.active = True
+            card.added_at = now
+            card.released_at = None
+            card.release_reason = None
+            card.released_by = None
+            card.idle_since = None
+            card.keep_idle_windows = 0
+        return list(chosen)
+
+    @staticmethod
+    def _sync_commitments(
+        session: Session, lease: Lease, gpus: Iterable[GPUDevice], now: datetime
+    ) -> None:
+        wanted = {gpu.endpoint_id for gpu in gpus}
+        constraints = json_load(lease.constraints_json)
+        rows = {
+            row.endpoint_id: row
+            for row in session.scalars(select(LeaseEndpointCommitment).where(
+                LeaseEndpointCommitment.lease_id == lease.id
+            )).all()
+        }
+        for endpoint_id, row in rows.items():
+            if endpoint_id not in wanted:
+                session.delete(row)
+        for endpoint_id in wanted - set(rows):
+            session.add(LeaseEndpointCommitment(
+                lease_id=lease.id, endpoint_id=endpoint_id,
+                cpu_cores=constraints.get("cpu_cores") or 0.0,
+                memory_mib=constraints.get("memory_mib") or 0, created_at=now,
+            ))
+
+    # ---- what an agent reads -------------------------------------------------------
+
+    def lease_view(
+        self,
+        actor: ActorContext,
+        *,
+        lease_id: str | None,
+        task: str | None,
+        project_id: str | None,
+        keep_idle: bool = False,
+    ) -> dict[str, Any]:
+        """Answer a holder in a few hundred bytes. Asking is the heartbeat."""
+
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> dict[str, Any]:
+            lease = (
+                session.get(Lease, lease_id)
+                if lease_id is not None
+                else self._find_task_lease(session, project_id or "", task or "")
+            )
+            if lease is None and task is not None:
+                lease = session.scalar(select(Lease).where(
+                    Lease.project_id == project_id, Lease.task_ref == task,
+                ).order_by(Lease.issued_at.desc()))
+            if lease is None:
+                raise BrokerError("lease_not_found", "找不到这个租约", status_code=404)
+            lease = self._agent_lease(session, actor, lease.id)
+            now = utcnow()
+            changes = self._unseen_changes(session, lease)
+            if lease.state in TERMINAL_LEASE_STATES:
+                return {
+                    "lease_id": lease.id, "state": lease.state, "task": lease.task_ref,
+                    "resource_epoch": lease.resource_epoch, "changes": changes,
+                    "ended": {"reason": lease.release_reason, "at": _iso(lease.released_at)},
+                }
+            lease.last_heartbeat_at = now
+            kept = self._keep_idle_cards(session, lease, actor, now) if keep_idle else None
+            cards = session.scalars(select(LeaseResource).where(
+                LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+            )).all()
+            at_risk = []
+            for card in cards:
+                idle_since = _as_utc(card.idle_since)
+                if idle_since is None:
+                    continue
+                reclaim_at = idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
+                at_risk.append({
+                    "gpu_id": card.gpu_id,
+                    "reclaim_at": _iso(reclaim_at),
+                    "windows_left": MAX_KEEP_IDLE_WINDOWS - card.keep_idle_windows,
+                })
+            result: dict[str, Any] = {
+                "lease_id": lease.id, "state": lease.state, "task": lease.task_ref,
+                "gpu_count": len(cards), "resource_epoch": lease.resource_epoch,
+                "at_risk": at_risk, "changes": changes,
+            }
+            if kept is not None:
+                result["kept_idle"] = kept
+            return result
+
+        return self._write(operation)
+
+    @staticmethod
+    def _unseen_changes(session: Session, lease: Lease) -> list[dict[str, Any]]:
+        """What happened to this lease since its holder last asked."""
+
+        events = session.scalars(select(AuditEvent).where(
+            AuditEvent.resource_type == "lease",
+            AuditEvent.resource_id == lease.id,
+            AuditEvent.action.in_(LEASE_CHANGE_ACTIONS),
+            AuditEvent.id > (lease.agent_seen_audit_id or 0),
+        ).order_by(AuditEvent.id)).all()
+        if events:
+            lease.agent_seen_audit_id = events[-1].id
+        return [
+            {"action": event.action.removeprefix("lease."), "at": _iso(event.created_at),
+             **{key: value for key, value in json_load(event.summary_json).items()
+                if key in {"reason", "reclaimed_gpu_count", "remaining_gpu_count", "added", "removed"}}}
+            for event in events
+        ]
+
+    def capacity_groups(self) -> list[dict[str, Any]]:
+        """Free cards per group, the smallest answer to where work can go."""
+
+        def operation(session: Session) -> list[dict[str, Any]]:
+            now = utcnow()
+            groups: dict[str, dict[str, Any]] = {}
+            endpoints = {item.id: item for item in session.scalars(select(Endpoint)).all()}
+            for gpu in session.scalars(select(GPUDevice).where(GPUDevice.present.is_(True))).all():
+                endpoint = endpoints.get(gpu.endpoint_id)
+                if endpoint is None:
+                    continue
+                group_id = endpoint.server_group_id
+                entry = groups.setdefault(group_id or endpoint.id, {
+                    "server_group_id": group_id,
+                    "server_id": None if group_id else endpoint.id,
+                    "total": 0, "free": 0, "unknown": 0, "by_server": defaultdict(int),
+                })
+                entry["total"] += 1
+                state, _reason = self._gpu_state(session, gpu, now)
+                if state in {"AVAILABLE", "KEEPALIVE"}:
+                    entry["free"] += 1
+                    entry["by_server"][endpoint.id] += 1
+                elif state.startswith("UNKNOWN"):
+                    entry["unknown"] += 1
+            answer = []
+            for key in sorted(groups):
+                entry = groups[key]
+                by_server = entry.pop("by_server")
+                entry["largest_block"] = max(by_server.values(), default=0)
+                answer.append(entry)
+            return answer
+
+        return self._read(operation)
+
+    def explain_no_capacity(self, needed: int, details: dict[str, Any]) -> dict[str, Any]:
+        """Turn a refusal into something an agent can decide from."""
+
+        groups = self.capacity_groups()
+        alternatives = [
+            {key: group[key] for key in ("server_group_id", "server_id", "free", "largest_block")
+             if group[key] is not None}
+            for group in groups
+            if group["largest_block"] > 0
+        ]
+        free = max((group["largest_block"] for group in groups), default=0)
+        eta = self._estimate_capacity_at(needed - free)
+        excluded = details.get("excluded") or {}
+        reason = "project_policy" if details.get("project_policy") else (
+            "stale_data" if excluded and all("stale" in key or "unknown" in key for key in excluded)
+            else "cards_busy"
+        )
+        return {
+            "reason": reason,
+            "needed": needed,
+            "largest_block": free,
+            "excluded": excluded,
+            "alternatives": alternatives,
+            **eta,
+        }
+
+    def _estimate_capacity_at(self, shortfall: int) -> dict[str, Any]:
+        """When enough cards should come free, or an honest null.
+
+        Declared durations are expectations, so they are scaled by how long
+        finished leases really ran. A holder already past its estimate could
+        end any moment or never; depending on one yields no estimate.
+        """
+
+        def operation(session: Session) -> dict[str, Any]:
+            now = utcnow()
+            finished = session.execute(select(Lease.issued_at, Lease.released_at, Lease.duration_seconds).where(
+                Lease.kind == "workload", Lease.release_reason == "workload_completed",
+                Lease.released_at >= now - timedelta(days=ETA_SAMPLE_DAYS),
+            )).all()
+            ratios = sorted(
+                ((_as_utc(end) - _as_utc(start)).total_seconds() / max(1, seconds))
+                for start, end, seconds in finished
+                if start is not None and end is not None
+            )
+            sampled = len(ratios) >= ETA_MIN_SAMPLES
+            scale = ratios[len(ratios) // 2] if sampled else 1.0
+            releases: list[tuple[datetime, int]] = []
+            unknown_holders = 0
+            for lease in session.scalars(select(Lease).where(
+                Lease.state.in_(ACTIVE_LEASE_STATES), Lease.kind == "workload"
+            )).all():
+                cards = self._lease_card_count(session, lease)
+                ends = (_as_utc(lease.issued_at) or now) + timedelta(seconds=lease.duration_seconds * scale)
+                if ends <= now:
+                    unknown_holders += cards
+                else:
+                    releases.append((ends, cards))
+            coming = 0
+            estimate = None
+            for ends, cards in sorted(releases):
+                coming += cards
+                if coming >= shortfall:
+                    estimate = ends
+                    break
+            retry = RETRY_MIN_SECONDS
+            if estimate is not None:
+                retry = (estimate - now).total_seconds() / 2
+            retry = min(RETRY_MAX_SECONDS, max(RETRY_MIN_SECONDS, retry))
+            return {
+                "eta": _iso(estimate),
+                "eta_basis": "observed_durations" if sampled else "declared_durations",
+                "unknown_holders": unknown_holders,
+                "retry_after_seconds": int(retry * random.uniform(0.9, 1.1)),
+            }
+
+        return self._read(operation)
+
+    def pulse(self) -> dict[str, Any]:
+        """What the App polls: did anything change, and is anything waiting."""
+
+        def operation(session: Session) -> dict[str, Any]:
+            waiting = session.execute(
+                select(Alert.state, func.count()).where(
+                    Alert.dedupe_key.is_not(None), Alert.state == "active"
+                ).group_by(Alert.state)
+            ).all()
+            return {
+                "version": __version__,
+                "revision": self._revision(session),
+                "open_alerts": sum(count for _state, count in waiting),
+            }
+
+        return self._read(operation)
+
     # ---- reminders ---------------------------------------------------------------
 
     def _evaluate_alerts(self, session: Session, now: datetime) -> None:
@@ -7098,6 +7653,9 @@ class BrokerService:
             if existing is not None:
                 return existing
         now = utcnow()
+        held = self._held_task(session, actor, request_data)
+        if held is not None:
+            return held
         project = self._ensure_claim_project(session, request_data.project_id, now)
         if not project.enabled:
             raise BrokerError("project_disabled", "project is disabled", status_code=409)
@@ -7119,6 +7677,7 @@ class BrokerService:
         )
         if persistent_lease:
             lease.expires_at = None
+        lease.owner_session_id = actor.session_id
         result = {
             "event_id": event.id,
             "snapshot_revision": revision,
