@@ -60,12 +60,25 @@ if [[ -d "${script_dir}/Fixtures" ]]; then
 fi
 plutil -lint "${app_bundle}/Contents/Info.plist" >/dev/null
 
+# From the macOS 27 SDK @State is a macro, and the Command Line Tools do not
+# ship its plugin, so with them alone the newest SDK cannot compile SwiftUI.
+# Build against the newest SDK that can.
+sdk_path="$(xcrun --sdk macosx --show-sdk-path)"
+if ! find "$(xcode-select -p)" -name 'libSwiftUIMacros*' -print -quit 2>/dev/null | grep -q .; then
+  for candidate in "${sdk_path:h}"/MacOSX2[0-6].*.sdk(NOn); do
+    sdk_path="${candidate}"
+    break
+  done
+fi
+
 xcrun --sdk macosx swiftc \
+  -sdk "${sdk_path}" \
   -target "${target_triple}" \
   -parse-as-library \
   -D DESKTOP_FIXTURES \
   -framework AppKit \
   -framework SwiftUI \
+  -framework UserNotifications \
   "${swift_sources[@]}" \
   -o "${macos_dir}/ServerPilot"
 xattr -cr "${app_bundle}"

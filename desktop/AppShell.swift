@@ -10,6 +10,8 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let port = 8787
     private let brokerStore = BrokerStore()
     private var window: NSWindow?
+    private var statusItem: StatusItemController?
+    private var alertDelivery: AlertDelivery?
     private var isStarting = false
 
     private lazy var projectRoot: URL? = {
@@ -73,6 +75,8 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         createdWindow.minSize = NSSize(width: 900, height: 640)
         createdWindow.center()
         createdWindow.delegate = self
+        // Closing leaves the App in the menu bar, and reopening shows this one.
+        createdWindow.isReleasedWhenClosed = false
 
         let view = NSHostingView(rootView: NativeBrokerRoot(store: brokerStore))
         view.frame = contentRect
@@ -88,10 +92,30 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         }
 #endif
         ensureDaemon()
+        statusItem = StatusItemController(store: brokerStore) { [weak self] in self?.showMainWindow() }
+        alertDelivery = AlertDelivery(store: brokerStore, notifier: SystemAlertNotifier())
+        alertDelivery?.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
-        true
+        false
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showMainWindow()
+        return true
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        brokerStore.windowVisible = false
+        NSApp.setActivationPolicy(.accessory)
+    }
+
+    private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        brokerStore.windowVisible = true
+        window?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private func configureMainMenu() {
@@ -446,6 +470,7 @@ private struct NativeBrokerRoot: View {
         let initialSection: DashboardSection = switch requested {
         case "server-pool": .resources
         case "resource-usage", "leases": .leases
+        case "alerts": .alerts
         case "settings": .settings
         default: .resources
         }
@@ -652,8 +677,11 @@ private struct AppSidebar: View {
             SidebarSelection(title: "服务器", systemImage: "server.rack", color: DesignTokens.interaction, selected: selectedSection == .resources, compact: compact) {
                 navigate(.resources)
             }
-            SidebarSelection(title: "使用情况", systemImage: "chart.bar.xaxis", color: DesignTokens.interaction, selected: selectedSection == .leases, compact: compact) {
+            SidebarSelection(title: "任务", systemImage: "chart.bar.xaxis", color: DesignTokens.interaction, selected: selectedSection == .leases, compact: compact) {
                 navigate(.leases)
+            }
+            SidebarSelection(title: store.openAlertCount > 0 ? "提醒 \(store.openAlertCount)" : "提醒", systemImage: "bell.fill", color: DesignTokens.interaction, selected: selectedSection == .alerts, compact: compact) {
+                navigate(.alerts)
             }
             SidebarSelection(title: "设置", systemImage: "gearshape.fill", color: DesignTokens.interaction, selected: selectedSection == .settings, compact: compact) {
                 navigate(.settings)
@@ -835,7 +863,8 @@ private struct AppToolbar: View {
     private var title: String {
         switch selectedSection {
         case .resources: return "服务器"
-        case .leases: return "使用情况"
+        case .leases: return "任务"
+        case .alerts: return "提醒"
         case .settings: return "设置"
         }
     }

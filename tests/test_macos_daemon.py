@@ -1018,7 +1018,7 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
     ):
         assert product_value in readme
     assert "| --- | --- | --- |" not in readme
-    assert 'SidebarSelection(title: "使用情况"' in window_source
+    assert 'SidebarSelection(title: "任务"' in window_source
     assert 'accessibilityLabel("按项目或任务查看使用情况")' in usage_source
     desktop_copy = window_source + usage_source
     for retired_copy in ("共享 GPU 工作区", "协作安排", "当前操作者"):

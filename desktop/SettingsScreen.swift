@@ -18,16 +18,9 @@ struct DashboardView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            if let error = store.errorMessage {
-                NoticeBanner(message: error, color: DesignTokens.danger, icon: "exclamationmark.triangle.fill")
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-            } else if store.freshness == .stale {
-                NoticeBanner(message: "连接已中断，显示上次数据。", color: DesignTokens.danger, icon: "wifi.exclamationmark")
-                    .padding(.horizontal, 24)
-                    .padding(.top, 12)
-            } else if let notice = displayedNotice {
-                NoticeBanner(message: notice, color: DesignTokens.success, icon: "checkmark.circle.fill")
+            FeedbackBanner(store: store)
+            if store.feedback == nil, store.freshness == .stale {
+                NoticeBanner(message: "本机服务响应中断，显示上次数据。", color: DesignTokens.danger, icon: "wifi.exclamationmark")
                     .padding(.horizontal, 24)
                     .padding(.top, 12)
             }
@@ -44,6 +37,8 @@ struct DashboardView: View {
                     )
                 case .leases:
                     ResourceUsageDashboard(store: store, claimGPU: claimGPU)
+                case .alerts:
+                    AlertsDashboard(store: store)
                 case .settings:
                     SettingsDashboard(store: store)
                 }
@@ -53,19 +48,6 @@ struct DashboardView: View {
             .animation(reduceMotion ? nil : .easeOut(duration: 0.18), value: selectedSection)
         }
         .background(Color.clear)
-    }
-
-    private var displayedNotice: String? {
-        guard let notice = store.notice,
-              notice.hasPrefix("已申领，待使用：")
-        else { return store.notice }
-
-        guard let runningLease = store.snapshot.leases.first(where: { lease in
-            notice.contains(lease.id) && lease.runtimeState == "RUNNING"
-        }) else { return notice }
-
-        let task = runningLease.taskReference ?? runningLease.purpose ?? "未命名任务"
-        return "任务占用：\(runningLease.projectID) · \(task) · \(runningLease.gpuCount) GPU。"
     }
 }
 
