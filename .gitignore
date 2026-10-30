@@ -35,5 +35,7 @@ marketing/
 # TEAMWORK_LOCAL_START
 # Teamwork local runtime state and project documents
 .codegraph/
-docs/teamwork/**
+# Personal network troubleshooting stays local; the rest of docs/teamwork is public.
+docs/teamwork/records/openvpn-network-change.md
+docs/teamwork/records/baige-corplink-disconnect.md
 # TEAMWORK_LOCAL_END
