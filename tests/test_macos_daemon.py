@@ -7,6 +7,7 @@ import re
 import sqlite3
 import stat
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from typer.testing import CliRunner
@@ -1055,3 +1056,68 @@ def test_resource_ownership_fixture_covers_all_resource_usage_dimensions() -> No
     )
     assert gpu_endpoint["host"] == "10.20.0.21"
     assert gpu_endpoint["port"] == 2222
+
+
+def _manager_for_ensure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, answers, launchd_pid):  # type: ignore[no-untyped-def]
+    from serverpilot.daemon import MacOSDaemonManager
+
+    plist = tmp_path / "agent.plist"
+    plist.write_text("x")
+    manager = MacOSDaemonManager.__new__(MacOSDaemonManager)
+    manager.config = SimpleNamespace(label="local.test", plist_path=plist, data_dir=tmp_path, lock_path=tmp_path / "lock", base_url="http://x")
+    manager.kicks = []
+    script = iter(answers)
+
+    def probe():  # type: ignore[no-untyped-def]
+        answer = next(script)
+        if isinstance(answer, Exception):
+            raise answer
+        return answer
+
+    monkeypatch.setattr(manager, "_probe_owned_ready", probe)
+    monkeypatch.setattr(manager, "_launchd_pid", lambda: launchd_pid)
+    monkeypatch.setattr(manager, "_loaded", lambda: True)
+    monkeypatch.setattr(manager, "_bootout_legacy_if_loaded", lambda: None)
+    monkeypatch.setattr(manager, "status", lambda: {"ready": True})
+    monkeypatch.setattr(manager, "_install_locked", lambda *args, **kwargs: {})
+    monkeypatch.setattr(manager, "_launchctl", lambda *args, **kwargs: manager.kicks.append(args))
+    monkeypatch.setattr("serverpilot.daemon.time.sleep", lambda _seconds: None)
+    return manager
+
+
+def test_connecting_never_kills_a_daemon_that_is_only_slow(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every MCP client ensures as it connects, so a kill here cascades."""
+
+    manager = _manager_for_ensure(
+        monkeypatch, tmp_path, answers=[None, None, None, {"process_id": 1}], launchd_pid=4242
+    )
+    assert manager.ensure() == {"ready": True}
+    assert manager.kicks == []
+
+
+def test_a_slow_daemon_is_reported_rather_than_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from serverpilot.daemon import DaemonError
+
+    manager = _manager_for_ensure(monkeypatch, tmp_path, answers=iter(lambda: None, 1), launchd_pid=4242)
+    with pytest.raises(DaemonError):
+        manager.ensure(timeout_seconds=0.01)
+    assert manager.kicks == []
+
+
+def test_a_loaded_job_with_no_process_is_still_restarted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    manager = _manager_for_ensure(
+        monkeypatch, tmp_path, answers=[None, None, None, {"process_id": 1}], launchd_pid=None
+    )
+    assert manager.ensure() == {"ready": True}
+    assert [args[0] for args in manager.kicks] == ["kickstart"]
+
+
+def test_a_stale_daemon_is_still_replaced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from serverpilot.daemon import DaemonError
+
+    stale = DaemonError("control plane is 4.0.0")
+    manager = _manager_for_ensure(
+        monkeypatch, tmp_path, answers=[stale, stale, stale, {"process_id": 1}], launchd_pid=4242
+    )
+    assert manager.ensure() == {"ready": True}
+    assert [args[0] for args in manager.kicks] == ["kickstart"]

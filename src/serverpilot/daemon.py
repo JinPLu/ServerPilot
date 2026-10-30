@@ -611,6 +611,9 @@ class MacOSDaemonManager:
                 pass
             # Loaded but not answering is the case a forced restart is for.
             self._launchctl("kickstart", "-k", self.service_target)
+        self._wait_until_ready(timeout_seconds)
+
+    def _wait_until_ready(self, timeout_seconds: float) -> None:
         deadline = time.monotonic() + timeout_seconds
         last_error: DaemonError | None = None
         while time.monotonic() < deadline:
@@ -715,6 +718,15 @@ class MacOSDaemonManager:
         except DaemonError:
             if not (self._loaded() and self.config.plist_path.is_file()):
                 raise
+        else:
+            # It did not answer, which is not the same as being broken. A running
+            # process that is busy or still starting is waited for, without the
+            # install lock. Every MCP client runs this as it connects, so killing
+            # here let each one kill the daemon the last one had just started,
+            # until they all ran past the client's connection timeout.
+            if self._launchd_pid() is not None:
+                self._wait_until_ready(timeout_seconds)
+                return self.status()
         self.config.data_dir.mkdir(parents=True, exist_ok=True)
         with self._install_lock():
             try:
