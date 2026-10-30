@@ -15,7 +15,7 @@ from sqlalchemy import select
 
 from serverpilot import mcp_server
 from serverpilot.client import BrokerClientError
-from serverpilot.models import Lease, LeaseResource
+from serverpilot.models import GPUDevice, Lease, LeaseResource
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation, process_for_gpu, tools
 
@@ -282,3 +282,116 @@ def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> N
 
     assert _active_gpu_ids(routine, lease_id) == set()
     _assert_sku_capacity(tools.gpu_status(), available_count=2, total_count=2)
+
+
+def _hold_cards_on_second_server(service, lease_id: str) -> str:  # type: ignore[no-untyped-def]
+    """Put endpoint-b's first card on the lease, as a resize would."""
+
+    service.ingest_observation(observation("endpoint-b", count=1))
+
+    def write(session):  # type: ignore[no-untyped-def]
+        gpu = session.scalar(select(GPUDevice).where(GPUDevice.endpoint_id == "endpoint-b"))
+        session.add(LeaseResource(lease_id=lease_id, gpu_id=gpu.id, active=True))
+        return gpu.id
+
+    return service._write(write)
+
+
+def _running_on_first_card(service, lease_id: str, count: int = 1):  # type: ignore[no-untyped-def]
+    first = min(_active_gpu_ids(service, lease_id) - _gpus_on(service, "endpoint-b"))
+
+    def read(session):  # type: ignore[no-untyped-def]
+        return session.get(GPUDevice, first)
+
+    gpu = service._read(read)
+    return observation(count=count, processes=[process_for_gpu(gpu.gpu_uuid)])
+
+
+def _gpus_on(service, endpoint_id: str) -> set[str]:  # type: ignore[no-untyped-def]
+    return service._read(lambda session: set(session.scalars(
+        select(GPUDevice.id).where(GPUDevice.endpoint_id == endpoint_id)
+    ).all()))
+
+
+def _card(service, lease_id: str, gpu_id: str):  # type: ignore[no-untyped-def]
+    return service._read(lambda session: session.scalar(select(LeaseResource).where(
+        LeaseResource.lease_id == lease_id, LeaseResource.gpu_id == gpu_id
+    )))
+
+
+def test_a_process_on_one_server_does_not_cost_another_its_cards(routine) -> None:  # type: ignore[no-untyped-def]
+    """A second server still being prepared is held by its holder, not its sibling."""
+
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="两台机器")["lease_id"]
+    second = _hold_cards_on_second_server(routine, lease_id)
+    routine.ingest_observation(observation("endpoint-b", count=1))
+    running = _running_on_first_card(routine, lease_id)
+    routine.ingest_observation(running)
+
+    reclaim_after = routine.inventory.idle_lease_reclaim_seconds
+    _age_idle(routine, lease_id, reclaim_after + 5, gpu_ids={second})
+    routine.record_lease_heartbeat(routine.local_actor("agent"), lease_id)
+    routine.ingest_observation(_running_on_first_card(routine, lease_id))
+    assert second in _active_gpu_ids(routine, lease_id)
+
+    # Heard from no longer, and the working sibling is no evidence for it.
+    _age_idle(routine, lease_id, reclaim_after + 5, gpu_ids={second})
+    routine.ingest_observation(_running_on_first_card(routine, lease_id))
+    assert second not in _active_gpu_ids(routine, lease_id)
+    card = _card(routine, lease_id, second)
+    assert card.release_reason == "idle without observed process"
+    assert card.released_by
+    lease = routine._read(lambda session: session.get(Lease, lease_id))
+    assert lease.resource_epoch == 1
+    assert lease.state in {"HELD", "ACTIVE"}
+
+
+def test_keep_idle_postpones_reclaim_for_three_windows_and_no_more(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=2))
+    lease_id = tools.gpu_apply(duration_seconds=3600, gpu_count=2, task="留空卡")["lease_id"]
+    routine.ingest_observation(_running_on_first_card(routine, lease_id, count=2))
+    idle = max(_active_gpu_ids(routine, lease_id))
+    actor = routine.local_actor("agent")
+    reclaim_after = routine.inventory.idle_lease_reclaim_seconds
+
+    def age_card(seconds: int) -> None:
+        def write(session):  # type: ignore[no-untyped-def]
+            session.scalar(select(LeaseResource).where(
+                LeaseResource.lease_id == lease_id, LeaseResource.gpu_id == idle
+            )).idle_since = utcnow() - timedelta(seconds=seconds)
+        routine._write(write)
+
+    age_card(reclaim_after - 5)
+    kept = routine.record_lease_heartbeat(actor, lease_id, keep_idle=True)["kept_idle"]
+    assert [item["windows_left"] for item in kept if item["gpu_id"] == idle] == [1]
+    age_card(reclaim_after + 5)
+    routine.ingest_observation(_running_on_first_card(routine, lease_id, count=2))
+    assert idle in _active_gpu_ids(routine, lease_id)
+
+    routine.record_lease_heartbeat(actor, lease_id, keep_idle=True)
+    age_card(reclaim_after * 3 - 5)
+    routine.ingest_observation(_running_on_first_card(routine, lease_id, count=2))
+    assert idle in _active_gpu_ids(routine, lease_id)
+
+    # The limit holds however often the holder asks.
+    routine.record_lease_heartbeat(actor, lease_id, keep_idle=True)
+    age_card(reclaim_after * 3 + 5)
+    routine.ingest_observation(_running_on_first_card(routine, lease_id, count=2))
+    assert idle not in _active_gpu_ids(routine, lease_id)
+    assert len(_active_gpu_ids(routine, lease_id)) == 1
+
+
+def test_a_reclaim_is_told_once_and_stands_until_read(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(duration_seconds=3600, gpu_count=1, task="被回收的任务")["lease_id"]
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_reclaim_seconds + 5)
+    routine.ingest_observation(observation(count=1))
+
+    pending = [item for item in routine.pending_notifications() if item["type"] == "lease_reclaimed"]
+    assert [item["lease_id"] for item in pending] == [lease_id]
+    assert "被回收的任务" in pending[0]["message"]
+
+    routine.mark_reminders(routine.local_actor("agent"), [pending[0]["id"]], notified=True)
+    assert not [item for item in routine.pending_notifications() if item["type"] == "lease_reclaimed"]
+    assert any(item["id"] == pending[0]["id"] and item["state"] == "active" for item in routine.list_reminders())

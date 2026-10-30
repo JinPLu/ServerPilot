@@ -21,6 +21,7 @@ from sqlalchemy import and_, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from serverpilot import SCHEMA_VERSION, __version__, retention
+from serverpilot import alerts as alert_rules
 from serverpilot.config import (
     RESERVED_SYSTEM_ID,
     CollectorSettings,
@@ -78,6 +79,8 @@ ACTIVE_LEASE_STATES = {"HELD", "ACTIVE", "ORPHANED_BUSY", "CONFLICT"}
 SYSTEM_ACTOR_ID = RESERVED_SYSTEM_ID
 SYSTEM_PROJECT_ID = RESERVED_SYSTEM_ID
 TERMINAL_LEASE_STATES = {"RELEASED", "EXPIRED_EMPTY"}
+#: How long a holder may keep idle cards, in reclaim windows.
+MAX_KEEP_IDLE_WINDOWS = 3
 # Alerts that describe one lease and become meaningless once that lease can no
 # longer own resources. `idle_lease` belongs here: a released lease is not idle,
 # it is gone, and nothing else was closing its warning.
@@ -1140,17 +1143,23 @@ class BrokerService:
         settled: list[str] = []
         for lease in leases:
             before = self._lease_dict(session, lease)
-            lease.state = "RELEASED"
-            lease.released_at = now
-            lease.release_reason = "server deleted while unreachable"
-            for resource in session.scalars(
+            reason = "server deleted while unreachable"
+            active = session.scalars(
                 select(LeaseResource).where(
                     LeaseResource.lease_id == lease.id,
                     LeaseResource.active.is_(True),
                 )
-            ).all():
-                resource.active = False
-                resource.released_at = now
+            ).all()
+            on_server = [
+                resource
+                for resource in active
+                if session.get(GPUDevice, resource.gpu_id).endpoint_id == endpoint_id
+            ]
+            self._settle_cards(lease, on_server, reason=reason, released_by=actor.id, now=now)
+            if len(on_server) == len(active):
+                lease.state = "RELEASED"
+                lease.released_at = now
+                lease.release_reason = reason
             self._resolve_lease_alerts(session, lease.id, now)
             self._audit(
                 session,
@@ -5151,6 +5160,7 @@ class BrokerService:
                 "alerts",
                 delete(Alert).where(
                     Alert.active.is_(False),
+                    or_(Alert.dedupe_key.is_(None), Alert.state == "resolved"),
                     Alert.last_seen_at < cutoff(retention.RESOLVED_ALERT_SECONDS),
                 ),
             )
@@ -5799,6 +5809,7 @@ class BrokerService:
             plugin_releases = self._reconcile_leases(
                 session, now, actor_id=f"collector:{endpoint.id}"
             )
+            self._evaluate_alerts(session, now)
             event = None
             if recovered:
                 event = self._audit(
@@ -6029,6 +6040,8 @@ class BrokerService:
                     summary={"provider": provider, "message": message[:300]},
                     now=now,
                 )
+            # With every server down no observation arrives to run this.
+            self._evaluate_alerts(session, now)
 
         self._write(operation)
 
@@ -6071,6 +6084,340 @@ class BrokerService:
             alert.message = message[:1000]
             alert.last_seen_at = now
         return alert
+
+    # ---- reminders ---------------------------------------------------------------
+
+    def _evaluate_alerts(self, session: Session, now: datetime) -> None:
+        """Turn current facts into reminder rows, at most once per interval.
+
+        This walks every GPU, and it runs from the collection path, where the
+        same walk once cost the control plane its responsiveness.
+        """
+
+        last = getattr(self, "_alerts_evaluated_at", None)
+        if last is not None and (now - last).total_seconds() < alert_rules.EVALUATE_EVERY_SECONDS:
+            return
+        self._alerts_evaluated_at = now
+        signals = {signal.key: signal for signal in self._alert_signals(session, now)}
+        rows = {
+            row.dedupe_key: row
+            for row in session.scalars(
+                select(Alert).where(
+                    Alert.dedupe_key.is_not(None),
+                    Alert.state.in_(alert_rules.OPEN_STATES),
+                    Alert.alert_type.not_in(("lease_reclaimed", "capacity_available")),
+                )
+            ).all()
+        }
+        for key, signal in signals.items():
+            row = rows.get(key)
+            step = alert_rules.step_present(
+                row.state if row else "pending",
+                _as_utc(row.pending_since) if row else None,
+                hold_seconds=signal.hold_seconds,
+                now=now,
+            )
+            if row is None:
+                row = self._new_reminder(session, signal, now)
+            row.state = step.state
+            row.pending_since = step.pending_since
+            row.message = signal.message[:1000]
+            row.last_seen_at = now
+            row.payload_json = json_dump({**signal.payload, "clear_streak": 0})
+            if signal.silent and row.notified_at is None:
+                row.notified_at = now
+        for key, row in rows.items():
+            if key in signals:
+                continue
+            payload = json_load(row.payload_json or "{}")
+            step = alert_rules.step_absent(
+                row.state,
+                _as_utc(row.pending_since),
+                clear_streak=int(payload.get("clear_streak", 0)),
+                clear_successes=int(payload.get("clear_successes", 1)),
+            )
+            row.state = step.state
+            row.payload_json = json_dump({**payload, "clear_streak": step.clear_streak})
+            row.last_seen_at = now
+        self._evaluate_capacity_alerts(session, now)
+
+    @staticmethod
+    def _new_reminder(session: Session, signal: alert_rules.Signal, now: datetime) -> Alert:
+        row = Alert(
+            id=secrets.token_hex(16),
+            alert_type=signal.alert_type,
+            severity=signal.severity,
+            resource_type=signal.resource_type,
+            resource_id=signal.resource_id,
+            message=signal.message[:1000],
+            active=False,
+            first_seen_at=now,
+            last_seen_at=now,
+            category=signal.category,
+            dedupe_key=signal.key,
+            lease_id=signal.lease_id,
+            project_id=signal.project_id,
+            task_ref=signal.task_ref,
+        )
+        session.add(row)
+        return row
+
+    def _alert_signals(self, session: Session, now: datetime) -> list[alert_rules.Signal]:
+        signals: list[alert_rules.Signal] = []
+        reclaim_after = self.inventory.idle_lease_reclaim_seconds
+
+        def lease_signal(lease: Lease, key: str, category: str, alert_type: str, message: str, **extra: Any):
+            return alert_rules.Signal(
+                key=key, category=category, alert_type=alert_type, severity="warning",
+                resource_type="lease", resource_id=lease.id, message=message,
+                lease_id=lease.id, project_id=lease.project_id, task_ref=lease.task_ref, **extra,
+            )
+
+        leases = session.scalars(
+            select(Lease).where(Lease.state.in_(ACTIVE_LEASE_STATES), Lease.kind == "workload")
+        ).all()
+        for lease in leases:
+            cards = session.scalars(
+                select(LeaseResource).where(
+                    LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+                )
+            ).all()
+            quiet = self._lease_liveness_age_seconds(session, lease, cards, now) >= (
+                reclaim_after - alert_rules.AT_RISK_LEAD_SECONDS
+            )
+            at_risk = 0
+            idle = 0
+            for card in cards:
+                idle_since = _as_utc(card.idle_since)
+                if idle_since is None:
+                    continue
+                idle_seconds = (now - idle_since).total_seconds()
+                if idle_seconds >= self.inventory.idle_lease_alert_seconds:
+                    idle += 1
+                left = self._card_reclaim_after_seconds(card) - idle_seconds
+                if left <= alert_rules.AT_RISK_LEAD_SECONDS and quiet:
+                    at_risk += 1
+            if at_risk:
+                signals.append(lease_signal(
+                    lease, f"at_risk:{lease.id}", alert_rules.TASK_IMPACTED, "lease_at_risk",
+                    f"任务「{lease.task_ref}」有 {at_risk} 张 GPU 即将被回收",
+                ))
+            if idle:
+                signals.append(lease_signal(
+                    lease, f"idle:{lease.id}", alert_rules.RESOURCE_IDLE, "lease_idle",
+                    f"任务「{lease.task_ref}」有 {idle} 张 GPU 已分配但没有运行",
+                ))
+            issued_at = _as_utc(lease.issued_at) or now
+            limit = lease.duration_seconds * alert_rules.OVERRUN_FACTOR
+            if (now - issued_at).total_seconds() > limit:
+                signals.append(lease_signal(
+                    lease, f"overrun:{lease.id}", alert_rules.RESOURCE_IDLE, "lease_overrun",
+                    f"任务「{lease.task_ref}」已超过预计时长的 {alert_rules.OVERRUN_FACTOR} 倍",
+                    silent=True,
+                ))
+        allocations = session.scalars(
+            select(ResourceAllocation).where(
+                ResourceAllocation.provider_id != "builtin",
+                ResourceAllocation.state.in_(("active", "unconfirmed")),
+            )
+        ).all()
+        for allocation in allocations:
+            lease = session.get(Lease, allocation.lease_id) if allocation.lease_id else None
+            if lease is None:
+                continue
+            if allocation.state == "unconfirmed":
+                signals.append(lease_signal(
+                    lease, f"unconfirmed:{allocation.id}", alert_rules.TASK_IMPACTED,
+                    "allocation_unconfirmed", f"任务「{lease.task_ref}」的分配状态无法确认",
+                    hold_seconds=alert_rules.UNCONFIRMED_HOLD_SECONDS,
+                ))
+            expires_at = _as_utc(allocation.expires_at)
+            if expires_at is not None and (expires_at - now).total_seconds() <= alert_rules.EXPIRY_LEAD_SECONDS:
+                signals.append(lease_signal(
+                    lease, f"expiring:{allocation.id}", alert_rules.TASK_IMPACTED,
+                    "allocation_expiring", f"任务「{lease.task_ref}」的分配将在 30 分钟内到期",
+                ))
+        for endpoint in session.scalars(select(Endpoint)).all():
+            last_success = _as_utc(session.scalar(
+                select(func.max(ProviderState.last_success_at)).where(
+                    ProviderState.endpoint_id == endpoint.id
+                )
+            ))
+            if last_success is None or (
+                (now - last_success).total_seconds() > self.collector.stale_after_seconds
+            ):
+                signals.append(self._server_signal(
+                    endpoint, f"offline:{endpoint.id}", "server_offline",
+                    f"服务器 {endpoint.id} 持续无法连接",
+                    hold_seconds=alert_rules.OFFLINE_HOLD_SECONDS,
+                ))
+            connection = session.get(EndpointConnection, endpoint.id)
+            if connection is not None and connection.desired and connection.error_code in {
+                "auth_failed", "session_missing",
+            }:
+                signals.append(self._server_signal(
+                    endpoint, f"auth:{endpoint.id}", "server_auth",
+                    f"服务器 {endpoint.id} 需要重新登录",
+                ))
+        for current in session.scalars(
+            select(KeepaliveCurrent).where(KeepaliveCurrent.actual == "ERROR")
+        ).all():
+            signals.append(alert_rules.Signal(
+                key=f"keepalive:{current.gpu_id}", category=alert_rules.RESOURCE_IDLE,
+                alert_type="keepalive_fault", severity="warning", resource_type="gpu",
+                resource_id=current.gpu_id, message="一张 GPU 的占卡程序状态异常",
+                hold_seconds=alert_rules.KEEPALIVE_FAULT_HOLD_SECONDS,
+            ))
+        return signals
+
+    @staticmethod
+    def _server_signal(
+        endpoint: Endpoint, key: str, alert_type: str, message: str, *, hold_seconds: int = 0
+    ) -> alert_rules.Signal:
+        return alert_rules.Signal(
+            key=key, category=alert_rules.SERVER_ABNORMAL, alert_type=alert_type,
+            severity="critical", resource_type="endpoint", resource_id=endpoint.id,
+            message=message, hold_seconds=hold_seconds,
+            clear_successes=alert_rules.RECOVERY_SUCCESSES,
+            payload={"clear_successes": alert_rules.RECOVERY_SUCCESSES},
+        )
+
+    def _evaluate_capacity_alerts(self, session: Session, now: datetime) -> None:
+        groups: dict[str, list[GPUDevice]] = defaultdict(list)
+        names: dict[str, str] = {}
+        endpoints = {item.id: item for item in session.scalars(select(Endpoint)).all()}
+        for gpu in session.scalars(select(GPUDevice).where(GPUDevice.present.is_(True))).all():
+            endpoint = endpoints.get(gpu.endpoint_id)
+            if endpoint is None:
+                continue
+            key = f"group:{endpoint.server_group_id}" if endpoint.server_group_id else f"server:{endpoint.id}"
+            groups[key].append(gpu)
+            names[key] = endpoint.server_group_id or endpoint.id
+        for key, gpus in groups.items():
+            states = [self._gpu_state(session, gpu, now)[0] for gpu in gpus]
+            if any(state.startswith("UNKNOWN") for state in states):
+                # Stale data says nothing about whether the group emptied or
+                # refilled, and a recovery must not read as cards appearing.
+                continue
+            free = sum(state in {"AVAILABLE", "KEEPALIVE"} for state in states)
+            dedupe_key = f"capacity:{key}"
+            row = session.scalar(select(Alert).where(
+                Alert.dedupe_key == dedupe_key, Alert.state.in_(alert_rules.OPEN_STATES)
+            ))
+            notified = _as_utc(session.scalar(
+                select(func.max(Alert.notified_at)).where(Alert.dedupe_key == dedupe_key)
+            ))
+            step = alert_rules.step_capacity(
+                row.state if row else None,
+                _as_utc(row.pending_since) if row else None,
+                free_cards=free,
+                last_notified_at=notified,
+                now=now,
+            )
+            if row is None:
+                if step.state != alert_rules.ARMED:
+                    continue
+                row = self._new_reminder(session, alert_rules.Signal(
+                    key=dedupe_key, category=alert_rules.CAPACITY_AVAILABLE,
+                    alert_type="capacity_available", severity="info", resource_type="server_group",
+                    resource_id=names[key], message=f"{names[key]} 有空闲 GPU",
+                ), now)
+            elif step.state == "resolved":
+                row.state = "resolved"
+                row.last_seen_at = now
+                row = self._new_reminder(session, alert_rules.Signal(
+                    key=dedupe_key, category=alert_rules.CAPACITY_AVAILABLE,
+                    alert_type="capacity_available", severity="info", resource_type="server_group",
+                    resource_id=names[key], message=f"{names[key]} 有空闲 GPU",
+                ), now)
+                step = alert_rules.Step(alert_rules.ARMED, None)
+            row.state = step.state
+            row.pending_since = step.pending_since
+            row.last_seen_at = now
+            if step.state == "active":
+                row.message = f"{names[key]} 有 {free} 张空闲 GPU"[:1000]
+
+    def _raise_lease_reclaimed(self, session: Session, lease: Lease, count: int, now: datetime) -> None:
+        """A reclaim happens once, so its reminder stands until someone reads it."""
+
+        row = self._new_reminder(session, alert_rules.Signal(
+            key=f"reclaimed:{lease.id}:{lease.resource_epoch}", category=alert_rules.TASK_IMPACTED,
+            alert_type="lease_reclaimed", severity="warning", resource_type="lease",
+            resource_id=lease.id, message=f"任务「{lease.task_ref}」有 {count} 张 GPU 已被回收",
+            lease_id=lease.id, project_id=lease.project_id, task_ref=lease.task_ref,
+        ), now)
+        row.state = "active"
+
+    def pending_notifications(self) -> list[dict[str, Any]]:
+        """Alerts nobody has been told about; older ones stay in the inbox."""
+
+        now = utcnow()
+        oldest = now - timedelta(seconds=alert_rules.NOTIFY_WITHIN_SECONDS)
+
+        def operation(session: Session) -> list[dict[str, Any]]:
+            rows = session.scalars(
+                select(Alert).where(
+                    Alert.dedupe_key.is_not(None),
+                    Alert.state == "active",
+                    Alert.notified_at.is_(None),
+                    Alert.last_seen_at >= oldest,
+                ).order_by(Alert.first_seen_at)
+            ).all()
+            return alert_rules.coalesce([self._reminder_dict(row) for row in rows])
+
+        return self._read(operation)
+
+    def list_reminders(self, *, limit: int = 200) -> list[dict[str, Any]]:
+
+        def operation(session: Session) -> list[dict[str, Any]]:
+            rows = session.scalars(
+                select(Alert).where(
+                    Alert.dedupe_key.is_not(None), Alert.state.in_(("active", "acked", "resolved"))
+                ).order_by(Alert.last_seen_at.desc()).limit(limit)
+            ).all()
+            return [self._reminder_dict(row) for row in rows]
+
+        return self._read(operation)
+
+    def mark_reminders(
+        self, actor: ActorContext, alert_ids: list[str], *, notified: bool = False, acked: bool = False
+    ) -> int:
+        self._require_role(actor, MUTATING_ROLES)
+        now = utcnow()
+
+        def operation(session: Session) -> int:
+            rows = session.scalars(
+                select(Alert).where(Alert.id.in_(alert_ids), Alert.dedupe_key.is_not(None))
+            ).all()
+            for row in rows:
+                if notified and row.notified_at is None:
+                    row.notified_at = now
+                if acked and row.state == "active":
+                    row.state = "acked"
+                    row.acknowledged_at = now
+                    row.acknowledged_by = actor.id
+            return len(rows)
+
+        return self._write(operation)
+
+    @staticmethod
+    def _reminder_dict(row: Alert) -> dict[str, Any]:
+        return {
+            "id": row.id,
+            "category": row.category,
+            "type": row.alert_type,
+            "severity": row.severity,
+            "state": row.state,
+            "message": row.message,
+            "resource_type": row.resource_type,
+            "resource_id": row.resource_id,
+            "lease_id": row.lease_id,
+            "project_id": row.project_id,
+            "task": row.task_ref,
+            "first_seen_at": _iso(row.first_seen_at),
+            "last_seen_at": _iso(row.last_seen_at),
+            "notified_at": _iso(row.notified_at),
+        }
 
     # ---- atomic scheduling -----------------------------------------------------
 
@@ -6976,7 +7323,9 @@ class BrokerService:
 
         return self._write(operation)
 
-    def record_lease_heartbeat(self, actor: ActorContext, lease_id: str) -> dict[str, Any]:
+    def record_lease_heartbeat(
+        self, actor: ActorContext, lease_id: str, *, keep_idle: bool = False
+    ) -> dict[str, Any]:
         """Record that the holder of this lease is still there.
 
         A holder asking the control plane about its own hold is the only
@@ -6991,6 +7340,10 @@ class BrokerService:
         deliberately writes no audit event and bumps no revision -- it changes
         nothing another consumer reconciles against, and it arrives once per
         status call.
+
+        ``keep_idle`` is the one exception. It postpones reclaiming idle cards
+        next to working ones, up to ``MAX_KEEP_IDLE_WINDOWS``, and each change
+        to that is audited, because it keeps cards away from everyone else.
         """
 
         self._require_role(actor, MUTATING_ROLES)
@@ -7001,12 +7354,16 @@ class BrokerService:
                 return {"lease_id": lease_id, "recorded": False}
             if lease.state not in ACTIVE_LEASE_STATES:
                 return {"lease_id": lease_id, "recorded": False}
-            lease.last_heartbeat_at = utcnow()
-            return {
+            now = utcnow()
+            lease.last_heartbeat_at = now
+            result: dict[str, Any] = {
                 "lease_id": lease_id,
                 "recorded": True,
-                "last_heartbeat_at": _iso(lease.last_heartbeat_at),
+                "last_heartbeat_at": _iso(now),
             }
+            if keep_idle:
+                result["kept_idle"] = self._keep_idle_cards(session, lease, actor, now)
+            return result
 
         return self._write(operation)
 
@@ -7984,6 +8341,73 @@ class BrokerService:
             return False
         return self._resources_have_fresh_telemetry(session, [resource], now)
 
+    def _keep_idle_cards(
+        self, session: Session, lease: Lease, actor: ActorContext, now: datetime
+    ) -> list[dict[str, Any]]:
+        """Extend each idle card one window past now, up to the limit."""
+
+        reclaim_after = self.inventory.idle_lease_reclaim_seconds
+        cards = session.scalars(
+            select(LeaseResource).where(
+                LeaseResource.lease_id == lease.id,
+                LeaseResource.active.is_(True),
+                LeaseResource.idle_since.is_not(None),
+            )
+        ).all()
+        kept: list[dict[str, Any]] = []
+        changed: list[str] = []
+        for card in cards:
+            idle_since = _as_utc(card.idle_since) or now
+            elapsed = int((now - idle_since).total_seconds())
+            windows = min(MAX_KEEP_IDLE_WINDOWS, elapsed // reclaim_after + 2)
+            if windows > card.keep_idle_windows:
+                card.keep_idle_windows = windows
+                changed.append(card.gpu_id)
+            kept.append({
+                "gpu_id": card.gpu_id,
+                "reclaim_at": _iso(
+                    idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
+                ),
+                "windows_left": MAX_KEEP_IDLE_WINDOWS - card.keep_idle_windows,
+            })
+        if changed:
+            self._audit(
+                session,
+                actor_id=actor.id,
+                action="lease.keep_idle",
+                resource_type="lease",
+                resource_id=lease.id,
+                result="success",
+                summary={"gpu_ids": changed},
+                now=now,
+            )
+        return kept
+
+    def _card_reclaim_after_seconds(self, resource: LeaseResource) -> int:
+        """Idle time after which this card goes, counting windows its holder kept."""
+
+        return self.inventory.idle_lease_reclaim_seconds * max(1, resource.keep_idle_windows)
+
+    @staticmethod
+    def _settle_cards(
+        lease: Lease,
+        resources: Iterable[LeaseResource],
+        *,
+        reason: str,
+        released_by: str,
+        now: datetime,
+    ) -> None:
+        """Take cards off a lease, recording why, so the holder can be told."""
+
+        for resource in resources:
+            resource.active = False
+            resource.released_at = now
+            resource.release_reason = reason[:500]
+            resource.released_by = released_by
+            resource.idle_since = None
+            resource.keep_idle_windows = 0
+        lease.resource_epoch += 1
+
     def _reconcile_idle_lease(
         self,
         session: Session,
@@ -8038,22 +8462,32 @@ class BrokerService:
 
         alert_after = self.inventory.idle_lease_alert_seconds
         reclaim_after = self.inventory.idle_lease_reclaim_seconds
-        # Asked once, for the claim as a whole, and applied to every card
-        # alike.  A card lying idle next to a card that is working is a card
-        # this claim is not using; a claim with nothing running anywhere is
-        # the shape of a staged job between two batches, and then the only
-        # evidence left is whether the holder itself was heard from.
-        working = any(
-            self._current_processes(session, resource.gpu_id, now) for resource in resources
-        )
-        protected = not working and (
-            self._lease_liveness_age_seconds(session, lease, resources, now) < reclaim_after
-        )
+        # Asked per server, because a lease may span several. A card idle next
+        # to a working card on its own server is a card this claim is not
+        # using. A server with nothing running is the shape of a staged job
+        # between batches, or one still being prepared, and then the only
+        # evidence left is whether the holder was heard from -- a process on
+        # some other server says nothing about this one.
+        by_endpoint: dict[str, list[LeaseResource]] = defaultdict(list)
+        for resource in resources:
+            by_endpoint[session.get(GPUDevice, resource.gpu_id).endpoint_id].append(resource)
+        protected_endpoints = {
+            endpoint_id
+            for endpoint_id, cards in by_endpoint.items()
+            if not any(self._current_processes(session, card.gpu_id, now) for card in cards)
+            and self._lease_liveness_age_seconds(session, lease, cards, now) < reclaim_after
+        }
+        endpoint_of = {
+            resource.id: endpoint_id
+            for endpoint_id, cards in by_endpoint.items()
+            for resource in cards
+        }
         reclaimed: list[LeaseResource] = []
         alerting = 0
         for resource in resources:
             if not self._gpu_is_observably_idle(session, resource, now):
                 resource.idle_since = None
+                resource.keep_idle_windows = 0
                 continue
             if resource.idle_since is None:
                 resource.idle_since = now
@@ -8061,7 +8495,10 @@ class BrokerService:
             idle_seconds = (now - (_as_utc(resource.idle_since) or now)).total_seconds()
             if idle_seconds < alert_after:
                 continue
-            if idle_seconds >= reclaim_after and not protected:
+            if (
+                idle_seconds >= self._card_reclaim_after_seconds(resource)
+                and endpoint_of[resource.id] not in protected_endpoints
+            ):
                 reclaimed.append(resource)
             else:
                 alerting += 1
@@ -8093,10 +8530,13 @@ class BrokerService:
             return
 
         before = self._lease_dict(session, lease)
-        for resource in reclaimed:
-            resource.active = False
-            resource.released_at = now
-            resource.idle_since = None
+        self._settle_cards(
+            lease,
+            reclaimed,
+            reason="idle without observed process",
+            released_by=actor_id,
+            now=now,
+        )
         if remaining:
             # Part of the claim is still doing real work, so the lease lives on
             # with a smaller resource set.
@@ -8109,6 +8549,7 @@ class BrokerService:
             lease.idle_since = None
         self._sync_direct_allocations(session, lease, [session.get(GPUDevice, item.gpu_id) for item in remaining], now)
         self._resolve_idle_lease_alert(session, lease.id, now)
+        self._raise_lease_reclaimed(session, lease, len(reclaimed), now)
         self._audit(
             session,
             actor_id=actor_id,
