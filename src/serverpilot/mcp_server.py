@@ -1041,12 +1041,14 @@ def _node_view(node: dict[str, Any]) -> dict[str, Any]:
 
 def _capacity_digest(groups: list[dict[str, Any]]) -> str:
     facts = sorted((str(group.get("server_group_id") or group.get("server_id")), group["free"],
-                    group["largest_block"], group["unknown"]) for group in groups)
+                    group.get("largest_block"), group.get("unknown", 0)) for group in groups)
     return hashlib.sha256(repr(facts).encode()).hexdigest()[:12]
 
 
 def _clean(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    return [{key: value for key, value in group.items() if value not in (None, 0) or key == "free"}
+    # largest_block=null means unknown, which is not the same as absent.
+    return [{key: value for key, value in group.items()
+             if value not in (None, 0) or key in {"free", "largest_block"}}
             for group in groups]
 
 
@@ -1087,6 +1089,7 @@ async def gpu_status(
             if view == "nodes":
                 return {"ok": True, "nodes": [_node_view(node) for node in detail.get("resource_nodes", [])]}
             detail.pop("resource_nodes", None)
+            detail.pop("open_leases", None)
             return {"ok": True, **detail}
         groups = (await _client_call(client, "get", "/api/v2/capacity"))["groups"]
         if server_group_id is not None:
@@ -1095,6 +1098,11 @@ async def gpu_status(
         if if_changed == digest:
             return {"ok": True, "unchanged": True, "digest": digest}
         answer: dict[str, Any] = {"ok": True, "digest": digest, "groups": _clean(groups)}
+        if view == "capacity":
+            # Enough to poll on. The notes are read once, before choosing.
+            for group in answer["groups"]:
+                for key in ("name", "cwd", "notes", "max_lease_seconds"):
+                    group.pop(key, None)
         if view == "summary":
             answer["project"] = project
             answer.update(await _client_call(client, "get", "/api/v2/leases/mine", params={"project": project}))

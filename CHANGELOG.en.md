@@ -16,6 +16,8 @@ This changelog records user-visible changes; implementation details belong in Gi
 - Closing the window keeps the App in the menu bar with a reminder count, and there is a new reminders page plus system notifications for impacted tasks, server trouble, idle resources and free cards.
 - A failed action no longer shows as success, its result stays until dismissed, and one slow response no longer disables everything.
 - A card now has one status word across the App and MCP.
+- The App opens on an overview of what needs attention; the task page shows who holds each task and which cards it uses; clicking a GPU shows its processes and holder.
+- `serverpilot lease activate`, `renew`, `bind` and `bind-observed` are gone, and `lease release` takes `--outcome`. The control plane API is now `/api/v2` throughout.
 
 ## 3.1.0 - 2026-10-30
 

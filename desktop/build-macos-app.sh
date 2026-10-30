@@ -35,7 +35,12 @@ if [[ "${1:-}" == "test" ]]; then
   developer_frameworks="$(xcode-select -p)/Library/Developer/Frameworks"
   developer_lib="$(xcode-select -p)/Library/Developer/usr/lib"
   if [[ -d "${developer_frameworks}" ]]; then
+    # The Command Line Tools keep the macro plugin off the default search path,
+    # and a tree under ~/Documents carries extended attributes that codesign
+    # refuses, so the test bundle is built outside it.
     swift test \
+      --scratch-path "${TMPDIR:-/tmp}/serverpilot-swift-tests" \
+      -Xswiftc -plugin-path -Xswiftc "$(xcode-select -p)/usr/lib/swift/host/plugins/testing" \
       -Xswiftc -F"${developer_frameworks}" \
       -Xlinker -F"${developer_frameworks}" \
       -Xlinker -rpath -Xlinker "${developer_frameworks}" \

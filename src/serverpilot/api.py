@@ -1285,8 +1285,8 @@ def create_app(
         "abandoned": "workload_abandoned",
     }
 
-    def explained_no_capacity(exc: BrokerError, needed: int) -> BrokerError:
-        details = {**(exc.details or {}), **service.explain_no_capacity(needed, exc.details or {})}
+    def explained_no_capacity(actor: ActorContext, exc: BrokerError, needed: int) -> BrokerError:
+        details = {**(exc.details or {}), **service.explain_no_capacity(actor, needed, exc.details or {})}
         return BrokerError(exc.code, exc.message, status_code=exc.status_code, details=details)
 
     @app.post("/api/v2/sessions")
@@ -1302,7 +1302,7 @@ def create_app(
 
     @app.get("/api/v2/capacity")
     def capacity(actor: ApiActor) -> dict[str, Any]:
-        return {"groups": service.capacity_groups()}
+        return {"groups": service.capacity_groups(actor)}
 
     @app.post("/api/v2/leases")
     async def apply_lease(body: ApplyBody, actor: ApiActor) -> dict[str, Any]:
@@ -1322,7 +1322,7 @@ def create_app(
         except BrokerError as exc:
             if exc.code != "no_capacity":
                 raise
-            raise explained_no_capacity(exc, body.gpu_count) from None
+            raise explained_no_capacity(actor, exc, body.gpu_count) from None
         # Only a quiet lease needs this, and a holder cannot pace itself
         # against a limit nobody told it.
         return {**claimed, "heartbeat_within_seconds": service.inventory.idle_lease_reclaim_seconds}
@@ -1377,7 +1377,7 @@ def create_app(
                 )
                 if resized is not None:
                     return resized
-                raise explained_no_capacity(exc, body.add_count) from None
+                raise explained_no_capacity(actor, exc, body.add_count) from None
 
     @app.post("/api/v2/leases/{lease_id}/release")
     def release_v2(lease_id: str, body: ReleaseBody, actor: ApiActor) -> dict[str, Any]:

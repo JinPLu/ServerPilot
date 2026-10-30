@@ -7,19 +7,25 @@
 
 ## 4.0 Agent 与 App 重设计（`v4` 分支，2026-10-30，未发布）
 
-计划见 `docs/teamwork/plans/v4-agent-and-app-redesign.md`。
+计划见 `docs/teamwork/plans/v4-agent-and-app-redesign.md`。P0–P6 已完成，P7（实机验证、合入、发布）待批准。
 
-已完成并通过测试：迁移 0041、按服务器判定回收、`keep_idle`、提醒引擎、`/api/v2`、七个 MCP 工具、
-App 反馈模型、pulse 轮询、提醒页、菜单栏、系统通知、统一卡状态词表。
+已完成：迁移 0041、按服务器判定回收、`keep_idle`、提醒引擎、七个 MCP 工具、全部路由迁到
+`/api/v2`（v1 已删除，测试约束）、App 总览页、提醒页、菜单栏、系统通知、结果提示、pulse 轮询、
+任务页显示持有者与逐卡状态、GPU 详情入口、Slurm 节点到服务器详情的入口、统一卡状态词表，
+以及 `activate`、`renew`、`bind`、`bind-observed` 的删除。
 
-实测（6 服务器、28 卡夹具，字符数）：`gpu_apply` 723、`gpu_status` 643、容量 394、心跳 145。
+在真实数据库副本上验证（不启动采集，不连服务器）：迁移后 API 正常，接管老租约成功。
+响应字符数：`gpu_status` 1,537（其中多数是环境说明）、容量 322、`view=servers` 7,177、
+`view=nodes` 最大 4,979、接管 383、心跳 262。状态读取约 19 毫秒，pulse 约 1 毫秒、54 字节。
+夹具上的预算测试不覆盖真实长度的任务名和环境说明，所以摘要和 servers 的实际值高于夹具。
 
-未完成：App 的总览页、任务页按身份重排、Slurm 节点详情入口；App 和 CLI 仍走 `/api/v1`，
-所以 v1 尚未删除；废弃 CLI 命令尚未删除。
+保留未删：`import-servers`、`history` 无使用证据但也无删除依据。`bind_observed_workload` 无路由
+可达，但其测试守护仍作用于已有绑定记录的进程归属逻辑。
 
-未验证：菜单栏、系统通知和提醒页只通过编译，未看过实际画面，通知授权未走通；Cursor 的
-clientInfo/roots 未实测（`cursor-agent` 未登录）；Slurm 改卡按设计拒绝，真实分配、进入、归还
-仍未现场验证。不要把这些写成已验证。
+未验证：App 新页面、菜单栏和系统通知只通过编译，没有看过实际画面，通知授权未走通；Cursor 的
+clientInfo/roots 未实测（`cursor-agent` 未登录）；真实采集下的提醒触发；Slurm `exec_prefix`、
+真实分配、进入、归还未现场验证（`entry_verified=false`）。本机插件 `hanhai22` 是独立副本，
+尚未带上 `exec_prefix`。不要把这些写成已验证。
 
 ## 状态读取被插件发现拖慢（2026-10-30）
 

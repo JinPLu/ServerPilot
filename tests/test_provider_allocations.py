@@ -352,3 +352,15 @@ def test_reclaim_requires_complete_consistent_active_allocation(service, admin, 
     ingest(service, [fact])
     assert not releases
     assert service._read(lambda session: session.get(Lease, lease["id"]).state) == "HELD"
+
+
+def test_a_delegated_cluster_appears_in_capacity_with_no_gpu_rows(service, admin, provider):
+    """It has no local GPUs until something is allocated, and still must be visible."""
+
+    ingest(service, [])
+    assert service._read(lambda session: session.scalars(select(GPUDevice)).all()) == []
+    groups = service.capacity_groups(admin)
+    delegated = [group for group in groups if group.get("provider")]
+    assert delegated, groups
+    assert delegated[0]["total"] == 0
+    assert delegated[0]["free"] > 0

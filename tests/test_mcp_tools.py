@@ -245,7 +245,7 @@ def test_replies_stay_within_budget_on_a_realistic_fleet(build_app, inventory, m
     budgets = (
         ("apply", applied, 1500),
         ("summary", tools.gpu_status(), 1500),
-        ("capacity", tools.gpu_status(view="capacity"), 900),
+        ("capacity", tools.gpu_status(view="capacity"), 500),
         ("servers", tools.gpu_status(view="servers"), 6000),
         ("nodes", tools.gpu_status(view="nodes", server_id="endpoint-a"), 12000),
         ("heartbeat", tools.gpu_lease(lease_id=applied["lease_id"]), 600),

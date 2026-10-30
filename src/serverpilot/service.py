@@ -6547,51 +6547,80 @@ class BrokerService:
 
         return self._read(operation)
 
-    def capacity_groups(self) -> list[dict[str, Any]]:
-        """Free cards per group, the smallest answer to where work can go."""
+    def capacity_groups(self, actor: ActorContext) -> list[dict[str, Any]]:
+        """Where work can go, from the snapshot the App reads.
 
-        def operation(session: Session) -> list[dict[str, Any]]:
-            now = utcnow()
-            groups: dict[str, dict[str, Any]] = {}
-            endpoints = {item.id: item for item in session.scalars(select(Endpoint)).all()}
-            for gpu in session.scalars(select(GPUDevice).where(GPUDevice.present.is_(True))).all():
-                endpoint = endpoints.get(gpu.endpoint_id)
-                if endpoint is None:
-                    continue
-                group_id = endpoint.server_group_id
-                entry = groups.setdefault(group_id or endpoint.id, {
-                    "server_group_id": group_id,
-                    "server_id": None if group_id else endpoint.id,
-                    "total": 0, "free": 0, "unknown": 0, "by_server": defaultdict(int),
+        Counting GPU rows here would miss a delegated cluster, which has none
+        until something is allocated, and an agent would never learn it exists.
+        """
+
+        data = self.snapshot(actor)["data"]
+        endpoints = data.get("endpoints", [])
+        gpus_by_endpoint: dict[str, list[dict[str, Any]]] = defaultdict(list)
+        for gpu in data.get("gpus", []):
+            if gpu.get("present") is not False:
+                gpus_by_endpoint[gpu["endpoint_id"]].append(gpu)
+
+        def count(members: list[dict[str, Any]]) -> dict[str, int]:
+            cards = [gpu for member in members for gpu in gpus_by_endpoint[member["id"]]]
+            return {
+                "total": len(cards),
+                "free": sum(gpu.get("publicly_available") is True for gpu in cards),
+                "unknown": sum(str(gpu.get("state", "")).startswith("UNKNOWN") for gpu in cards),
+            }
+
+        answer: list[dict[str, Any]] = []
+        for group in data.get("server_groups", []):
+            members = [item for item in endpoints if item.get("server_group_id") == group["id"]]
+            entry: dict[str, Any] = {
+                "server_group_id": group["id"],
+                "name": group.get("display_name"),
+                "cwd": group.get("workspace_path"),
+                "notes": group.get("environment_notes"),
+                **count(members),
+                "largest_block": group.get("largest_allocatable_block"),
+            }
+            if group.get("allocation") == "delegated":
+                limits = group.get("limits") or {}
+                capacity = next(
+                    (item["scheduler_capacity"] for item in members if item.get("scheduler_capacity")),
+                    {},
+                )
+                entry["free"] = capacity.get("free_gpu_count", 0)
+                entry["provider"] = True
+                entry["max_lease_seconds"] = limits.get("max_lease_seconds")
+            answer.append(entry)
+        for endpoint in endpoints:
+            if endpoint.get("server_group_id"):
+                continue
+            capacity = endpoint.get("scheduler_capacity")
+            if capacity:
+                answer.append({
+                    "server_id": endpoint["id"],
+                    "total": 0,
+                    "free": capacity.get("free_gpu_count", 0),
+                    "unknown": 0,
+                    "largest_block": capacity.get("largest_free_block"),
+                    "provider": True,
                 })
-                entry["total"] += 1
-                state, _reason = self._gpu_state(session, gpu, now)
-                if state in {"AVAILABLE", "KEEPALIVE"}:
-                    entry["free"] += 1
-                    entry["by_server"][endpoint.id] += 1
-                elif state.startswith("UNKNOWN"):
-                    entry["unknown"] += 1
-            answer = []
-            for key in sorted(groups):
-                entry = groups[key]
-                by_server = entry.pop("by_server")
-                entry["largest_block"] = max(by_server.values(), default=0)
-                answer.append(entry)
-            return answer
+            elif gpus_by_endpoint[endpoint["id"]]:
+                counts = count([endpoint])
+                answer.append({"server_id": endpoint["id"], **counts, "largest_block": counts["free"]})
+        return answer
 
-        return self._read(operation)
-
-    def explain_no_capacity(self, needed: int, details: dict[str, Any]) -> dict[str, Any]:
+    def explain_no_capacity(
+        self, actor: ActorContext, needed: int, details: dict[str, Any]
+    ) -> dict[str, Any]:
         """Turn a refusal into something an agent can decide from."""
 
-        groups = self.capacity_groups()
+        groups = self.capacity_groups(actor)
         alternatives = [
             {key: group[key] for key in ("server_group_id", "server_id", "free", "largest_block")
-             if group[key] is not None}
+             if group.get(key) is not None}
             for group in groups
-            if group["largest_block"] > 0
+            if (group.get("largest_block") or 0) > 0
         ]
-        free = max((group["largest_block"] for group in groups), default=0)
+        free = max((group.get("largest_block") or 0 for group in groups), default=0)
         eta = self._estimate_capacity_at(needed - free)
         excluded = details.get("excluded") or {}
         reason = "project_policy" if details.get("project_policy") else (
