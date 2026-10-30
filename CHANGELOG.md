@@ -8,6 +8,7 @@
 
 - 同一项目的 Agent 会话现在共享任务：统筹会话和子会话、重启后的新会话都能直接操作，不再需要接管；git worktree 中的会话也算同一项目。
 - `gpu_release` 重新接受 `lease_id`。
+- 修复 `serverpilot mcp install --client claude` 报错 `missing required argument` 无法注册的问题。
 - `serverpilot mcp install --client claude` 可以选择放行 ServerPilot 工具，避免 Claude Code 中途询问或在 auto mode 下拦截；默认不放行。
 
 ## 4.0.1 - 2026-10-31

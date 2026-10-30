@@ -33,28 +33,12 @@ def test_codex_and_claude_register_through_their_own_cli(resolved_command: str) 
     codex = cli._mcp_registration("codex", resolved_command)
     claude = cli._mcp_registration("claude", resolved_command)
 
-    assert codex["command_line"] == [
-        "codex",
-        "mcp",
-        "add",
-        "--env",
-        "SERVERPILOT_URL=http://127.0.0.1:8787",
-        "serverpilot",
-        "--",
-        resolved_command,
-    ]
-    assert claude["command_line"] == [
-        "claude",
-        "mcp",
-        "add",
-        "--scope",
-        "user",
-        "--env",
-        "SERVERPILOT_URL=http://127.0.0.1:8787",
-        "serverpilot",
-        "--",
-        resolved_command,
-    ]
+    assert codex["command_line"][:4] == ["codex", "mcp", "add", "serverpilot"]
+    assert codex["command_line"][-2:] == ["--", resolved_command]
+    # Claude Code's --env takes several values, so the name must come before it.
+    assert claude["command_line"][:6] == ["claude", "mcp", "add", "serverpilot", "--scope", "user"]
+    assert claude["command_line"][-2:] == ["--", resolved_command]
+    assert "--env" in claude["command_line"]
 
 
 def test_every_client_receives_the_same_broker_url(resolved_command: str) -> None:

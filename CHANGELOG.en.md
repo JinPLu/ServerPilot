@@ -8,6 +8,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 - Agent sessions of one project now share its tasks: a coordinator, the sessions it starts, and a restarted session can act directly without taking over, and git worktrees count as the same project.
 - `gpu_release` accepts `lease_id` again.
+- `serverpilot mcp install --client claude` no longer fails with `missing required argument`.
 - `serverpilot mcp install --client claude` can pre-approve ServerPilot's tools, so Claude Code no longer stops to ask or blocks them in auto mode. It stays off unless you choose it.
 
 ## 4.0.1 - 2026-10-31

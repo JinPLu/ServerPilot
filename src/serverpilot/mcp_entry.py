@@ -75,12 +75,14 @@ def mcp_registration(client: str, command: str) -> dict[str, Any]:
             "config": {"mcpServers": {MCP_SERVER_NAME: entry}},
         }
     cli = {"codex": "codex", "claude": "claude"}[client]
-    argv = [cli, "mcp", "add"]
+    # The name goes first: Claude Code's --env takes several values, so a name
+    # after it is read as one more, and the command is then reported missing.
+    argv = [cli, "mcp", "add", MCP_SERVER_NAME]
     if client == "claude":
         argv += ["--scope", "user"]
     for name, value in entry["env"].items():
         argv += ["--env", f"{name}={value}"]
-    argv += [MCP_SERVER_NAME, "--", command]
+    argv += ["--", command]
     return {"client": client, "command_line": argv, "config": {MCP_SERVER_NAME: entry}}
 
 
