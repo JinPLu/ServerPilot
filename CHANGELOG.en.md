@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.0.0 - 2026-10-31
 
 **Before upgrading:** the MCP tools are redesigned and the old ones are gone. After upgrading, restart the daemon, restart each MCP client, and run `serverpilot mcp policy --install`. Existing leases are kept, and agents claim them with `gpu_take_over`.
 
