@@ -191,6 +191,29 @@ def render_policy_block(policy: str) -> str:
     return f"{start}\n{policy.rstrip()}\n{end}\n"
 
 
+def render_swift_vocabulary() -> str:
+    """The card status table for the App, so it cannot name a state differently."""
+
+    lines = [
+        "// Generated from src/serverpilot/agent_contract.py. Do not edit.",
+        "// `serverpilot mcp policy --check` fails if this drifts from it.",
+        "",
+        "public enum CardVocabulary {",
+        "    public static let labelByState: [String: String] = [",
+    ]
+    for status in CARD_STATUSES:
+        lines += [f'        "{state}": "{status.label}",' for state in status.states]
+    lines += [
+        "    ]",
+        "",
+        "    public static func label(forState state: String) -> String {",
+        '        labelByState[state] ?? "数据过期"',
+        "    }",
+        "}",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def generated_agent_files(root: Path = REPOSITORY_ROOT) -> dict[Path, str]:
     """The tracked files that are renderings of this contract, not sources."""
 
@@ -200,6 +223,8 @@ def generated_agent_files(root: Path = REPOSITORY_ROOT) -> dict[Path, str]:
         root / ".cursor" / "rules" / "serverpilot.mdc": (
             CURSOR_RULE_FRONTMATTER + render_policy_block(policy)
         ),
+        root / "desktop" / "ServerPilotCore" / "Sources" / "ServerPilotCore"
+        / "CardVocabulary.generated.swift": render_swift_vocabulary(),
     }
 
 

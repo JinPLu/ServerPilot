@@ -4,6 +4,19 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+**Before upgrading:** the MCP tools are redesigned and the old ones are gone. After upgrading, restart the daemon, restart each MCP client, and run `serverpilot mcp policy --install`. Existing leases are kept, and agents claim them with `gpu_take_over`.
+
+- Routine agent calls are far lighter: a heartbeat went from about 70,000 characters to about 150.
+- Each agent session has its own identity and can no longer release another's lease; after a restart it can recover its lease and device selector.
+- A running task can add or return cards on its lease, including onto another server. Slurm allocations cannot resize yet.
+- When only some cards are busy, an agent can keep the idle ones for up to three reclaim windows; if cards are reclaimed, its next heartbeat says so.
+- When cards run out, the answer gives the reason, alternatives, a retry time and an estimate, and says plainly when it has no reliable estimate.
+- Closing the window keeps the App in the menu bar with a reminder count, and there is a new reminders page plus system notifications for impacted tasks, server trouble, idle resources and free cards.
+- A failed action no longer shows as success, its result stays until dismissed, and one slow response no longer disables everything.
+- A card now has one status word across the App and MCP.
+
 ## 3.1.0 - 2026-10-30
 
 **Before upgrading:**

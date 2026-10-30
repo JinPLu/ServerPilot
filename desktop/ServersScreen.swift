@@ -119,7 +119,8 @@ struct ResourcesDashboard: View {
                             || (endpoint.schedulerCapacity?.freeGPUCount ?? 0) > 0)
                 case .taskOccupied:
                     store.snapshot.gpus(for: endpoint).contains {
-                        ["BUSY_UNMANAGED", "ORPHANED_BUSY", "CONFLICT"].contains($0.state)
+                        ["RUNNING_MANAGED", "HELD", "LEASED_IDLE", "BUSY_UNMANAGED", "ORPHANED_BUSY", "CONFLICT"]
+                            .contains($0.state)
                     } || endpoint.nodes.contains { $0.allocatedGPUs > 0 }
                 case .keepalive:
                     endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning
@@ -1151,9 +1152,11 @@ private struct EndpointTableRow: View {
         }
         if gpus.isEmpty { return "CPU 节点" }
         if availableGPUCount > 0 { return "空闲" }
-        if gpus.contains(where: { $0.state == "BUSY_UNMANAGED" || $0.state == "ORPHANED_BUSY" }) { return "未归属占用" }
-        if gpus.contains(where: { $0.state == "HELD" || $0.state == "LEASED_IDLE" || $0.state == "KEEPALIVE" }) { return "占卡" }
-        return "任务占用"
+        // The state that needs a person most, in the one vocabulary agents read too.
+        for state in ["CONFLICT", "ORPHANED_BUSY", "BUSY_UNMANAGED", "HELD", "LEASED_IDLE", "RUNNING_MANAGED"] {
+            if gpus.contains(where: { $0.state == state }) { return CardVocabulary.label(forState: state) }
+        }
+        return CardVocabulary.label(forState: gpus.first?.state ?? "UNKNOWN_STALE")
     }
 
     private var statusColor: Color {

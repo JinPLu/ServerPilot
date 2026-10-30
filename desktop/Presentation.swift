@@ -251,19 +251,7 @@ private func gpuStateColor(_ state: String) -> Color {
 
 
 private func gpuStateLabel(_ state: String) -> String {
-    switch state {
-    case "AVAILABLE": return "可用 · 未开启占卡"
-    case "HELD", "LEASED_IDLE", "RUNNING_MANAGED": return "使用中"
-    case "KEEPALIVE": return "可用 · 空闲占卡"
-    case "BUSY_UNMANAGED", "ORPHANED_BUSY": return "任务占用"
-    case "RESERVED": return "不可分配"
-    case "UNKNOWN_RECOVERING": return "正在连接"
-    case "UNKNOWN_STALE": return "采集延迟"
-    case "UNHEALTHY": return "GPU 故障"
-    case "CONFLICT": return "归属待确认"
-    case "MAINTENANCE": return "不可分配"
-    default: return "不可分配"
-    }
+    CardVocabulary.label(forState: state)
 }
 
 
@@ -283,17 +271,14 @@ func gpuPresentationLabel(_ gpu: GPURecord) -> String {
     }
     if gpu.state == "AVAILABLE" {
         return gpu.keepalive.desired == "ON"
-            ? "可用 · 占卡未运行"
-            : "可用 · 未开启占卡"
+            ? "空闲 · 占卡未运行"
+            : "空闲"
     }
-    if gpu.state == "KEEPALIVE" { return "可用 · 空闲占卡" }
+    if gpu.state == "KEEPALIVE" { return "空闲 · 占卡中" }
     if ["HELD", "LEASED_IDLE", "RUNNING_MANAGED"].contains(gpu.state) {
         let task = gpu.taskReference?.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard let task, !task.isEmpty else { return "使用中" }
+        guard let task, !task.isEmpty else { return gpuStateLabel(gpu.state) }
         return task
-    }
-    if ["BUSY_UNMANAGED", "ORPHANED_BUSY"].contains(gpu.state) {
-        return "任务占用"
     }
     return gpuStateLabel(gpu.state)
 }

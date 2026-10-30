@@ -21,7 +21,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Python-3.12%2B-2563EB?logo=python&logoColor=white" alt="Python 3.12+">
   <img src="https://img.shields.io/badge/macOS-native%20App-111827?logo=apple&logoColor=white" alt="Native macOS App">
-  <img src="https://img.shields.io/badge/MCP-5%20routine%20tools-7C3AED" alt="Five routine MCP tools">
+  <img src="https://img.shields.io/badge/MCP-7%20tools-7C3AED" alt="Seven MCP tools">
   <a href="https://github.com/JinPLu/ServerPilot/blob/master/LICENSE"><img src="https://img.shields.io/badge/license-MIT-334155" alt="MIT License"></a>
 </p>
 
@@ -63,15 +63,15 @@ shown group → server → SKU, not as a menu of individual free cards.
 
 ### 🧩 Agents allocate for themselves
 
-The MCP surface is exactly five tools:
+The MCP surface is exactly seven tools:
 
-- 🔍 `gpu_status` — grouped allocatable capacity, what is busy and to whom, and
-  telemetry for cards you already hold
-- 🔑 `gpu_apply` — take GPUs (`server_group_id?`, `server_id?`, `gpu_count=1`,
-  `task?`)
-- ♻️ `gpu_release` — give them back
-- ➕ `gpu_add_server` — register a host
-- ✏️ `gpu_update_server` — update safe host metadata
+- 🔎 `gpu_status` — free capacity and your own leases; never a heartbeat
+- 🎯 `gpu_apply` — get cards now, with ssh, working directory and environment ready to use
+- 💓 `gpu_lease` — heartbeat, plus what changed and which cards are at risk
+- ↔️ `gpu_resize` — add or return cards on a lease
+- 🧹 `gpu_release` — return a lease when its task ends or fails
+- 🤝 `gpu_take_over` — claim a lease after a restart
+- ➕ `gpu_server` — add a host or update its safe metadata
 
 A successful request returns the SSH connection, the remote working directory,
 a CUDA selector, and a `lease_id`, so an agent never has to guess a server, a
@@ -213,17 +213,18 @@ macOS-only. Full per-client notes are in the
 gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
 ```
 
-- Routine apply is `gpu_apply(duration_seconds, server_group_id?, server_id?, gpu_count=1, task?)`.
-  Agents never pass GPU IDs; `gpu_apply` picks the cards, and one lease always
-  lands on a single server. `gpu_count` is exact job parallelism from the launch
-  script or config. The safe default is 1. Never infer it from free capacity.
+- Routine apply is `gpu_apply(task, duration_seconds, gpu_count=1, server_group_id?, server_id?, project?)`.
+  Agents never pass GPU IDs; `gpu_apply` picks the cards. A lease starts on one
+  server and can grow or shrink with `gpu_resize`, including onto another server
+  when one is named. `gpu_count` is exact job parallelism from the launch script
+  or config. The safe default is 1. Never infer it from free capacity.
 - On a grouped host — bare-metal `direct` or plugin `delegated` — pass
   `server_group_id`; the broker then best-fits one host inside that group.
   `server_id` is only for ungrouped hosts. A plugin-adapted cluster appears as
   an ordinary group, with `allocation`, `limits`, and
   `largest_allocatable_block` (one apply's max cards, not remaining pool size;
   `null` means unknown — do not invent a number).
-- Inventory uses `gpu_add_server` and `gpu_update_server`. There is no MCP
+- Inventory uses `gpu_server`. There is no MCP
   delete; remove a server in the app or REST, which refuses while it holds
   active leases.
 - Assess a group's workspace, environment notes, and data/weight notes before
@@ -234,10 +235,10 @@ gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<g
   telemetry. Load observable on a free card comes from ServerPilot's own
   keepalive hold, which is stopped before the card is handed over, so it is not
   evidence that the card is busy. Telemetry follows the lease:
-  `gpu_status(lease_id=…)` returns rolling ten-minute averages for
+  `gpu_lease(include=["telemetry"])` returns rolling ten-minute averages for
   `leased_gpus` plus a `lease` summary (`min_memory_free_mib`, `slowest_gpu`)
   for judging whether your own job is using the cards well.
-- SSH in, `cd` to the returned `workspace.path`, then apply the CUDA selector.
+- SSH in, `cd` to the returned `cwd`, then set the returned `env`.
   That path is a working directory, not a code repository.
 - Release immediately if CUDA fails to initialise or the workload does not
   start.

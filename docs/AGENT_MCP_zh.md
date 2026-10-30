@@ -12,7 +12,7 @@ serverpilot daemon install --source-root "$PWD"
 serverpilot daemon status
 ```
 
-按客户端注册 MCP，并安装短全局规则：
+按客户端注册 MCP：
 
 ```bash
 serverpilot mcp install --client codex     # 或 claude、cursor
@@ -62,11 +62,15 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
 
 这条路径上的规则只有一个来源：`src/serverpilot/agent_contract.py`。Agent 在运行时从 MCP server instructions 读到它；同一份文本渲染成 `docs/AGENT_MCP_policy.en.md`，`.cursor/rules/serverpilot.mdc` 是它加上 Cursor 的 frontmatter。这两个文件是生成物：改契约改 `agent_contract.py` 再重新生成，`serverpilot mcp policy --check` 会把不一致直接打成 diff。本页不再复述规则，因为复述出来的那一份会先失效。
 
-返回体里每个字段的形状不属于契约文本：以 MCP 工具 schema 和 REST 响应为准。
+返回体里每个字段的形状不属于契约文本：以 MCP 工具 schema 和 REST 响应为准。每个工具的响应大小有预算，由 `tests/test_mcp_tools.py` 约束。
+
+全局规则需要单独安装：`serverpilot mcp policy --install`。
+
+身份来自客户端：Claude Code 和 Cursor 通过 roots 提供项目，Codex 没有 roots，取 `SERVERPILOT_PROJECT` 或工作目录；都拿不到时返回 `project_required`，由 Agent 传 `project`。
 
 ## 边界
 
-- 服务器登记走 `gpu_add_server`（必填 `project_id`、`host`、`workspace_path`；分组主机同时给 `server_group_id`，不给就是未分组，`gpu_apply(server_group_id=...)` 永远选不到它）/ `gpu_update_server`（必填 `server_id`，其余安全元数据至少给一项）；其余生命周期与管理操作走 App 或 REST，不进入默认 Agent 上下文。登记会当场观测一次并在返回体的 `observation` 里给出结果（`observed` / `gpu_count` / `error`）：`observed=false` 说明记录建好了但机器没连上，原因在 `error` 里（例如 host key 未知），修好后下一轮采集自己接上，不要重复登记。两者的重放键由工具自己生成，调用方不传；重复登记同一台机器由 `endpoint_exists` / `endpoint_address_exists` 两条 409 挡住，拿到它们就改用 `gpu_update_server`。
+- 服务器登记和更新走 `gpu_server`（`action=add` 必须给 `host`、`workspace_path`，并先取得人的明确同意；分组主机同时给 `server_group_id`。`action=update` 必须给 `server_id` 和至少一个安全字段）；其余生命周期与管理操作走 App 或 REST。登记会当场观测一次并在 `observation` 里给出结果：`observed=false` 说明记录建好了但机器没连上，修好后下一轮采集自己接上，不要重复登记。
 - App 负责人工查看和纠错；默认 Agent 路径不需要额外生命周期步骤。
 - ServerPilot 返回 SSH 连接参数但不提供密码、私钥或 shell；它复用当前用户已有凭据，也不代替项目自己的远端执行授权。
 
