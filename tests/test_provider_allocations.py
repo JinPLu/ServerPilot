@@ -108,10 +108,10 @@ def test_apply_has_location_without_inventing_inventory_and_is_visible(service, 
     assert service._read(lambda session: session.scalars(select(GPUDevice)).all()) == []
     snapshot = service.snapshot(admin)["data"]
     assert snapshot["leases"][0]["id"] == result["lease"]["id"]
-    projected = mcp_server._routine_gpu_allocation(result)
+    projected = mcp_server._cards_by_server(result["lease"])[0]
     assert projected["entry"]["kind"] == "allocation"
-    assert "cuda_visible_devices" not in projected
-    assert projected["gpus"][0]["node"] == "node07"
+    assert "env" not in projected
+    assert projected["cards"][0]["node"] == "node07"
     status = mcp_server._routine_gpu_status({"data": snapshot}, lease_id=result["lease"]["id"])
     assert status["open_leases"][0]["gpu_count"] == 2
     assert status["leased_gpus"][0]["index"] == 4

@@ -115,3 +115,47 @@ def admin(service: BrokerService) -> ActorContext:
         role="admin",
         project_ids=frozenset({"project-a", "project-b"}),
     )
+
+
+@pytest.fixture(autouse=True)
+def _fresh_mcp_session(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every test is a new MCP process, in a project of its own."""
+
+    from serverpilot import mcp_server
+
+    monkeypatch.setattr(mcp_server, "_session_state", {})
+    monkeypatch.setenv("SERVERPILOT_PROJECT", "tests")
+
+
+@pytest.fixture
+def mcp_agent(build_app, monkeypatch: pytest.MonkeyPatch):  # type: ignore[no-untyped-def]
+    """The MCP tools over a live ASGI app and a real database."""
+
+    from fastapi.testclient import TestClient
+
+    from serverpilot import mcp_server
+    from serverpilot.client import parse_broker_response
+
+    app = build_app("mcp")
+    rest = TestClient(app)
+
+    class Client:
+        headers = {"X-ServerPilot-Actor": "claude-code", "X-ServerPilot-Session": "session-under-test"}
+
+        def snapshot(self, **params):  # type: ignore[no-untyped-def]
+            kept = {key: value for key, value in params.items() if value is not None}
+            return parse_broker_response(rest.get("/api/v1/snapshot", params=kept, headers=self.headers))
+
+        def get(self, path, *, params=None):  # type: ignore[no-untyped-def]
+            return parse_broker_response(rest.get(path, params=params, headers=self.headers))
+
+        def post(self, path, body=None, *, idempotency_key=None, timeout=None):  # type: ignore[no-untyped-def]
+            headers = dict(self.headers)
+            if idempotency_key:
+                headers["Idempotency-Key"] = idempotency_key
+            return parse_broker_response(rest.post(path, json=body, headers=headers))
+
+    client = Client()
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: client)
+    app.state.service.mcp_client = client
+    return app.state.service

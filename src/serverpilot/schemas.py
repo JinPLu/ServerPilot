@@ -554,6 +554,7 @@ class HeartbeatBody(StrictModel):
     task: str | None = None
     project: str | None = None
     keep_idle: bool = False
+    include_entry: bool = False
 
 
 class ResizeBody(StrictModel):

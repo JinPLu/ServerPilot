@@ -743,7 +743,7 @@ def test_uninstall_preserves_plist_when_launchctl_cannot_unload(
     assert config.plist_path.is_file()
 
 
-def test_mcp_ensures_daemon_before_constructing_rest_client(
+def test_mcp_builds_its_rest_client_for_the_calling_client(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     calls: list[str] = []
@@ -762,8 +762,8 @@ def test_mcp_ensures_daemon_before_constructing_rest_client(
         lambda *, actor=None: calls.append(f"client:{actor}") or FakeClient(),
     )
 
-    assert isinstance(mcp_server._client("agent-a"), FakeClient)
-    assert calls == ["ensure", "client:agent-a"]
+    assert isinstance(mcp_server._session_client("agent-a"), FakeClient)
+    assert calls == ["client:agent-a"]
 
 
 def test_macos_gui_no_longer_owns_or_terminates_server_process() -> None:

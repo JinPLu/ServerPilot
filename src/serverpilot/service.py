@@ -6315,13 +6315,18 @@ class BrokerService:
                 LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
             )).all()
             by_gpu = {card.gpu_id: card for card in active}
+            by_gpu.update({self._gpu_uuid(session, card.gpu_id): card for card in active})
             unknown = [gpu_id for gpu_id in remove_gpu_ids if gpu_id not in by_gpu]
             if unknown:
                 raise BrokerError(
                     "card_not_held", "租约里没有这张 GPU", status_code=409,
                     details={"gpu_ids": unknown},
                 )
-            busy = [gpu_id for gpu_id in remove_gpu_ids if self._current_processes(session, gpu_id, now)]
+            busy = [
+                gpu_id
+                for gpu_id in remove_gpu_ids
+                if self._current_processes(session, by_gpu[gpu_id].gpu_id, now)
+            ]
             if busy:
                 raise BrokerError(
                     "card_in_use", "这张 GPU 上还有进程", status_code=409, details={"gpu_ids": busy},
@@ -6358,7 +6363,7 @@ class BrokerService:
             )
             return {
                 "lease": self._lease_dict(session, lease),
-                "added_gpu_ids": [gpu.id for gpu in added],
+                "added_gpu_ids": [gpu.gpu_uuid for gpu in added],
                 "removed_gpu_ids": list(remove_gpu_ids),
                 "resource_epoch": lease.resource_epoch,
                 "snapshot_revision": revision,
@@ -6439,6 +6444,7 @@ class BrokerService:
         task: str | None,
         project_id: str | None,
         keep_idle: bool = False,
+        include_entry: bool = False,
     ) -> dict[str, Any]:
         """Answer a holder in a few hundred bytes. Asking is the heartbeat."""
 
@@ -6477,7 +6483,7 @@ class BrokerService:
                     continue
                 reclaim_at = idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
                 at_risk.append({
-                    "gpu_id": card.gpu_id,
+                    "gpu_id": self._gpu_uuid(session, card.gpu_id),
                     "reclaim_at": _iso(reclaim_at),
                     "windows_left": MAX_KEEP_IDLE_WINDOWS - card.keep_idle_windows,
                 })
@@ -6488,6 +6494,8 @@ class BrokerService:
             }
             if kept is not None:
                 result["kept_idle"] = kept
+            if include_entry:
+                result["lease"] = self._lease_dict(session, lease)
             return result
 
         return self._write(operation)
@@ -6510,6 +6518,33 @@ class BrokerService:
                 if key in {"reason", "reclaimed_gpu_count", "remaining_gpu_count", "added", "removed"}}}
             for event in events
         ]
+
+    def agent_leases(self, actor: ActorContext, project_id: str | None) -> dict[str, Any]:
+        """A session's own leases, what it could recover, and a count of the rest."""
+
+        def operation(session: Session) -> dict[str, Any]:
+            leases = session.scalars(select(Lease).where(
+                Lease.state.in_(ACTIVE_LEASE_STATES), Lease.kind == "workload"
+            ).order_by(Lease.issued_at)).all()
+            mine: list[dict[str, Any]] = []
+            recoverable: list[dict[str, Any]] = []
+            other_cards = 0
+            for lease in leases:
+                row = {
+                    "lease_id": lease.id,
+                    "task": lease.task_ref,
+                    "project": lease.project_id,
+                    "gpu_count": self._lease_card_count(session, lease),
+                }
+                if actor.session_id is not None and lease.owner_session_id == actor.session_id:
+                    mine.append(row)
+                elif lease.owner_session_id is None or lease.project_id == project_id:
+                    recoverable.append(row)
+                else:
+                    other_cards += row["gpu_count"]
+            return {"mine": mine, "recoverable": recoverable, "other_cards": other_cards}
+
+        return self._read(operation)
 
     def capacity_groups(self) -> list[dict[str, Any]]:
         """Free cards per group, the smallest answer to where work can go."""
@@ -8900,6 +8935,12 @@ class BrokerService:
             return False
         return self._resources_have_fresh_telemetry(session, [resource], now)
 
+    @staticmethod
+    def _gpu_uuid(session: Session, gpu_id: str) -> str:
+        """The name a card goes by outside: its UUID, the identity boundary."""
+
+        return session.get(GPUDevice, gpu_id).gpu_uuid
+
     def _keep_idle_cards(
         self, session: Session, lease: Lease, actor: ActorContext, now: datetime
     ) -> list[dict[str, Any]]:
@@ -8923,7 +8964,7 @@ class BrokerService:
                 card.keep_idle_windows = windows
                 changed.append(card.gpu_id)
             kept.append({
-                "gpu_id": card.gpu_id,
+                "gpu_id": self._gpu_uuid(session, card.gpu_id),
                 "reclaim_at": _iso(
                     idle_since + timedelta(seconds=self._card_reclaim_after_seconds(card))
                 ),

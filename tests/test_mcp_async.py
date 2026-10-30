@@ -118,17 +118,18 @@ def test_routine_tools_do_not_ensure_the_daemon_on_the_call_path(
         def snapshot(self, **_kwargs: object) -> dict[str, object]:
             return {"data": {"summary": {"total_gpus": 0}, "gpus": [], "endpoints": []}}
 
-        def post(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+        def get(self, path: str, **_kwargs: object) -> dict[str, object]:
+            return {"groups": []} if path == "/api/v2/capacity" else {"mine": [], "recoverable": [], "other_cards": 0}
+
+        def post(self, path: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+            if path == "/api/v2/sessions":
+                return {}
             raise BrokerClientError("already settled", code="lease_already_released")
 
-    monkeypatch.setattr(mcp_server, "_routine_client", lambda: Fake())
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: Fake())
 
-    assert tools.gpu_status()["message"] == "no GPUs are registered"
-    assert tools.gpu_release("lease-a") == {
-        "released": True,
-        "lease_id": "lease-a",
-        "state": "RELEASED",
-    }
+    assert tools.gpu_status()["groups"] == []
+    assert tools.gpu_release(lease_id="lease-a") == {"ok": True, "lease_id": "lease-a", "ended": True}
 
 
 def test_in_flight_tool_calls_overlap_on_the_event_loop(
@@ -139,15 +140,20 @@ def test_in_flight_tool_calls_overlap_on_the_event_loop(
     overlapped = asyncio.Event()
 
     class Slow:
-        async def snapshot(self, **_kwargs: object) -> dict[str, object]:
+        async def post(self, *_args: object, **_kwargs: object) -> dict[str, object]:
+            return {}
+
+        async def get(self, path: str, **_kwargs: object) -> dict[str, object]:
             nonlocal started
+            if path != "/api/v2/capacity":
+                return {"mine": [], "recoverable": [], "other_cards": 0}
             started += 1
             if started >= 2:
                 overlapped.set()
             await gate.wait()
-            return {"data": {"summary": {"total_gpus": 0}, "gpus": [], "endpoints": []}}
+            return {"groups": []}
 
-    monkeypatch.setattr(mcp_server, "_routine_client", lambda: Slow())
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: Slow())
 
     async def run() -> None:
         first = asyncio.create_task(mcp.call_tool("gpu_status", {}))
@@ -161,29 +167,16 @@ def test_in_flight_tool_calls_overlap_on_the_event_loop(
     asyncio.run(run())
 
 
-def test_routine_tool_parameter_names_are_unchanged() -> None:
-    tools = asyncio.run(mcp.list_tools())
-    by_name = {tool.name: tool for tool in tools}
-
-    status_schema = by_name["gpu_status"].inputSchema
-    assert set(status_schema["properties"]) == {"server_id", "lease_id"}
-    assert "required" not in status_schema
-    assert status_schema["properties"]["lease_id"]["default"] is None
-
-    apply_schema = by_name["gpu_apply"].inputSchema
-    assert set(apply_schema["properties"]) == {
-        "duration_seconds",
-        "server_group_id",
-        "server_id",
-        "gpu_count",
-        "task",
+def test_tool_parameter_names_match_the_contract() -> None:
+    listed = {tool.name: tool for tool in asyncio.run(mcp.list_tools())}
+    assert set(listed["gpu_status"].inputSchema["properties"]) == {
+        "view", "server_group_id", "server_id", "if_changed",
     }
-    assert apply_schema["required"] == ["duration_seconds"]
-    assert apply_schema["properties"]["gpu_count"]["default"] == 1
-
-    release_schema = by_name["gpu_release"].inputSchema
-    assert release_schema["required"] == ["lease_id"]
-    assert set(release_schema["properties"]) == {"lease_id"}
+    assert set(listed["gpu_apply"].inputSchema["properties"]) == {
+        "task", "duration_seconds", "gpu_count", "server_group_id", "server_id", "project",
+    }
+    assert listed["gpu_apply"].inputSchema["properties"]["gpu_count"]["default"] == 1
+    assert set(listed["gpu_release"].inputSchema["properties"]) == {"lease_id", "task", "outcome"}
 
 
 def test_async_broker_claim_waits_out_the_server_budget() -> None:

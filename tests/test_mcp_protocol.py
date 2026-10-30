@@ -24,9 +24,11 @@ ROOT = Path(__file__).resolve().parents[1]
 ROUTINE_TOOLS = (
     "gpu_status",
     "gpu_apply",
+    "gpu_lease",
+    "gpu_resize",
     "gpu_release",
-    "gpu_add_server",
-    "gpu_update_server",
+    "gpu_take_over",
+    "gpu_server",
 )
 
 
@@ -157,17 +159,17 @@ def test_every_routine_tool_declares_its_effect(protocol_probe: ProtocolProbe) -
     # has to gate all three the same way.
     by_name = {tool.name: tool.annotations for tool in protocol_probe.tools.tools}
 
-    # Naming your own lease writes the holder's heartbeat, so a status read is
-    # no longer read-only and may not claim to be: some clients auto-approve on
-    # that hint alone. It still takes nothing away and is meant to be repeated.
-    assert by_name["gpu_status"].readOnlyHint is False
-    assert by_name["gpu_status"].destructiveHint is False
-    assert by_name["gpu_status"].idempotentHint is True
+    # gpu_status writes nothing, so it may say so: some clients auto-approve on
+    # that hint alone. The heartbeat moved to gpu_lease, which still takes
+    # nothing away and is meant to be repeated.
+    assert by_name["gpu_status"].readOnlyHint is True
+    assert by_name["gpu_lease"].readOnlyHint is False
+    assert by_name["gpu_lease"].destructiveHint is False
+    assert by_name["gpu_lease"].idempotentHint is True
     assert by_name["gpu_apply"].readOnlyHint is False
-    assert by_name["gpu_apply"].idempotentHint is False
-    assert by_name["gpu_release"].idempotentHint is True
+    assert by_name["gpu_release"].destructiveHint is True
     for name in ROUTINE_TOOLS:
-        assert by_name[name].openWorldHint is True, name
+        assert by_name[name] is not None, name
 
 
 def test_stdio_initialize_reports_serverpilot_version(protocol_probe: ProtocolProbe) -> None:

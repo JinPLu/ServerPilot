@@ -34,6 +34,7 @@ _CONTROL_PLANE_PATH_TIMEOUTS = {
     "/api/v1/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
     "/api/v1/routine/claims": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
     "/api/v1/endpoints": CONTROL_PLANE_REGISTER_TIMEOUT_SECONDS,
+    "/api/v2/leases": CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
 }
 
 
@@ -48,6 +49,8 @@ def control_plane_request_timeout(
 
     if timeout is not None:
         return timeout
+    if path.endswith("/resize"):
+        return CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS
     return _CONTROL_PLANE_PATH_TIMEOUTS.get(path, default)
 
 

@@ -1141,6 +1141,15 @@ def create_app(
     def api_actor(request: Request) -> ActorContext:
         actor = service.local_actor(request.headers.get("x-serverpilot-actor", "agent"))
         limiter.check(actor.id)
+        client_version = request.headers.get("x-serverpilot-mcp-version")
+        if client_version is not None and client_version != __version__:
+            # The startup check cannot reach a client that outlived an upgrade.
+            raise BrokerError(
+                "restart_client",
+                "MCP 客户端版本与控制面不一致，请重启客户端",
+                status_code=426,
+                details={"client_version": client_version, "server_version": __version__},
+            )
         session_id = request.headers.get("x-serverpilot-session")
         return dataclasses.replace(actor, session_id=session_id) if session_id else actor
 
@@ -1322,8 +1331,12 @@ def create_app(
     def heartbeat(body: HeartbeatBody, actor: ApiActor) -> dict[str, Any]:
         return service.lease_view(
             actor, lease_id=body.lease_id, task=body.task, project_id=body.project,
-            keep_idle=body.keep_idle,
+            keep_idle=body.keep_idle, include_entry=body.include_entry,
         )
+
+    @app.get("/api/v2/leases/mine")
+    def my_leases(actor: ApiActor, project: str | None = None) -> dict[str, Any]:
+        return service.agent_leases(actor, project)
 
     @app.post("/api/v2/leases/take-over")
     def take_over(body: TakeOverBody, actor: ApiActor) -> dict[str, Any]:

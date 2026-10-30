@@ -11,10 +11,10 @@ from fastapi.testclient import TestClient
 from sqlalchemy import inspect, text
 
 from serverpilot import mcp_server
-from serverpilot.client import BrokerClient, BrokerClientError
+from serverpilot.client import BrokerClient
 from serverpilot.database import Database
 from serverpilot.schemas import RequestCreate
-from tests.helpers import observation, tools
+from tests.helpers import observation
 
 
 def _request(task_ref: str) -> RequestCreate:
@@ -53,51 +53,6 @@ def test_client_emits_only_the_actor_header(monkeypatch: pytest.MonkeyPatch) -> 
     assert calls[0]["headers"] == {"X-ServerPilot-Actor": "agent"}
 
 
-def test_routine_mutations_use_a_harness_neutral_actor(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(mcp_server, "ensure_broker_ready_for_mcp", lambda: None)
-    calls: list[dict[str, object]] = []
-
-    def request(_method: str, _url: str, **kwargs: object) -> httpx.Response:
-        calls.append(kwargs)
-        return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
-
-    monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    tools.gpu_apply(duration_seconds=3600, task="训练任务")
-    tools.gpu_release("lease-a")
-
-    apply_headers = calls[0]["headers"]
-    assert isinstance(apply_headers, dict)
-    assert apply_headers["X-ServerPilot-Actor"] == "agent"
-    assert str(apply_headers["Idempotency-Key"]).startswith("mcp-call:")
-    assert calls[1]["headers"] == {"X-ServerPilot-Actor": "agent"}
-
-
-def test_gpu_apply_maps_the_mcp_request_id_to_an_internal_replay_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(mcp_server, "ensure_broker_ready_for_mcp", lambda: None)
-    calls: list[dict[str, object]] = []
-
-    def request(_method: str, _url: str, **kwargs: object) -> httpx.Response:
-        calls.append(kwargs)
-        return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
-
-    class FakeContext:
-        request_id = "json-rpc-call-17"
-
-    monkeypatch.setattr("serverpilot.client.httpx.request", request)
-    tools.gpu_apply(duration_seconds=3600, task="训练任务", context=FakeContext())  # type: ignore[arg-type]
-
-    headers = calls[0]["headers"]
-    assert isinstance(headers, dict)
-    assert headers == {
-        "X-ServerPilot-Actor": "agent",
-        "Idempotency-Key": mcp_server._routine_request_key(FakeContext()),  # type: ignore[arg-type]
-    }
-
-
 def test_mcp_process_namespace_prevents_request_id_reuse_across_sessions(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -110,27 +65,6 @@ def test_mcp_process_namespace_prevents_request_id_reuse_across_sessions(
     second = mcp_server._routine_request_key(FakeContext())  # type: ignore[arg-type]
 
     assert first != second
-
-
-def test_gpu_apply_retries_one_unsent_request_with_the_same_key(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """Only a request that never reached the control plane may be replayed."""
-
-    monkeypatch.setattr(mcp_server, "ensure_broker_ready_for_mcp", lambda: None)
-    calls: list[dict[str, object]] = []
-
-    def request(_method: str, _url: str, **kwargs: object) -> httpx.Response:
-        calls.append(kwargs)
-        if len(calls) == 1:
-            raise httpx.ConnectError("connection refused")
-        return httpx.Response(200, json={"lease": {"id": "lease-a", "resources": []}})
-
-    monkeypatch.setattr("serverpilot.client.httpx.request", request)
-
-    assert tools.gpu_apply(duration_seconds=3600, task="训练任务")["lease_id"] == "lease-a"
-    assert len(calls) == 2
-    assert calls[0]["headers"] == calls[1]["headers"]
 
 
 def test_historical_contact_column_is_inert_and_not_projected(service, admin) -> None:
@@ -256,133 +190,6 @@ def test_routine_routes_keep_the_task_lease_until_explicit_release(build_app) ->
         )
 
 
-def test_routine_agent_can_retry_no_capacity_then_claim_two_gpus_on_one_server(
-    build_app,
-    inventory,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:  # type: ignore[no-untyped-def]
-    app = build_app("routine-retry")
-    rest = TestClient(app)
-    headers = {"X-ServerPilot-Actor": "agent"}
-
-    class RoutineClient:
-        def post(self, path, body=None, *, idempotency_key=None):  # type: ignore[no-untyped-def]
-            request_headers = dict(headers)
-            if idempotency_key is not None:
-                request_headers["Idempotency-Key"] = idempotency_key
-            response = rest.post(path, json=body, headers=request_headers)
-            if response.is_error:
-                error = response.json()["error"]
-                raise BrokerClientError(
-                    f"broker HTTP {response.status_code}: {error['code']}: {error['message']}"
-                )
-            return response.json()
-
-    monkeypatch.setattr(mcp_server, "_routine_client", RoutineClient)
-
-    with pytest.raises(BrokerClientError, match=r"no_capacity"):
-        tools.gpu_apply(duration_seconds=3600, server_id="endpoint-a", gpu_count=2, task="双卡训练")
-    assert app.state.service.list_leases(app.state.service.local_actor("agent"))["data"] == []
-
-    app.state.service.ingest_observation(observation(count=2))
-    claimed = tools.gpu_apply(duration_seconds=3600, server_id="endpoint-a", gpu_count=2, task="双卡训练")
-
-    assert claimed["lease_id"]
-    assert len(claimed["gpus"]) == 2
-    assert claimed["server_id"] == "endpoint-a"
-    assert claimed["workspace_path"] == inventory.endpoints[0].workspace_path
-    assert claimed["ssh"] == {
-        "host": inventory.endpoints[0].host,
-        "port": inventory.endpoints[0].port,
-        "user": inventory.endpoints[0].ssh_user,
-    }
-    assert {gpu["server_id"] for gpu in claimed["gpus"]} == {"endpoint-a"}
-    # Connection and workspace are published once per server, not per GPU.
-    assert [server["server_id"] for server in claimed["servers"]] == ["endpoint-a"]
-    assert claimed["servers"][0]["workspace_path"] == inventory.endpoints[0].workspace_path
-    assert claimed["servers"][0]["ssh"] == claimed["ssh"]
-    for duplicated in ("ssh", "workspace", "workspace_path", "cuda_visible_devices"):
-        assert all(duplicated not in gpu for gpu in claimed["gpus"])
-    assert len({gpu["gpu_id"] for gpu in claimed["gpus"]}) == 2
-    expected_visible_devices = ",".join(
-        str(gpu["cuda_ordinal"]) for gpu in claimed["gpus"]
-    )
-    assert claimed["cuda_visible_devices"] == expected_visible_devices
-    assert claimed["cuda_device_order"] == "PCI_BUS_ID"
-    assert claimed["servers"][0]["cuda_visible_devices"] == expected_visible_devices
-    assert {gpu["gpu_cuda_visible_devices"] for gpu in claimed["gpus"]} == {
-        str(gpu["cuda_ordinal"]) for gpu in claimed["gpus"]
-    }
-
-    assert tools.gpu_release(claimed["lease_id"]) == {
-        "released": True,
-        "lease_id": claimed["lease_id"],
-        "state": "RELEASED",
-    }
-    leases = app.state.service.list_leases(app.state.service.local_actor("agent"))["data"]
-    assert len(leases) == 1
-    assert leases[0]["state"] == "RELEASED"
-
-
-@pytest.mark.parametrize(
-    ("server_id", "gpu_count", "message"),
-    [
-        (None, True, "gpu_count must be a positive integer"),
-        (None, 0, "gpu_count must be a positive integer"),
-        (None, -1, "gpu_count must be a positive integer"),
-        ("   ", 1, "server_id must not be empty when it is given"),
-    ],
-)
-def test_routine_apply_rejects_invalid_daily_inputs_before_contacting_broker(
-    server_id: str | None,
-    gpu_count: int,
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unexpected_client() -> object:
-        raise AssertionError("invalid routine input must not contact the broker")
-
-    monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
-
-    with pytest.raises(ValueError, match=message):
-        tools.gpu_apply(duration_seconds=3600, server_id=server_id, gpu_count=gpu_count, task="训练")
-
-
-@pytest.mark.parametrize(
-    ("server_id", "lease_id", "message"),
-    [
-        ("   ", None, "server_id must not be empty when it is given"),
-        (None, "   ", "lease_id must not be empty when it is given"),
-    ],
-)
-def test_routine_status_rejects_blank_narrowing_before_contacting_broker(
-    server_id: str | None,
-    lease_id: str | None,
-    message: str,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    def unexpected_client() -> object:
-        raise AssertionError("blank narrowing must not contact the broker")
-
-    monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
-
-    with pytest.raises(ValueError, match=message):
-        tools.gpu_status(server_id=server_id, lease_id=lease_id)
-
-
-@pytest.mark.parametrize("lease_id", ["", "   "])
-def test_routine_release_rejects_blank_lease_before_contacting_broker(
-    lease_id: str, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def unexpected_client() -> object:
-        raise AssertionError("blank lease id must not contact the broker")
-
-    monkeypatch.setattr(mcp_server, "_routine_client", unexpected_client)
-
-    with pytest.raises(ValueError, match="lease_id must not be empty"):
-        tools.gpu_release(lease_id)
-
-
 def test_busy_status_returns_task_without_a_contact_field() -> None:
     status = mcp_server._routine_gpu_status(
         {
@@ -441,65 +248,6 @@ def test_busy_status_returns_task_without_a_contact_field() -> None:
         "workspace",
         "gpus",
     }
-
-
-def test_busy_status_distinguishes_a_held_idle_card_from_a_running_one_on_one_server() -> None:
-    status = mcp_server._routine_gpu_status(
-        {
-            "data": {
-                "endpoints": [{"id": "server-a", "workspace_path": "/srv/server-a"}],
-                "gpus": [
-                    {
-                        "endpoint_id": "server-a",
-                        "gpu_uuid": "GPU-a",
-                        "gpu_index": 0,
-                        "name": "A",
-                        "total_vram_mib": 80_000,
-                        "state": "HELD",
-                        "publicly_available": False,
-                        "public_status": "任务占用",
-                        "keepalive": {"state": "OFF", "reason": None},
-                        "lease": {"id": "lease-holder", "task_ref": "占卡"},
-                        "telemetry": {"memory_used_mib": 100, "gpu_utilization_pct": 0},
-                    },
-                    {
-                        "endpoint_id": "server-a",
-                        "gpu_uuid": "GPU-b",
-                        "gpu_index": 1,
-                        "name": "A",
-                        "total_vram_mib": 80_000,
-                        "state": "RUNNING_MANAGED",
-                        "publicly_available": False,
-                        "public_status": "任务占用",
-                        "keepalive": {"state": "OFF", "reason": None},
-                        "lease": {"id": "lease-runner", "task_ref": "训练"},
-                        "telemetry": {"memory_used_mib": 70_000, "gpu_utilization_pct": 90},
-                    },
-                ],
-            }
-        },
-        lease_id=None,
-    )
-
-    # Same server, two different leases: one card is only held, the other is
-    # actually computing.  Presence in busy_gpus does not tell them apart --
-    # status does, and it must not collapse to one value for both.
-    assert status["busy_gpus"] == [
-        {
-            "server_id": "server-a",
-            "gpu_id": "GPU-a",
-            "index": 0,
-            "status": "held_idle",
-            "task": "占卡",
-        },
-        {
-            "server_id": "server-a",
-            "gpu_id": "GPU-b",
-            "index": 1,
-            "status": "running",
-            "task": "训练",
-        },
-    ]
 
 
 def test_routine_status_reports_no_gpu_from_the_canonical_summary() -> None:

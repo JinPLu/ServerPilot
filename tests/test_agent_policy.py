@@ -10,7 +10,6 @@ from typer.testing import CliRunner
 
 from serverpilot.agent_contract import (
     AGENT_TOOLS,
-    BUSY_GPU_STATUSES,
     MCP_INSTRUCTION_BUDGET_CHARS,
     POLICY_BLOCK_MARKERS,
     generated_agent_files,
@@ -22,7 +21,7 @@ from serverpilot.agent_contract import (
 )
 from serverpilot.cli import app
 from serverpilot.mcp_entry import MCP_CLIENTS
-from serverpilot.mcp_server import MCP_INSTRUCTIONS, ROUTINE_GPU_STATUS, mcp
+from serverpilot.mcp_server import MCP_INSTRUCTIONS, mcp
 
 ROOT = Path(__file__).resolve().parents[1]
 CLAUDE_RULE = ROOT / "CLAUDE.md"
@@ -94,14 +93,6 @@ def test_the_contract_names_only_parameters_the_tools_have() -> None:
         if "..." not in tool.parameters:
             assert set(schema.get("required", ())) <= set(tool.parameter_names), tool.name
         assert f"`{tool.signature}`" in policy
-
-
-def test_the_busy_card_vocabulary_is_spelled_out_and_real() -> None:
-    projected = set(ROUTINE_GPU_STATUS.values())
-    for status in BUSY_GPU_STATUSES:
-        assert status in projected, status
-        for instructions in _rendered_contract():
-            assert status in instructions, status
 
 
 def test_the_prohibitions_survive_every_rendering() -> None:

@@ -5,11 +5,13 @@ from __future__ import annotations
 import hashlib
 import inspect
 import math
+import os
 import re
 import secrets
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
-from typing import Annotated, Any
+from pathlib import Path
+from typing import Annotated, Any, Literal
 
 import anyio
 import httpx
@@ -18,7 +20,8 @@ from mcp.types import ToolAnnotations
 from pydantic import Field
 
 from serverpilot import __version__
-from serverpilot.agent_contract import render_mcp_instructions
+from serverpilot.agent_contract import CARD_STATUS_BY_STATE, render_mcp_instructions
+from serverpilot.agent_identity import normalize_client, resolve_project
 from serverpilot.client import (
     CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     BrokerClient,
@@ -31,30 +34,6 @@ from serverpilot.client import (
 from serverpilot.config import control_plane_url
 from serverpilot.daemon import ensure_broker_ready_for_mcp
 
-# The agent surface reports the GPU state code, not the control plane's
-# localized label; the desktop app owns how that reads in a human language.
-# A caller decides on "can I claim this" and, when it cannot, on two things at
-# once: who is holding the card (the lease task) and whether a compute process
-# is actually on it -- running and busy_unmanaged say there is, held_idle says
-# the card is only held. The contract names both axes; agent_contract's
-# BUSY_GPU_STATUSES is the list it has to keep spelling out. HELD and
-# LEASED_IDLE collapse into held_idle, and BUSY_UNMANAGED and ORPHANED_BUSY
-# into busy_unmanaged, because each pair leaves the caller the same move;
-# splitting them back apart adds vocabulary, not choices.
-ROUTINE_GPU_STATUS = {
-    "CONFLICT": "ownership_conflict",
-    "BUSY_UNMANAGED": "busy_unmanaged",
-    "ORPHANED_BUSY": "busy_unmanaged",
-    "RUNNING_MANAGED": "running",
-    "HELD": "held_idle",
-    "LEASED_IDLE": "held_idle",
-    "MAINTENANCE": "maintenance",
-    "UNHEALTHY": "unhealthy",
-    "UNKNOWN_STALE": "unreachable",
-    "UNKNOWN_RECOVERING": "observing",
-}
-ROUTINE_GPU_STATUS_AVAILABLE = "available"
-ROUTINE_GPU_STATUS_UNKNOWN = "unavailable"
 ROUTINE_UNNAMED_TASK = "unnamed task"
 
 _ROUTINE_MCP_INSTANCE_ID = secrets.token_hex(16)
@@ -95,7 +74,11 @@ class _AsyncBroker:
         params: dict[str, Any] | None = None,
         timeout: float | None = None,
     ) -> dict[str, Any]:
-        headers = {"X-ServerPilot-Actor": self.actor}
+        headers = {
+            "X-ServerPilot-Actor": self.actor,
+            "X-ServerPilot-Session": _SESSION_ID,
+            "X-ServerPilot-MCP-Version": __version__,
+        }
         if idempotency_key:
             headers["Idempotency-Key"] = idempotency_key
         try:
@@ -201,130 +184,6 @@ def _build_server(instructions: str) -> FastMCP:
 
 
 mcp = _build_server(MCP_INSTRUCTIONS)
-
-
-def _client(actor_name: str | None = None) -> BrokerClient | _AsyncBroker:
-    if _http_client is None:
-        ensure_broker_ready_for_mcp()
-    return _broker(actor_name)
-
-
-def _routine_client() -> BrokerClient | _AsyncBroker:
-    return _broker("agent")
-
-
-def _routine_no_capacity(
-    exc: BrokerClientError,
-    *,
-    gpu_count: int,
-    server_id: str | None,
-    server_group_id: str | None = None,
-) -> dict[str, Any]:
-    """Report a documented outcome as data rather than as a tool failure."""
-
-    payload: dict[str, Any] = {
-        "reason": "no_single_server_satisfies_the_request",
-        "message": str(exc).split(": ", 2)[-1],
-        "gpu_count": gpu_count,
-        "server_id": server_id,
-        "server_group_id": server_group_id,
-    }
-    # Counts per exclusion reason, straight from the allocator that turned the
-    # cards down, so the caller sees what stood in the way rather than prose.
-    excluded = exc.details.get("excluded")
-    if isinstance(excluded, dict) and excluded:
-        payload["excluded"] = excluded
-    return {"no_capacity": payload}
-
-
-async def _routine_attach_open_leases(documented: dict[str, Any], client: Any) -> None:
-    """Give a no_capacity answer the one thing that makes it actionable."""
-
-    detail = documented.get("no_capacity")
-    if not isinstance(detail, dict):
-        return
-    open_leases = await _routine_open_leases_now(client)
-    if open_leases:
-        detail["open_leases"] = open_leases
-
-
-async def _routine_open_leases_now(client: Any) -> list[dict[str, Any]]:
-    """Leases the caller could release, fetched only when a claim found nothing.
-
-    ``no_capacity`` is an answer, but on its own it is not one anybody can act
-    on. What makes it actionable is the set of leases still holding cards and
-    whether any of them has stopped working, so the caller can free the cards
-    itself instead of waiting out idle reclaim. Costing one read here and none
-    on the path that succeeds is the point.
-    """
-
-    try:
-        payload = await _client_call(
-            client, "snapshot", compact=False, endpoint_id=None, only_available=False
-        )
-    except Exception:
-        return []
-    return _routine_gpu_status(payload, lease_id=None).get("open_leases", [])
-
-
-def _routine_group_selection_required(
-    exc: BrokerClientError,
-    *,
-    gpu_count: int,
-    server_id: str | None,
-    server_group_id: str | None,
-) -> dict[str, Any]:
-    """Report a missing group choice as data, like ``no_capacity``."""
-
-    payload: dict[str, Any] = {
-        "reason": "direct_grouped_hosts_require_server_group_id",
-        "message": str(exc).split(": ", 2)[-1],
-        "gpu_count": gpu_count,
-        "server_id": server_id,
-        "server_group_id": server_group_id,
-    }
-    for key, value in exc.details.items():
-        if key in payload and payload[key] is not None:
-            continue
-        payload[key] = value
-    return {"group_selection_required": payload}
-
-
-def _routine_documented_claim_outcome(
-    exc: BrokerClientError,
-    *,
-    gpu_count: int,
-    server_id: str | None,
-    server_group_id: str | None,
-) -> dict[str, Any] | None:
-    """Map broker business answers onto structured MCP data."""
-
-    if exc.code == "no_capacity":
-        return _routine_no_capacity(
-            exc,
-            gpu_count=gpu_count,
-            server_id=server_id,
-            server_group_id=server_group_id,
-        )
-    if exc.code == "group_selection_required":
-        return _routine_group_selection_required(
-            exc,
-            gpu_count=gpu_count,
-            server_id=server_id,
-            server_group_id=server_group_id,
-        )
-    return None
-
-
-def _routine_task(task: str | None) -> str:
-    if task is None:
-        return ROUTINE_UNNAMED_TASK
-    value = task.strip()
-    if not value:
-        raise ValueError("task must not be empty when it is given")
-    if len(value) > 120:
-        raise ValueError("task must be at most 120 characters")
-    return value
 
 
 def _routine_request_key(context: Context | None) -> str | None:
@@ -730,7 +589,7 @@ def _routine_open_leases(
                 "servers": sorted({item.split(":", 1)[0] for item in gpu_ids}),
                 "gpu_count": len(gpu_ids),
                 "running_gpu_count": sum(
-                    1 for item in gpu_ids if status_by_gpu_id.get(item) == "running"
+                    1 for item in gpu_ids if status_by_gpu_id.get(item) == "in_use"
                 ),
                 "held_since": lease.get("issued_at"),
             }
@@ -776,11 +635,7 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         state = gpu.get("state")
         if not isinstance(available, bool) or not isinstance(state, str) or not state:
             raise ValueError("ServerPilot returned an invalid GPU state")
-        status = (
-            ROUTINE_GPU_STATUS_AVAILABLE
-            if available
-            else ROUTINE_GPU_STATUS.get(state, ROUTINE_GPU_STATUS_UNKNOWN)
-        )
+        status = "free" if available else CARD_STATUS_BY_STATE.get(state, "unknown")
         gpu_row_id = gpu.get("id")
         if isinstance(gpu_row_id, str):
             status_by_gpu_id[gpu_row_id] = status
@@ -906,8 +761,9 @@ def _routine_gpu_status(payload: dict[str, Any], *, lease_id: str | None) -> dic
         result["connections"] = connections
     observation_gpus = {gpu["id"]: gpu for gpu in data.get("gpus", []) if isinstance(gpu, dict) and "id" in gpu} if isinstance(data, dict) else {}
     resource_nodes = [{"server_id": endpoint["id"], **node,
-        "gpus": [{key: observation_gpus[gpu_id].get(key) for key in (
-            "id", "gpu_uuid", "gpu_index", "name", "total_vram_mib", "state", "telemetry", "processes")}
+        "gpus": [{**{key: observation_gpus[gpu_id].get(key) for key in (
+            "id", "gpu_uuid", "gpu_index", "name", "total_vram_mib", "telemetry", "processes")},
+            "status": CARD_STATUS_BY_STATE.get(observation_gpus[gpu_id].get("state"), "unknown")}
             for gpu_id in node["gpu_ids"] if gpu_id in observation_gpus]}
         for endpoint in endpoints if isinstance(endpoint, dict) for node in endpoint.get("resource_nodes", [])]
     if resource_nodes:
@@ -995,405 +851,472 @@ def _routine_lease_view(
     return {"lease": lease, "leased_gpus": rows}
 
 
-def _routine_gpu_allocation(payload: dict[str, Any]) -> dict[str, Any]:
-    """Project a lease for routine use without conflating lease and GPU scope.
+# ---- task sessions --------------------------------------------------------
 
-    Connection, workspace and the lease-wide CUDA selector belong to the server,
-    so they are published once per server in ``servers`` rather than copied onto
-    every GPU row.  A single-server lease also keeps them at the top level,
-    which is the path routine callers read first.  Each ``gpus`` row carries its
-    own one-GPU selector and retains the UUID as the physical identity.
-    """
+_SESSION_ID = secrets.token_hex(16)
+_session_state: dict[str, Any] = {}
 
-    lease = payload.get("lease")
-    if not isinstance(lease, dict):
-        raise ValueError("ServerPilot returned no GPU lease")
-    rows: list[dict[str, Any]] = []
-    resources: list[dict[str, Any]] = []
+#: Refusals an agent is expected to act on. Everything else is a fault.
+DOCUMENTED_REFUSALS = frozenset({
+    "no_capacity", "group_selection_required", "task_already_held", "resize_unsupported",
+    "epoch_conflict", "card_in_use", "card_not_held", "use_release", "nothing_to_change",
+    "lease_not_found", "lease_forbidden", "lease_taken_over", "lease_ended",
+    "takeover_project_mismatch", "project_required", "allocation_unconfirmed",
+    "entry_unusable", "restart_client", "server_required", "server_group_not_found",
+    "endpoint_not_found",
+})
+RETRYABLE_REFUSALS = frozenset({"no_capacity", "allocation_unconfirmed"})
+
+
+def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:
+    if code == "task_already_held":
+        tool = "gpu_lease" if details.get("held_by_you") else "gpu_take_over"
+        return {"tool": tool, "args": {"lease_id": details.get("lease_id")}}
+    if code == "resize_unsupported":
+        return {"tool": "gpu_apply", "args": {"task": "<a new task name>"}}
+    if code == "allocation_unconfirmed":
+        return {"tool": "gpu_apply", "args": "repeat the same call"}
+    if code == "group_selection_required":
+        return {"tool": "gpu_apply", "args": {"server_group_id": "<one of details.groups>"}}
+    if code == "lease_taken_over":
+        return {"tool": "gpu_status", "args": {}}
+    return None
+
+
+def _refusal(exc: BrokerClientError) -> dict[str, Any]:
+    if exc.code not in DOCUMENTED_REFUSALS:
+        raise exc
+    details = dict(exc.details or {})
+    error: dict[str, Any] = {
+        "code": exc.code,
+        "message": str(exc).split(": ", 2)[-1],
+        "retryable": exc.code in RETRYABLE_REFUSALS,
+    }
+    retry_after = details.pop("retry_after_seconds", None)
+    if retry_after is not None:
+        error["retry_after_seconds"] = retry_after
+    following = _next_step(exc.code, details)
+    if following is not None:
+        error["next"] = following
+    if details:
+        error["details"] = details
+    return {"ok": False, "error": error}
+
+
+async def _session_roots(context: Context | None) -> list[str]:
+    if context is None:
+        return []
+    try:
+        result = await context.session.list_roots()
+    except Exception:
+        # A client without roots answers with an error. Not having them is
+        # what the fallbacks are for.
+        return []
+    return [str(root.uri) for root in result.roots]
+
+
+def _client_info(context: Context | None) -> Any:
+    try:
+        params = context.session.client_params if context is not None else None
+    except ValueError:
+        # Outside a request there is no session to ask.
+        return None
+    return params.clientInfo if params is not None else None
+
+
+async def _identity(context: Context | None, explicit: str | None = None) -> tuple[Any, str]:
+    """The client for this process and its project, registering on first use."""
+
+    info = _client_info(context)
+    actor = normalize_client(info.name if info is not None else None)
+    project = _session_state.get("project") if not explicit else None
+    if project is None:
+        project = resolve_project(
+            explicit=explicit,
+            roots=await _session_roots(context),
+            environment=os.environ,
+            cwd=Path.cwd(),
+            home=Path.home(),
+        )
+    if project is None:
+        raise BrokerClientError(
+            "broker HTTP 400: project_required: pass project; this client gives no project root",
+            code="project_required",
+            status_code=400,
+        )
+    client = _session_client(actor)
+    if _session_state.get("registered") != project:
+        await _client_call(client, "post", "/api/v2/sessions", {
+            "session_id": _SESSION_ID,
+            "client": actor,
+            "client_version": info.version if info is not None else None,
+            "project": project,
+        })
+        _session_state.update(registered=project, project=project)
+    return client, project
+
+
+def _session_client(actor: str) -> Any:
+    return _broker(actor)
+
+
+def _cards_by_server(lease: dict[str, Any]) -> list[dict[str, Any]]:
+    """Each server of a lease as something an agent can use without assembling it."""
+
+    servers: list[dict[str, Any]] = []
     for resource in lease.get("resources", []):
-        if not isinstance(resource, dict):
-            continue
-        endpoint = resource.get("endpoint")
-        server_id = endpoint.get("id") if isinstance(endpoint, dict) else None
-        workspace_path = endpoint.get("workspace_path") if isinstance(endpoint, dict) else None
+        endpoint = resource.get("endpoint") or {}
+        server: dict[str, Any] = {"server_id": endpoint.get("id")}
         ssh = _routine_ssh(endpoint)
+        if ssh is not None:
+            server["ssh"] = ssh
+        if endpoint.get("workspace_path"):
+            server["cwd"] = endpoint["workspace_path"]
         entry = resource.get("entry")
         if isinstance(entry, dict) and entry.get("kind") == "allocation":
-            resources.append({"server_id": server_id, "ssh": ssh, "workspace_path": workspace_path,
-                              "workspace": _routine_workspace(workspace_path), "entry": entry,
-                              "allocation_id": resource["allocation_id"], "locations": resource["locations"]})
-            for location in resource["locations"]:
-                rows.extend({"server_id": server_id, "node": location["node"],
-                             "gpu_id": device["gpu_uuid"], "gpu_index": device.get("physical_index"),
-                             "device_selector": device.get("device_selector")}
-                            for device in location["devices"])
-            continue
-        cuda_visible_devices = resource.get("cuda_visible_devices")
-        cuda_device_order = resource.get("cuda_device_order")
-        if cuda_device_order != "PCI_BUS_ID" or not isinstance(cuda_visible_devices, str):
-            raise ValueError("ServerPilot returned an invalid CUDA selector")
-        resource_projection = {
-            "server_id": server_id,
-            "workspace_path": workspace_path,
-            "workspace": _routine_workspace(workspace_path),
-            "cuda_visible_devices": cuda_visible_devices,
-            "cuda_device_order": cuda_device_order,
-        }
-        if ssh is not None:
-            resource_projection["ssh"] = ssh
-        resources.append(resource_projection)
-        for gpu in resource.get("gpus", []):
-            if isinstance(gpu, dict):
-                gpu_index = gpu.get("gpu_index")
-                cuda_ordinal = gpu.get("cuda_ordinal")
-                if (
-                    isinstance(cuda_ordinal, bool)
-                    or not isinstance(cuda_ordinal, int)
-                    or cuda_ordinal < 0
-                ):
-                    raise ValueError("ServerPilot returned an invalid GPU CUDA ordinal")
-                rows.append(
-                    {
-                        "server_id": server_id,
-                        "gpu_id": gpu.get("gpu_uuid"),
-                        "gpu_index": gpu_index,
-                        "cuda_ordinal": cuda_ordinal,
-                        "gpu_cuda_visible_devices": str(cuda_ordinal),
-                    }
-                )
-    result: dict[str, Any] = {"lease_id": lease.get("id"), "servers": resources, "gpus": rows}
-    if lease.get("allocations"):
-        result["allocations"] = lease["allocations"]
-    if len(resources) == 1:
-        result.update(resources[0])
-    return result
+            server["entry"] = entry
+            server["allocation_id"] = resource.get("allocation_id")
+            server["cards"] = [
+                {"node": location["node"], "gpu_id": device["gpu_uuid"],
+                 "selector": device.get("device_selector")}
+                for location in resource.get("locations", [])
+                for device in location["devices"]
+            ]
+        else:
+            server["env"] = {
+                "CUDA_DEVICE_ORDER": resource.get("cuda_device_order"),
+                "CUDA_VISIBLE_DEVICES": resource.get("cuda_visible_devices"),
+            }
+            server["cards"] = [
+                {"gpu_id": gpu.get("gpu_uuid"), "index": gpu.get("gpu_index"),
+                 "selector": gpu.get("cuda_ordinal")}
+                for gpu in resource.get("gpus", [])
+            ]
+        servers.append(server)
+    return servers
 
 
-# `readOnlyHint` is a machine-readable claim third-party clients act on, some
-# by auto-approving the call.  Asking about one's own hold writes the holder's
-# heartbeat, so this tool is no longer read-only and may not say it is.  It
-# still changes nothing a caller could lose: `idempotentHint` says repeating it
-# is the intended use, and `destructiveHint` says it takes nothing away.
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=True,
-        openWorldHint=True,
-    )
-)
-async def gpu_status(server_id: str | None = None, lease_id: str | None = None) -> dict[str, Any]:
-    """List grouped allocatable GPU capacity, busy_gpus with who holds each card and whether it is computing (status), CPU-only servers, and scheduler clusters you can request on demand; pass lease_id for per-card telemetry on cards you hold."""
-
-    if server_id is not None:
-        server_id = server_id.strip()
-        if not server_id:
-            raise ValueError("server_id must not be empty when it is given")
-    if lease_id is not None:
-        lease_id = lease_id.strip()
-        if not lease_id:
-            raise ValueError("lease_id must not be empty when it is given")
-        # Asking about one's own hold is the heartbeat.  It is the call an
-        # agent already makes when it wants its own telemetry, so the control
-        # plane learns the holder is alive without the agent doing anything
-        # new.  A lease the broker will not heartbeat is answered rather than
-        # refused, which keeps this a status read.
-        await _client_call(
-            _routine_client(), "post", f"/api/v1/routine/leases/{lease_id}/heartbeat"
-        )
-    # Busy cards are filtered in the projection, not by the broker, so one call
-    # can name their tasks and still carry the caller's own lease telemetry.
-    payload = await _client_call(
-        _routine_client(),
-        "snapshot",
-        compact=False,
-        endpoint_id=server_id,
-        only_available=False,
-    )
-    return _routine_gpu_status(payload, lease_id=lease_id)
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
-    )
-)
-async def gpu_apply(
-    duration_seconds: Annotated[int, Field(ge=60, le=2592000, description="Expected task duration in seconds; provider hard limits still apply")],
-    server_group_id: str | None = None,
-    server_id: str | None = None,
-    gpu_count: Annotated[
-        int,
-        Field(ge=1, le=1024, description=ROUTINE_GPU_COUNT_DESCRIPTION),
-    ] = 1,
-    task: str | None = None,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Claim GPUs on a single server now; pass server_group_id for grouped hosts. Returns allocations, locations, provider entry information and confirmed device selectors. no_capacity and group_selection_required are answers and nothing is queued."""
-
-    if isinstance(gpu_count, bool) or not isinstance(gpu_count, int) or gpu_count < 1:
-        raise ValueError("gpu_count must be a positive integer")
-    if server_group_id is not None:
-        server_group_id = server_group_id.strip()
-        if not server_group_id:
-            raise ValueError("server_group_id must not be empty when it is given")
-    if server_id is not None:
-        server_id = server_id.strip()
-        if not server_id:
-            raise ValueError("server_id must not be empty when it is given")
-    # One lease is one machine. Cards split across hosts cannot run a
-    # single-node job, and holding them would deny the whole gang to someone
-    # who can use it, so an unsatisfiable request fails instead.
-    constraints: dict[str, Any] = {
-        "gpu_count": gpu_count,
-        "placement": "pack",
-        "same_host": True,
-    }
-    if server_group_id is not None:
-        constraints["server_group_ids"] = [server_group_id]
-    if server_id is not None:
-        constraints["endpoint_ids"] = [server_id]
-    if type(duration_seconds) is not int or not 60 <= duration_seconds <= 2592000:
-        raise ValueError("duration_seconds must be between 60 and 2592000")
-    task_ref = _routine_task(task)
-    body = {
-        "duration_seconds": duration_seconds,
-        "project_id": "agent",
-        "task_ref": task_ref,
-        "purpose": task_ref,
-        "constraints": constraints,
-    }
-    replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
-    client = _routine_client()
+async def _post(client: Any, path: str, body: dict[str, Any]) -> dict[str, Any]:
     try:
-        payload = await _client_call(
-            client,
-            "post",
-            "/api/v1/routine/claims",
-            body,
-            idempotency_key=replay_key,
-        )
+        return await _client_call(client, "post", path, body)
     except BrokerClientError as exc:
-        documented = _routine_documented_claim_outcome(
-            exc,
-            gpu_count=gpu_count,
-            server_id=server_id,
-            server_group_id=server_group_id,
-        )
-        if documented is not None:
-            await _routine_attach_open_leases(documented, client)
-            return documented
         if not exc.unsent:
             raise
-        # The connection never reached the control plane, so nothing can have
-        # been committed. Retry once with the same key so a broker that did
-        # somehow see it cannot allocate a second lease for this invocation.
-        # A read timeout is deliberately not retried: the request did arrive,
-        # and replaying it only doubles the wait for an answer already coming.
-        try:
-            payload = await _client_call(
-                client,
-                "post",
-                "/api/v1/routine/claims",
-                body,
-                idempotency_key=replay_key,
-            )
-        except BrokerClientError as retried:
-            documented = _routine_documented_claim_outcome(
-                retried,
-                gpu_count=gpu_count,
-                server_id=server_id,
-                server_group_id=server_group_id,
-            )
-            if documented is None:
-                raise
-            await _routine_attach_open_leases(documented, client)
-            return documented
-    return _routine_gpu_allocation(payload)
+    # Nothing reached the control plane, and repeating a task returns its lease.
+    return await _client_call(client, "post", path, body)
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=True,
-        idempotentHint=True,
-        openWorldHint=True,
-    )
-)
-async def gpu_release(
-    lease_id: str,
+def _node_view(node: dict[str, Any]) -> dict[str, Any]:
+    """One node as facts to reason from, without every timestamp behind them."""
+
+    capacity = (node.get("host_telemetry") or {}).get("capacity") or {}
+    cards = []
+    for gpu in node.get("gpus", []):
+        telemetry = gpu.get("telemetry") or {}
+        cards.append({
+            "gpu_id": gpu.get("gpu_uuid"),
+            "index": gpu.get("gpu_index"),
+            "name": gpu.get("name"),
+            "status": gpu.get("status"),
+            "memory_used_mib": telemetry.get("memory_used_mib"),
+            "memory_free_mib": telemetry.get("memory_free_mib"),
+            "utilization_pct": telemetry.get("gpu_utilization_pct"),
+            "processes": [
+                {"pid": item.get("pid"), "user": item.get("username"), "memory_mib": item.get("used_memory_mib")}
+                for item in gpu.get("processes") or []
+            ],
+        })
+    return {
+        "server_id": node.get("server_id"),
+        "node": node.get("node_id"),
+        "fresh": node.get("fresh"),
+        "observed_at": node.get("observed_at"),
+        "error_code": node.get("error_code"),
+        "usage": node.get("usage"),
+        "cpu_available_cores": capacity.get("cpu_available_cores"),
+        "memory_available_mib": capacity.get("memory_available_mib"),
+        "cards": cards,
+    }
+
+
+def _capacity_digest(groups: list[dict[str, Any]]) -> str:
+    facts = sorted((str(group.get("server_group_id") or group.get("server_id")), group["free"],
+                    group["largest_block"], group["unknown"]) for group in groups)
+    return hashlib.sha256(repr(facts).encode()).hexdigest()[:12]
+
+
+def _clean(groups: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [{key: value for key, value in group.items() if value not in (None, 0) or key == "free"}
+            for group in groups]
+
+
+LEASE_SUMMARY_KEYS = ("recent_average", "slowest_gpu")
+
+_READ_ONLY = ToolAnnotations(readOnlyHint=True, destructiveHint=False, idempotentHint=True, openWorldHint=False)
+_HEARTBEAT = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=True, openWorldHint=True)
+_ACTS = ToolAnnotations(readOnlyHint=False, destructiveHint=False, idempotentHint=False, openWorldHint=True)
+_RETURNS = ToolAnnotations(readOnlyHint=False, destructiveHint=True, idempotentHint=False, openWorldHint=True)
+
+
+@mcp.tool(annotations=_READ_ONLY)
+async def gpu_status(
+    view: Annotated[
+        Literal["summary", "capacity", "servers", "nodes"],
+        Field(description="summary=capacity plus your leases; capacity=free cards only; "
+                          "servers=per-server detail; nodes=one server's nodes, needs server_id"),
+    ] = "summary",
+    server_group_id: str | None = None,
+    server_id: str | None = None,
+    if_changed: Annotated[
+        str | None, Field(description="digest from an earlier reply; unchanged capacity answers briefly")
+    ] = None,
+    context: Context | None = None,
 ) -> dict[str, Any]:
-    """Give back GPUs claimed earlier; returns the settled lease_id and its final state so each one can be confirmed."""
+    """Read capacity and your own leases. Does not count as a heartbeat."""
 
-    if not isinstance(lease_id, str) or not lease_id.strip():
-        raise ValueError("lease_id must not be empty")
-    lease_id = lease_id.strip()
     try:
-        payload = await _client_call(
-            _routine_client(), "post", f"/api/v1/routine/leases/{lease_id}/release"
-        )
+        client, project = await _identity(context)
+        if view == "nodes" and server_id is None:
+            raise BrokerClientError(
+                "broker HTTP 400: server_required: view=nodes needs server_id",
+                code="server_required", status_code=400,
+            )
+        if view in {"servers", "nodes"}:
+            payload = await _client_call(client, "snapshot", endpoint_id=server_id)
+            detail = _routine_gpu_status(payload, lease_id=None)
+            if view == "nodes":
+                return {"ok": True, "nodes": [_node_view(node) for node in detail.get("resource_nodes", [])]}
+            detail.pop("resource_nodes", None)
+            return {"ok": True, **detail}
+        groups = (await _client_call(client, "get", "/api/v2/capacity"))["groups"]
+        if server_group_id is not None:
+            groups = [group for group in groups if group.get("server_group_id") == server_group_id]
+        digest = _capacity_digest(groups)
+        if if_changed == digest:
+            return {"ok": True, "unchanged": True, "digest": digest}
+        answer: dict[str, Any] = {"ok": True, "digest": digest, "groups": _clean(groups)}
+        if view == "summary":
+            answer["project"] = project
+            answer.update(await _client_call(client, "get", "/api/v2/leases/mine", params={"project": project}))
+        return answer
     except BrokerClientError as exc:
-        if exc.code != "lease_already_released":
-            raise
-        # Settling a lease that is already settled reaches the state the caller
-        # asked for, so it answers instead of failing. A caller told to release
-        # and confirm would otherwise have to treat its own retry as an error.
-        return {"released": True, "lease_id": lease_id, "state": "RELEASED"}
-    # Echo the lease the broker actually settled so a caller holding several
-    # leases can confirm them one by one instead of assuming one release
-    # finished the whole task.
-    lease = payload.get("lease") if isinstance(payload, dict) else None
-    state = lease.get("state") if isinstance(lease, dict) else None
-    result: dict[str, Any] = {"released": True, "lease_id": lease_id}
-    if isinstance(state, str) and state:
-        result["state"] = state
-    return result
+        return _refusal(exc)
+
+
+@mcp.tool(annotations=_ACTS)
+async def gpu_apply(
+    task: Annotated[str, Field(min_length=1, max_length=255, description="What this work is, stable across restarts")],
+    duration_seconds: Annotated[int, Field(ge=60, le=2592000, description="Expected duration; an estimate for others, never a deadline for you")],
+    gpu_count: Annotated[int, Field(ge=1, le=1024, description=ROUTINE_GPU_COUNT_DESCRIPTION)] = 1,
+    server_group_id: str | None = None,
+    server_id: str | None = None,
+    project: str | None = None,
+    context: Context | None = None,
+) -> dict[str, Any]:
+    """Get GPUs now, or a reason you can act on. Repeating a task returns its lease; nothing queues."""
+
+    try:
+        client, resolved = await _identity(context, project)
+        payload = await _post(client, "/api/v2/leases", {
+            "project": resolved, "task": task, "duration_seconds": duration_seconds,
+            "gpu_count": gpu_count, "server_group_id": server_group_id, "server_id": server_id,
+        })
+    except BrokerClientError as exc:
+        return _refusal(exc)
+    lease = payload["lease"]
+    return {
+        "ok": True,
+        "lease_id": lease["id"],
+        "existing": bool(payload.get("existing")),
+        "resource_epoch": lease.get("resource_epoch", 0),
+        "servers": _cards_by_server(lease),
+    }
+
+
+@mcp.tool(annotations=_HEARTBEAT)
+async def gpu_lease(
+    lease_id: str | None = None,
+    task: str | None = None,
+    keep_idle: Annotated[bool, Field(description="Postpone reclaiming idle cards, up to three windows")] = False,
+    include: Annotated[
+        list[Literal["entry", "telemetry"]] | None,
+        Field(description="entry=ssh, cwd, env; telemetry=per-card use of your cards"),
+    ] = None,
+    context: Context | None = None,
+) -> dict[str, Any]:
+    """Heartbeat and read one of your leases: its state, cards at risk, and what changed since you last asked."""
+
+    wanted = set(include or [])
+    try:
+        client, project = await _identity(context)
+        view = await _client_call(client, "post", "/api/v2/leases/heartbeat", {
+            "lease_id": lease_id, "task": task, "project": project,
+            "keep_idle": keep_idle, "include_entry": "entry" in wanted,
+        })
+        lease = view.pop("lease", None)
+        if lease is not None:
+            view["servers"] = _cards_by_server(lease)
+        if "telemetry" in wanted and "ended" not in view:
+            payload = await _client_call(client, "snapshot")
+            detail = _routine_gpu_status(payload, lease_id=view["lease_id"])
+            view["telemetry"] = {
+                "cards": [
+                    {key: value for key, value in row.items() if key not in {"name", "server_id"}}
+                    for row in detail.get("leased_gpus", [])
+                ],
+                "summary": {key: (detail.get("lease") or {}).get(key) for key in LEASE_SUMMARY_KEYS},
+            }
+        return {"ok": True, **view}
+    except BrokerClientError as exc:
+        return _refusal(exc)
+
+
+@mcp.tool(annotations=_ACTS)
+async def gpu_resize(
+    lease_id: str | None = None,
+    task: str | None = None,
+    add_count: Annotated[int, Field(ge=0, le=1024)] = 0,
+    server_id: Annotated[str | None, Field(description="Add on this server; default is where the lease already is")] = None,
+    server_group_id: str | None = None,
+    remove_gpu_ids: list[str] | None = None,
+    expected_epoch: Annotated[int | None, Field(description="Refuse if the cards changed since you read this")] = None,
+    context: Context | None = None,
+) -> dict[str, Any]:
+    """Add or return cards on your lease, all or nothing. A running process cannot see new cards until restarted."""
+
+    try:
+        client, project = await _identity(context)
+        target = lease_id or (await _client_call(client, "post", "/api/v2/leases/heartbeat", {
+            "task": task, "project": project,
+        }))["lease_id"]
+        payload = await _post(client, f"/api/v2/leases/{target}/resize", {
+            "add_count": add_count, "server_id": server_id, "server_group_id": server_group_id,
+            "remove_gpu_ids": remove_gpu_ids or [], "expected_epoch": expected_epoch,
+        })
+    except BrokerClientError as exc:
+        return _refusal(exc)
+    return {
+        "ok": True,
+        "lease_id": target,
+        "resource_epoch": payload["resource_epoch"],
+        "added": payload["added_gpu_ids"],
+        "removed": payload["removed_gpu_ids"],
+        "restart_required": True,
+        "servers": _cards_by_server(payload["lease"]),
+    }
+
+
+@mcp.tool(annotations=_RETURNS)
+async def gpu_release(
+    lease_id: str | None = None,
+    task: str | None = None,
+    outcome: Literal["completed", "failed", "abandoned"] = "completed",
+    context: Context | None = None,
+) -> dict[str, Any]:
+    """Return a whole lease when its task ends or fails."""
+
+    try:
+        client, project = await _identity(context)
+        target = lease_id or (await _client_call(client, "post", "/api/v2/leases/heartbeat", {
+            "task": task, "project": project,
+        }))["lease_id"]
+        await _client_call(client, "post", f"/api/v2/leases/{target}/release", {"outcome": outcome})
+    except BrokerClientError as exc:
+        if exc.code == "lease_already_released":
+            return {"ok": True, "lease_id": lease_id, "ended": True}
+        return _refusal(exc)
+    return {"ok": True, "lease_id": target, "ended": True}
+
+
+@mcp.tool(annotations=_ACTS)
+async def gpu_take_over(
+    reason: Annotated[str, Field(min_length=1, max_length=300)],
+    lease_id: str | None = None,
+    task: str | None = None,
+    project: str | None = None,
+    force: Annotated[bool, Field(description="Allow a lease from another project")] = False,
+    context: Context | None = None,
+) -> dict[str, Any]:
+    """Make a lease yours after a restart, or one left by a crashed session. Audited."""
+
+    try:
+        client, resolved = await _identity(context, project)
+        payload = await _client_call(client, "post", "/api/v2/leases/take-over", {
+            "lease_id": lease_id, "task": task, "project": resolved, "reason": reason, "force": force,
+        })
+    except BrokerClientError as exc:
+        return _refusal(exc)
+    lease = payload["lease"]
+    return {
+        "ok": True,
+        "lease_id": lease["id"],
+        "resource_epoch": lease.get("resource_epoch", 0),
+        "servers": _cards_by_server(lease),
+    }
 
 
 OBSERVATION_PROFILE_DESCRIPTION = (
-    "How this host is observed. linux: any machine reached over SSH -- the "
-    "default, and the answer for every ordinary server, with or without NVIDIA "
-    "GPUs. A locally discovered plugin ID names a delegated cluster instead."
+    "linux for an ordinary host; otherwise a plugin id from `serverpilot plugin list`"
 )
-
-SERVER_GROUP_DESCRIPTION = (
-    "The server group this host joins, from gpu_status. A grouped host is what "
-    "gpu_apply(server_group_id=...) can reach; left out, the server is "
-    "registered ungrouped and no grouped apply will ever select it."
-)
+SERVER_GROUP_DESCRIPTION = "Group sharing workspace and data; a grouped host is reached only through it"
 
 
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
-    )
-)
-async def gpu_add_server(
-    project_id: str,
-    host: str,
-    workspace_path: str,
-    port: int = 22,
-    ssh_user: str = "root",
+@mcp.tool(annotations=_ACTS)
+async def gpu_server(
+    action: Literal["add", "update"],
     server_id: str | None = None,
-    ssh_alias: str | None = None,
-    server_group_id: Annotated[
-        str | None,
-        Field(description=SERVER_GROUP_DESCRIPTION),
-    ] = None,
-    observation_profile: Annotated[
-        str,
-        Field(description=OBSERVATION_PROFILE_DESCRIPTION),
-    ] = "linux",
-    labels: list[str] | None = None,
-    storage_group: str | None = None,
-    expected_gpu_count: int | None = None,
-    expected_gpu_total_vram_mib: int | None = None,
-    context: Context | None = None,
-) -> dict[str, Any]:
-    """Register a host after explicit current-task human approval, then observe it once and report what came back. Pass server_group_id to put it in a group; an ungrouped host is unreachable by a grouped gpu_apply."""
-
-    if not project_id.strip():
-        raise ValueError("project_id must not be empty")
-    # The replay key is this call's own, like every other tool's. Asking the
-    # caller for one asked it to supply a REST concept the instructions
-    # deliberately never teach, so the tool could not be called as documented.
-    replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
-    client = _client("agent")
-    generated_id = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96]
-    generated_id = f"{generated_id}-p{port}"
-    return await _client_call(
-        client,
-        "post",
-        "/api/v1/endpoints",
-        {
-            "id": server_id or generated_id,
-            "host": host,
-            "port": port,
-            "ssh_user": ssh_user,
-            "ssh_alias": ssh_alias,
-            "workspace_path": workspace_path,
-            "server_group_id": server_group_id,
-            "observation_profile": observation_profile,
-            "labels": labels or [],
-            "storage_group": storage_group,
-            "expected_gpu_count": expected_gpu_count,
-            "expected_gpu_total_vram_mib": expected_gpu_total_vram_mib,
-            "owner_project_id": project_id,
-        },
-        idempotency_key=replay_key,
-    )
-
-
-@mcp.tool(
-    annotations=ToolAnnotations(
-        readOnlyHint=False,
-        destructiveHint=False,
-        idempotentHint=False,
-        openWorldHint=True,
-    )
-)
-async def gpu_update_server(
-    server_id: str,
+    host: str | None = None,
+    port: int = 22,
     ssh_user: str | None = None,
     ssh_alias: str | None = None,
     workspace_path: str | None = None,
-    server_group_id: Annotated[
-        str | None,
-        Field(description=SERVER_GROUP_DESCRIPTION),
-    ] = None,
-    observation_profile: Annotated[
-        str | None,
-        Field(description=OBSERVATION_PROFILE_DESCRIPTION),
-    ] = None,
+    server_group_id: Annotated[str | None, Field(description=SERVER_GROUP_DESCRIPTION)] = None,
+    observation_profile: Annotated[str | None, Field(description=OBSERVATION_PROFILE_DESCRIPTION)] = None,
     labels: list[str] | None = None,
-    storage_group: str | None = None,
-    expected_gpu_count: int | None = None,
-    expected_gpu_total_vram_mib: int | None = None,
-    owner_project_id: str | None = None,
+    project: str | None = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Update safe endpoint metadata; endpoint id, host, and port are immutable."""
+    """Add a host after explicit human approval, or update safe metadata. Host and port never change."""
 
-    body = {
-        key: value
-        for key, value in {
-            "ssh_user": ssh_user,
-            "ssh_alias": ssh_alias,
-            "workspace_path": workspace_path,
-            "server_group_id": server_group_id,
-            "observation_profile": observation_profile,
-            "labels": labels,
-            "storage_group": storage_group,
-            "expected_gpu_count": expected_gpu_count,
-            "expected_gpu_total_vram_mib": expected_gpu_total_vram_mib,
-            "owner_project_id": owner_project_id,
-        }.items()
-        if value is not None
-    }
-    if not body:
-        raise ValueError("gpu_update_server requires at least one safe metadata field")
     replay_key = _routine_request_key(context) or f"mcp-call:{secrets.token_hex(16)}"
-    return await _client_call(
-        _client("agent"),
-        "patch",
-        f"/api/v1/endpoints/{server_id}",
-        body,
-        idempotency_key=replay_key,
-    )
+    try:
+        client, resolved = await _identity(context, project)
+        if action == "add":
+            if not host or not workspace_path:
+                raise ValueError("adding a server needs host and workspace_path")
+            generated = "server-" + re.sub(r"[^a-z0-9]+", "-", host.lower()).strip("-")[:96] + f"-p{port}"
+            return {"ok": True, **await _client_call(client, "post", "/api/v1/endpoints", {
+                "id": server_id or generated, "host": host, "port": port,
+                "ssh_user": ssh_user or "root", "ssh_alias": ssh_alias,
+                "workspace_path": workspace_path, "server_group_id": server_group_id,
+                "observation_profile": observation_profile or "linux", "labels": labels or [],
+                "storage_group": None, "expected_gpu_count": None,
+                "expected_gpu_total_vram_mib": None, "owner_project_id": resolved,
+            }, idempotency_key=replay_key)}
+        if server_id is None:
+            raise ValueError("updating a server needs server_id")
+        body = {key: value for key, value in {
+            "ssh_user": ssh_user, "ssh_alias": ssh_alias, "workspace_path": workspace_path,
+            "server_group_id": server_group_id, "observation_profile": observation_profile,
+            "labels": labels,
+        }.items() if value is not None}
+        if not body:
+            raise ValueError("updating a server needs at least one field")
+        return {"ok": True, **await _client_call(
+            client, "patch", f"/api/v1/endpoints/{server_id}", body, idempotency_key=replay_key
+        )}
+    except BrokerClientError as exc:
+        return _refusal(exc)
 
 
 ROUTINE_MCP_TOOL_NAMES = (
     "gpu_status",
     "gpu_apply",
+    "gpu_lease",
+    "gpu_resize",
     "gpu_release",
-    "gpu_add_server",
-    "gpu_update_server",
+    "gpu_take_over",
+    "gpu_server",
 )
 
 
