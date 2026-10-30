@@ -1250,9 +1250,10 @@ def test_keepalive_api_exposes_public_reconcile_hook(
         actor, "endpoint-a", "idle_keepalive", idempotency_key="hook-policy"
     )
 
-    result = asyncio.run(
+    asyncio.run(
         app.state.reconcile_endpoint_keepalive(actor, "endpoint-a", idempotency_key="hook")
     )
+    result = service.get_endpoint_keepalive_summary("endpoint-a")
 
     assert result["keepalive"]["active_gpu_count"] == len(GPU_UUIDS)
     assert adapter.calls == [("endpoint-a", True, GPU_UUIDS)]
@@ -1290,9 +1291,10 @@ def test_keepalive_reconcile_starts_eight_gpus_with_one_helper_call_and_collecti
 
     monkeypatch.setattr(service, "activate_keepalives", counted_activate)
 
-    result = asyncio.run(
+    asyncio.run(
         app.state.reconcile_endpoint_keepalive(actor, "endpoint-a", idempotency_key="eight")
     )
+    result = service.get_endpoint_keepalive_summary("endpoint-a")
 
     assert result["keepalive"]["active_gpu_count"] == 8
     assert activation_transactions == 1
@@ -2077,11 +2079,12 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
     async def collect_then_reconcile() -> dict:
         endpoint = app.state.service.collector_endpoint("endpoint-a")
         await collector.collect_selected(app.state.service, [endpoint])
-        return await app.state.reconcile_endpoint_keepalive(
+        await app.state.reconcile_endpoint_keepalive(
             app.state.service.local_actor("agent-a"),
             "endpoint-a",
             idempotency_key="foreign-process-reconcile",
         )
+        return app.state.service.get_endpoint_keepalive_summary("endpoint-a")
 
     reconciled = asyncio.run(collect_then_reconcile())
     assert reconciled["keepalive"]["actual"] == "ERROR"
@@ -2121,13 +2124,14 @@ def test_restart_preserves_keepalive_ownership_without_remote_churn(
 
     restarted_app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
 
-    reconciled = asyncio.run(
+    asyncio.run(
         restarted_app.state.reconcile_endpoint_keepalive(
             restarted_app.state.service.local_actor("agent-a"),
             "endpoint-a",
             idempotency_key="restart-preserve",
         )
     )
+    reconciled = restarted_app.state.service.get_endpoint_keepalive_summary("endpoint-a")
 
     assert adapter.calls == calls_before_restart
     assert set(adapter.active_pids) == set(GPU_UUIDS)

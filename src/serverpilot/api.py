@@ -478,7 +478,7 @@ def create_app(
         endpoint_id: str,
         *,
         idempotency_key: str,
-    ) -> dict[str, Any]:
+    ) -> None:
         """Execute a service-produced per-GPU keepalive transition plan.
 
         Service planning and ownership writes are separated from adapter calls;
@@ -511,7 +511,7 @@ def create_app(
                 transition for transition in transitions if transition.get("action") == "recover"
             ]
             if not starts and not stops and not recovers:
-                return await service.in_domain(service.get_endpoint_keepalive_summary, endpoint_id)
+                return
             adapter_id = endpoint.keepalive_adapter_id
             if adapter_id is None:
                 raise BrokerError(
@@ -757,7 +757,6 @@ def create_app(
                         status_code=409,
                         details={"failed_gpu_ids": [item["gpu_id"] for item in stop_failures]},
                     )
-            return await service.in_domain(service.get_endpoint_keepalive_summary, endpoint_id)
 
     async def reclaim_keepalive_for_claim(
         actor: ActorContext,
@@ -1645,11 +1644,16 @@ def create_app(
             policy,
             idempotency_key=mutation_key,
         )
-        reconciled = await reconcile_endpoint_keepalive(
+        await reconcile_endpoint_keepalive(
             actor,
             endpoint_id,
             idempotency_key=mutation_key,
         )
+        # Only this caller reads the aggregate. The collector reconciles after
+        # every probe and used to compute it too, then throw it away -- about a
+        # third of the domain thread's time, contending for the GIL with every
+        # state read.
+        reconciled = await service.in_domain(service.get_endpoint_keepalive_summary, endpoint_id)
         keepalive = reconciled.get("keepalive")
         if not isinstance(keepalive, dict):
             raise BrokerError(
