@@ -1016,6 +1016,8 @@ private struct EndpointTableRow: View {
         // Without this the row reports as AXUnknown, so assistive technology
         // reads its label but cannot say it is actionable.
         .accessibilityAddTraits(removalMark == true ? [.isButton, .isSelected] : .isButton)
+        // `.ignore` replaces the button's own element, press action included.
+        .accessibilityAction { select() }
         .accessibilityIdentifier("endpoint-row-\(endpoint.id)")
         .accessibilityLabel("服务器 \(endpoint.sshCommand)")
         .accessibilityValue(accessibilityValue)

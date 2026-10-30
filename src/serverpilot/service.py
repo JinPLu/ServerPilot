@@ -6359,7 +6359,7 @@ class BrokerService:
                 session, actor_id=actor.id, action="lease.resized", resource_type="lease",
                 resource_id=lease.id, result="success", before=before,
                 after=self._lease_dict(session, lease),
-                summary={"added": [gpu.id for gpu in added], "removed": remove_gpu_ids,
+                summary={"added": [gpu.gpu_uuid for gpu in added], "removed": remove_gpu_ids,
                          "resource_epoch": lease.resource_epoch}, now=now,
             )
             return {

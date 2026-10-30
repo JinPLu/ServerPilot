@@ -28,10 +28,13 @@
 再次打开恢复单窗口。真实 stdio 下 `serverpilot-mcp` 握手、工具清单、项目解析、`gpu_status` 和
 `if_changed` 通过。备份在 `~/Library/Application Support/ServerPilot/backups/`。
 
-未验证：系统通知横幅是否真的弹出（投递已执行，授权结果未确认）；菜单栏的外观；服务器表行
-的点击（后台 AXPress 未触发，总览入口正常，未判定是工具限制还是缺陷）；Slurm 节点详情入口；
-键盘、VoiceOver、缩放；Cursor 的 clientInfo/roots；真实 Agent 的 `gpu_apply`、改卡、接管；
-Slurm `exec_prefix` 与真实分配、进入、归还（`entry_verified=false`）。
+真实 MCP 客户端（Claude Code）在 `baige-hyshi` 空闲卡上跑通申请、加卡、读遥测、还卡、归还，
+无工作负载；归还的卡按 600 秒冷却恢复占卡。服务器表行可打开详情。
+
+未验证：系统通知横幅是否真的弹出（投递已执行，授权结果未确认）；菜单栏的外观；Slurm 节点详情
+入口；键盘、VoiceOver、缩放（已修一处：服务器行的辅助功能按下动作曾被吞掉，其余行未逐一核查）；
+Cursor 的 clientInfo/roots；真实接管老租约（只在数据库副本上做过）；Linux 和 Windows CI 未在
+`v4` 上运行；Slurm `exec_prefix` 与真实分配、进入、归还（`entry_verified=false`）。
 
 已知差异：MCP 文本仍是带缩进的 JSON，实测比紧凑形式约长 30%。全局规则未安装，因为 Codex 和
 Claude 的全局规则里本来就没有 ServerPilot 块，新契约经 MCP instructions 送达。

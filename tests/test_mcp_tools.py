@@ -126,6 +126,8 @@ def test_resize_grows_returns_and_warns_about_running_processes(mcp_agent) -> No
     grown = tools.gpu_resize(lease_id=lease_id, add_count=2)
     assert grown["restart_required"] is True
     assert grown["servers"][0]["env"]["CUDA_VISIBLE_DEVICES"] == "0,1,2"
+    change = tools.gpu_lease(lease_id=lease_id)["changes"][-1]
+    assert change["added"] == grown["added"]
     shrunk = tools.gpu_resize(task="train", remove_gpu_ids=grown["added"][:1], expected_epoch=grown["resource_epoch"])
     assert shrunk["resource_epoch"] == grown["resource_epoch"] + 1
 
