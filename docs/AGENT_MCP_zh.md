@@ -66,6 +66,8 @@ daemon 未运行时，macOS 上的 MCP 会尝试启动同一用户的 LaunchAgen
 
 全局规则需要单独安装：`serverpilot mcp policy --install`。
 
+工具权限：`serverpilot mcp install --client claude` 在终端里会询问是否放行，`--allow-tools` 直接同意，`--no-allow-tools` 不改动。放行只向 `~/.claude/settings.json` 的 `permissions.allow` 添加 `mcp__serverpilot`，其余内容不变，文件无法解析时拒绝写入。这会让该服务器的工具不再经过确认和 auto mode 分类器，默认不放行。Codex 和 Cursor 走各自的审批设置。
+
 身份来自客户端：Claude Code 和 Cursor 通过 roots 提供项目，Codex 没有 roots，取 `SERVERPILOT_PROJECT` 或工作目录；都拿不到时返回 `project_required`，由 Agent 传 `project`。
 
 ## 边界

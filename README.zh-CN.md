@@ -117,6 +117,8 @@ serverpilot mcp install --client codex     # 或 claude、cursor
 serverpilot mcp policy --install --client codex
 ```
 
+Claude Code 安装时会询问是否允许 Agent 调用这些工具时不再确认，`--allow-tools` 表示同意。不放行时，Claude Code 可能暂停询问，或在 auto mode 下拒绝归还 GPU，让无人值守的任务卡住。它只向 `~/.claude/settings.json` 添加 `mcp__serverpilot`。已安装的用户重新运行即可。Codex 和 Cursor 使用各自的审批设置，ServerPilot 不改动。
+
 `serverpilot mcp install` 只写启动命令：Codex 与 Claude Code 调用它们的 `mcp add`，Cursor 合并进 `~/.cursor/mcp.json`，不会覆盖你已有的其他 server。它不刷新客户端已经缓存的工具列表；要重连该 server（Cursor：Disable → Enable，或重载窗口）才会重新 `tools/list`。
 
 想自己粘贴配置就用 `serverpilot mcp config --client all`，它只打印不写盘。标准配置块是：

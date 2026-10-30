@@ -7,6 +7,7 @@
 1. 重启 daemon，确认 `/health/live` 的 `version` 是新版本。迁移保留全部数据和活跃租约，并重置它们的心跳与空闲计时。
 2. 重启每个 MCP 客户端。旧客户端调用时会收到 `restart_client`。
 3. 运行 `serverpilot mcp policy --install` 更新全局规则。
+4. 想让 Claude Code 的 Agent 无需确认地申请和归还 GPU，运行 `serverpilot mcp install --client claude --allow-tools`。
 
 升级前已有的租约显示在 `gpu_status` 的 `recoverable` 里，Agent 用 `gpu_apply(task=..., take_over=true)` 认领。
 

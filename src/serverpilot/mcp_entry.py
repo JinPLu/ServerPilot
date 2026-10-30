@@ -7,6 +7,7 @@ to PATH, so an absolute path is the only thing an agent can be handed.
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import sys
@@ -17,6 +18,8 @@ from serverpilot.config import CONTROL_PLANE_URL_VARIABLE, control_plane_url
 
 MCP_SERVER_NAME = "serverpilot"
 MCP_CLIENTS = ("codex", "claude", "cursor")
+#: Every tool of this server, in Claude Code's permission syntax.
+CLAUDE_ALLOW_RULE = f"mcp__{MCP_SERVER_NAME}"
 MCP_ENTRY_UNAVAILABLE_HINT = (
     "cannot find serverpilot-mcp; install this project with "
     "`uv tool install --force .` or use the packaged desktop archive"
@@ -79,6 +82,46 @@ def mcp_registration(client: str, command: str) -> dict[str, Any]:
         argv += ["--env", f"{name}={value}"]
     argv += [MCP_SERVER_NAME, "--", command]
     return {"client": client, "command_line": argv, "config": {MCP_SERVER_NAME: entry}}
+
+
+def claude_settings_path() -> Path:
+    return Path.home() / ".claude" / "settings.json"
+
+
+def allow_in_claude(path: Path | None = None) -> bool:
+    """Let Claude Code run these tools without asking. True if it changed anything.
+
+    Only for a person who asked for it: this widens what agents may do, so
+    nothing calls it unless `mcp install --allow-tools` was given. Everything
+    else in the file is left as it was, and a file that cannot be read as
+    settings is refused rather than replaced.
+    """
+
+    target = path or claude_settings_path()
+    if target.is_symlink():
+        raise ValueError(f"refusing to replace symlink: {target}")
+    settings: dict[str, Any] = {}
+    if target.exists():
+        try:
+            settings = json.loads(target.read_text(encoding="utf-8"))
+        except ValueError as exc:
+            raise ValueError(f"{target} is not valid JSON; fix it first") from exc
+        if not isinstance(settings, dict):
+            raise ValueError(f"{target} is not a settings object")
+    permissions = settings.setdefault("permissions", {})
+    allow = permissions.setdefault("allow", []) if isinstance(permissions, dict) else None
+    if not isinstance(allow, list):
+        raise ValueError(f"{target} has an unexpected permissions shape")
+    if CLAUDE_ALLOW_RULE in allow:
+        return False
+    allow.append(CLAUDE_ALLOW_RULE)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    staged = target.with_suffix(".json.serverpilot-tmp")
+    staged.write_text(json.dumps(settings, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    if target.exists():
+        staged.chmod(target.stat().st_mode & 0o777)
+    os.replace(staged, target)
+    return True
 
 
 def mcp_entry_status() -> dict[str, Any]:

@@ -174,6 +174,13 @@ serverpilot mcp install --client codex     # or claude, cursor
 serverpilot mcp policy --install --client codex
 ```
 
+For Claude Code, `mcp install` asks whether agents may call these tools without
+stopping for approval, and `--allow-tools` answers yes. Without it, Claude Code
+can pause or, in auto mode, refuse a GPU release, which stalls unattended work.
+It adds only `mcp__serverpilot` to `~/.claude/settings.json`. Run it again on an
+existing install to change your mind. Codex and Cursor keep their own approval
+settings, which ServerPilot does not touch.
+
 `serverpilot mcp install` only writes the launch command: Codex and Claude
 Code get their `mcp add`, and Cursor is merged into `~/.cursor/mcp.json`
 without disturbing servers already there. It does not refresh a client's

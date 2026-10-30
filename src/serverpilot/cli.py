@@ -10,6 +10,7 @@ import re
 import secrets
 import shutil
 import subprocess
+import sys
 import tempfile
 from pathlib import Path
 from typing import Annotated, Any
@@ -41,9 +42,12 @@ from serverpilot.database import Database
 from serverpilot.importer import import_servers_files, write_inventory
 from serverpilot.logging_setup import configure_logging
 from serverpilot.mcp_entry import (
+    CLAUDE_ALLOW_RULE,
     MCP_CLIENTS,
     MCP_SERVER_NAME,
     MCPEntryUnavailable,
+    allow_in_claude,
+    claude_settings_path,
     mcp_registration,
     mcp_server_entry,
     resolve_mcp_command,
@@ -810,6 +814,13 @@ def mcp_config(
 @mcp_app.command("install")
 def mcp_install(
     client: Annotated[str, typer.Option("--client", help=f"One of {', '.join(MCP_CLIENTS)}.")],
+    allow_tools: Annotated[
+        bool | None,
+        typer.Option(
+            "--allow-tools/--no-allow-tools",
+            help="Claude Code: let agents call these tools without asking. Asks when omitted in a terminal.",
+        ),
+    ] = None,
 ) -> None:
     """Register the MCP server with one agent client through that client's own mechanism."""
 
@@ -832,10 +843,45 @@ def mcp_install(
         )
         raise typer.Exit(code=1)
     result = subprocess.run(argv, check=False, capture_output=True, text=True)
-    if result.returncode != 0:
-        typer.echo((result.stderr or result.stdout).strip(), err=True)
+    output = (result.stderr or result.stdout).strip()
+    if result.returncode != 0 and "already exists" not in output.lower():
+        typer.echo(output, err=True)
         raise typer.Exit(code=1)
-    typer.echo(f"registered {MCP_SERVER_NAME} with {client}")
+    typer.echo(
+        f"registered {MCP_SERVER_NAME} with {client}"
+        if result.returncode == 0
+        else f"{MCP_SERVER_NAME} is already registered with {client}"
+    )
+    if client == "claude":
+        _offer_claude_allow(allow_tools)
+
+
+def _offer_claude_allow(allow_tools: bool | None) -> None:
+    """Widening what agents may do is the person's call, made here or not at all."""
+
+    if allow_tools is None and sys.stdin.isatty():
+        typer.echo(
+            "Agents apply for and return GPUs through these tools. Claude Code can stop to ask,\n"
+            "or refuse in auto mode, which stalls unattended work. Allowing them removes that\n"
+            "check for this server; other tools are unaffected."
+        )
+        allow_tools = typer.confirm(f"Add {CLAUDE_ALLOW_RULE} to {claude_settings_path()}?", default=False)
+    if not allow_tools:
+        typer.echo(
+            "tools not pre-approved; to allow them later: "
+            "serverpilot mcp install --client claude --allow-tools"
+        )
+        return
+    try:
+        changed = allow_in_claude()
+    except ValueError as exc:
+        typer.echo(str(exc), err=True)
+        raise typer.Exit(code=1) from exc
+    typer.echo(
+        f"allowed {CLAUDE_ALLOW_RULE} in {claude_settings_path()}"
+        if changed
+        else f"{CLAUDE_ALLOW_RULE} was already allowed"
+    )
 
 
 @mcp_app.command("policy")
