@@ -386,6 +386,13 @@ class Lease(Base):
     __tablename__ = "leases"
     __table_args__ = (
         Index("ix_lease_state_expiry", "state", "expires_at"),
+        Index(
+            "uq_active_owned_task",
+            "project_id",
+            "task_ref",
+            unique=True,
+            sqlite_where=text("owner_session_id IS NOT NULL AND released_at IS NULL"),
+        ),
         CheckConstraint("kind IN ('workload', 'keepalive')", name="ck_lease_kind"),
     )
 
@@ -411,6 +418,29 @@ class Lease(Base):
     #: lease's GPUs.  Cleared whenever a process appears or telemetry goes
     #: stale, so the elapsed time is always a fully observed idle window.
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The agent session that holds this lease. Null means a lease from before
+    #: sessions existed, or one a person made: it can be claimed by lease id.
+    owner_session_id: Mapped[str | None] = mapped_column(String(64))
+    #: Rises on every change to the card set, so a holder can tell its
+    #: selector went stale without comparing cards.
+    resource_epoch: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    #: The last audit event the holder has been told about.
+    agent_seen_audit_id: Mapped[int | None] = mapped_column(Integer)
+
+
+class AgentSession(Base):
+    """One MCP process. An audit label and a lease owner, never a credential."""
+
+    __tablename__ = "agent_sessions"
+    __table_args__ = (Index("ix_agent_session_project", "project_id", "last_seen_at"),)
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    client: Mapped[str] = mapped_column(String(120), nullable=False)
+    client_version: Mapped[str | None] = mapped_column(String(64))
+    actor_id: Mapped[str] = mapped_column(ForeignKey("actors.id"), nullable=False)
+    project_id: Mapped[str] = mapped_column(ForeignKey("projects.id"), nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
 class ResourceAllocation(Base):
@@ -485,6 +515,11 @@ class LeaseResource(Base):
     #: When a fresh observation first showed no compute process on this GPU.
     #: Tracked per GPU so a claim that uses one card does not keep the rest.
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    release_reason: Mapped[str | None] = mapped_column(String(500))
+    released_by: Mapped[str | None] = mapped_column(String(128))
+    #: Reclaim windows the holder has already postponed for this idle card.
+    keep_idle_windows: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
 
 
 class LeaseEndpointCommitment(Base):
@@ -530,7 +565,10 @@ class WorkloadBinding(Base):
 
 class AuditEvent(Base):
     __tablename__ = "audit_events"
-    __table_args__ = (Index("ix_audit_actor_time", "actor_id", "created_at"),)
+    __table_args__ = (
+        Index("ix_audit_actor_time", "actor_id", "created_at"),
+        Index("ix_audit_resource", "resource_type", "resource_id", "id"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
     actor_id: Mapped[str | None] = mapped_column(String(128), index=True)
@@ -546,7 +584,11 @@ class AuditEvent(Base):
 
 class Alert(Base):
     __tablename__ = "alerts"
-    __table_args__ = (Index("ix_alert_active", "active", "severity", "last_seen_at"),)
+    __table_args__ = (
+        Index("ix_alert_active", "active", "severity", "last_seen_at"),
+        Index("ix_alert_state", "state", "category", "last_seen_at"),
+        Index("ix_alert_dedupe", "dedupe_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(64), primary_key=True)
     alert_type: Mapped[str] = mapped_column(String(80), nullable=False)
@@ -558,6 +600,17 @@ class Alert(Base):
     first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: task_impacted, server_abnormal, resource_idle or capacity_available.
+    category: Mapped[str] = mapped_column(String(32), nullable=False, default="resource_idle")
+    dedupe_key: Mapped[str | None] = mapped_column(String(320))
+    #: pending (debouncing), active, acked or resolved.
+    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
+    pending_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    lease_id: Mapped[str | None] = mapped_column(String(64))
+    project_id: Mapped[str | None] = mapped_column(String(64))
+    task_ref: Mapped[str | None] = mapped_column(String(255))
+    payload_json: Mapped[str | None] = mapped_column(Text)
     acknowledged_by: Mapped[str | None] = mapped_column(String(128))
 
 

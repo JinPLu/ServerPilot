@@ -60,6 +60,31 @@ _RETIRED_COLUMNS = (("endpoints", "enabled"), ("gpu_devices", "enabled"))
 _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_seconds")
 
 
+# 20261030_0041 adds these. Its indexes go first: one of them names task_ref,
+# which _create_retired_request_tables removes.
+_LATER_INDEXES = (
+    ("leases", "uq_active_owned_task"),
+    ("audit_events", "ix_audit_resource"),
+    ("alerts", "ix_alert_state"),
+    ("alerts", "ix_alert_dedupe"),
+)
+_LATER_COLUMNS = {
+    "leases": ("owner_session_id", "resource_epoch", "agent_seen_audit_id"),
+    "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows"),
+    "alerts": ("category", "dedupe_key", "state", "pending_since", "notified_at", "lease_id",
+               "project_id", "task_ref", "payload_json"),
+}
+
+
+def _drop_later_additions() -> None:
+    for table, index in _LATER_INDEXES:
+        op.drop_index(index, table_name=table)
+    for table, columns in _LATER_COLUMNS.items():
+        with op.batch_alter_table(table) as batch:
+            for column in columns:
+                batch.drop_column(column)
+
+
 def _create_retired_request_tables() -> None:
     """Rebuild the request row a claim used to write, and the lease link to it.
 
@@ -103,6 +128,7 @@ def _create_retired_request_tables() -> None:
 
 def upgrade() -> None:
     Base.metadata.create_all(bind=op.get_bind(), tables=_initial_tables(), checkfirst=False)
+    _drop_later_additions()
     # Node scoping is introduced in 0040, not in the original schema.
     with op.batch_alter_table("gpu_devices") as batch:
         batch.drop_constraint("uq_endpoint_node_gpu_uuid", type_="unique")

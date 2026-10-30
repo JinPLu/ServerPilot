@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import sqlite3
 import stat
 from pathlib import Path
 
@@ -509,3 +510,31 @@ def test_node_migration_preserves_gpu_and_lease_identity(service, admin):
         retained = connection.execute(text("SELECT gpu_id FROM lease_resources WHERE lease_id=:id"), {"id": lease_id}).scalars().all()
     assert devices == [(gpu_ids[0], "self")]
     assert retained == gpu_ids
+
+
+def test_agent_session_migration_keeps_active_leases_claimable(tmp_path: Path) -> None:
+    from serverpilot import models
+
+    path = tmp_path / "sessions.sqlite3"
+    database = Database(f"sqlite:///{path}", Path(__file__).resolve().parents[1])
+    config = Config()
+    config.set_main_option("script_location", str(Path(models.__file__).parent / "migrations"))
+    config.set_main_option("sqlalchemy.url", database.url)
+    command.upgrade(config, "20260908_0040")
+    stale = "2026-01-01 00:00:00.000000"
+    with sqlite3.connect(path) as connection:
+        for lease_id, released in (("live", None), ("done", stale)):
+            connection.execute(
+                "INSERT INTO leases (id,actor_id,project_id,kind,task_ref,purpose,constraints_json,"
+                "duration_seconds,state,issued_at,last_heartbeat_at,released_at,issued_revision,idle_since) "
+                "VALUES (?,'agent','agent','workload','t','t','{}',60,'ACTIVE',?,?,?,1,?)",
+                (lease_id, stale, stale, released, stale),
+            )
+    connection.close()
+    command.upgrade(config, "head")
+    with database.engine.connect() as connection:
+        rows = dict(connection.execute(text("SELECT id,last_heartbeat_at FROM leases")).all())
+        owners = connection.execute(text("SELECT owner_session_id,idle_since FROM leases WHERE id='live'")).one()
+    assert rows["done"].startswith("2026-01-01")
+    assert rows["live"] > stale
+    assert tuple(owners) == (None, None)
