@@ -4,10 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.1.2 - 2026-11-02
 
-- **A held card is no longer falsely reported as an ownership conflict.** A process's start time was calculated as local time minus the process's age, so a probe two seconds slower than usual (such as the first connection after a daemon restart) made the same process look new, turning its card red and unavailable for a minute or two. The start time now comes from the server, so probe speed no longer affects it. The first observation after upgrading may flash once more.
-- The bundled slurm plugin is updated. A plugin of your own that emits raw probe output needs its process details from `TZ=UTC LC_ALL=C ps -o pid=,user=,lstart=,comm=`; in the old format a process loses its username and start time.
+- **Held cards are no longer falsely reported as an ownership conflict.** A probe two seconds or more slower than usual, such as the first connection after a daemon restart, made the same keepalive process look new, turning its card red and unclaimable for a minute or two. The start time was calculated as local time minus the process's age, so the probe's own duration counted against it. It now comes straight from the server, so probe speed no longer matters. A few cards may flash once more on the first collection after upgrading.
+- **For plugin authors:** a plugin that emits raw probe output must take process details from `TZ=UTC LC_ALL=C ps -o pid=,user=,lstart=,comm=`, or its processes lose their username and start time. The bundled slurm plugin is updated.
 
 ## 4.1.1 - 2026-11-02
 
