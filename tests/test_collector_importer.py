@@ -15,6 +15,7 @@ from serverpilot.collector import (
     GPU_CPU_ONLY,
     GPU_UNAVAILABLE,
     MAX_SERVER_SCRIPT_SNAPSHOT_BYTES,
+    RAW_SSH_COMBINED_QUERY,
     CollectionError,
     HostResourceSnapshot,
     SSHCollector,
@@ -22,6 +23,7 @@ from serverpilot.collector import (
     parse_host_resource_snapshot,
     parse_host_resources,
     parse_process_csv,
+    parse_raw_node_probe,
     parse_server_script_snapshot,
 )
 from serverpilot.collector_protocol import (
@@ -193,7 +195,7 @@ def test_collector_imports_process_details_with_one_combined_ssh(
             "__SERVERPILOT_PROCESSES__\n"
             "GPU-endpoint-a-0, 123, 1024, python-from-smi\n"
             "__SERVERPILOT_PROCESS_DETAILS__\n"
-            "123 alice 42 python3\n"
+            "123 alice Fri Oct 30 18:29:39 2026 python3\n"
             "__SERVERPILOT_IDENTITY__\n"
             "host-a\nboot-a\n"
             "__SERVERPILOT_HOST_RESOURCES__\n"
@@ -210,7 +212,57 @@ def test_collector_imports_process_details_with_one_combined_ssh(
     assert process.pid == 123
     assert process.username == "alice"
     assert process.executable == "python3"
-    assert process.process_started_at == observation.observed_at - timedelta(seconds=42)
+    assert process.process_started_at == datetime(2026, 10, 30, 18, 29, 39, tzinfo=UTC)
+
+
+def _probe_with_process_details(details: str) -> str:
+    return (
+        "__SERVERPILOT_GPU__\n"
+        "0, GPU-endpoint-a-0, Test GPU, 100000, 1024, 98976, 10, 2, 35, 100.0, P0, 00000000:01:00.0\n"
+        "__SERVERPILOT_PROCESSES__\n"
+        "GPU-endpoint-a-0, 123, 1024, python-from-smi\n"
+        "__SERVERPILOT_PROCESS_DETAILS__\n"
+        f"{details}\n"
+        "__SERVERPILOT_IDENTITY__\n"
+        "host-a\nboot-a\n"
+        "__SERVERPILOT_HOST_RESOURCES__\n"
+        "64\n262144 196608\n4.25\n1000 750\n"
+    )
+
+
+def test_a_slow_probe_does_not_move_a_process_start_time() -> None:
+    """A probe's latency once read as a new process, flashing cards to conflict."""
+
+    probe = _probe_with_process_details("123 alice Fri Oct 30 18:29:39 2026 python3")
+    now = datetime(2026, 11, 2, tzinfo=UTC)
+
+    fast = parse_raw_node_probe(probe, node_id="self", observed_at=now)
+    slow = parse_raw_node_probe(probe, node_id="self", observed_at=now + timedelta(seconds=30))
+
+    assert fast.processes[0].process_started_at == slow.processes[0].process_started_at
+    assert "TZ=UTC LC_ALL=C ps -o pid=,user=,lstart=,comm=" in RAW_SSH_COMBINED_QUERY
+
+
+def test_ps_details_tolerate_a_padded_day_and_a_spaced_command() -> None:
+    probe = _probe_with_process_details("123 alice Mon Nov  2 01:02:03 2026 my worker")
+
+    process = parse_raw_node_probe(
+        probe, node_id="self", observed_at=datetime(2026, 11, 2, 12, tzinfo=UTC)
+    ).processes[0]
+
+    assert process.process_started_at == datetime(2026, 11, 2, 1, 2, 3, tzinfo=UTC)
+    assert process.executable == "my worker"
+
+
+def test_an_unreadable_ps_line_leaves_the_process_without_known_identity() -> None:
+    observed_at = datetime(2026, 11, 2, tzinfo=UTC)
+    probe = _probe_with_process_details("123 alice 42 python3")
+
+    process = parse_raw_node_probe(probe, node_id="self", observed_at=observed_at).processes[0]
+
+    assert process.username is None
+    assert process.process_started_at == observed_at
+    assert process.executable == "python-from-smi"
 
 
 def test_collector_without_processes_uses_one_combined_ssh(

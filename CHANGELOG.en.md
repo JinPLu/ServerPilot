@@ -4,6 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **A held card is no longer falsely reported as an ownership conflict.** A process's start time was calculated as local time minus the process's age, so a probe two seconds slower than usual (such as the first connection after a daemon restart) made the same process look new, turning its card red and unavailable for a minute or two. The start time now comes from the server, so probe speed no longer affects it. The first observation after upgrading may flash once more.
+- The bundled slurm plugin is updated. A plugin of your own that emits raw probe output needs its process details from `TZ=UTC LC_ALL=C ps -o pid=,user=,lstart=,comm=`; in the old format a process loses its username and start time.
+
 ## 4.1.1 - 2026-11-02
 
 - **The sidebar is now the system's own**, so macOS draws its floating, translucent look instead of a flat grey panel.

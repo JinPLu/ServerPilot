@@ -107,11 +107,10 @@ FLEET_TREND_WINDOW_SECONDS = retention.TELEMETRY_SECONDS
 FLEET_TREND_BUCKET_SECONDS = 30 * 60
 SERVER_TREND_WINDOW_SECONDS = 60 * 60
 SERVER_TREND_BUCKET_SECONDS = 3 * 60
-# The collector derives a process start time from `ps etimes`, which has
-# one-second precision and is sampled after the endpoint observation begins.
-# Preserve the already-observed identity across this bounded measurement
-# jitter; otherwise a healthy long-running process can look new on every
-# collection and lose its workload attribution.
+# `ps lstart` is the kernel's boot time plus the process's age, so a server whose
+# clock is adjusted can report a running process a moment earlier or later.
+# Preserve the already-observed identity across that small movement; otherwise a
+# healthy long-running process can look new and lose its workload attribution.
 PROCESS_START_TIME_JITTER_SECONDS = 2
 MUTATING_ROLES = {"allocator", "operator", "admin"}
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
@@ -5722,13 +5721,10 @@ class BrokerService:
                 )
             )
             if current is None:
-                # `ps etimes` is intentionally used instead of a full
-                # process command line, but it makes the calculated
-                # start timestamp susceptible to a one-second boundary
-                # race. Reuse only the immediately-active identity for
-                # the same GPU/PID/boot when the derived times are very
-                # close; a materially different start time remains a
-                # new, fail-closed process identity.
+                # Reuse only the immediately-active identity for the same
+                # GPU/PID/boot when the reported times are very close; a
+                # materially different start time remains a new, fail-closed
+                # process identity.
                 candidate = session.scalar(
                     select(ProcessObservation)
                     .where(

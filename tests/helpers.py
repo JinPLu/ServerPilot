@@ -201,7 +201,7 @@ def probe_bundle(snapshot: dict) -> dict:
     processes = snapshot.get("processes", [])
     gpu_section = "\n".join(gpu_lines)
     process_section = "\n".join(f"{p['gpu_uuid']}, {p['pid']}, {p['used_memory_mib']}, {p['executable']}" for p in processes)
-    details = "\n".join(f"{p['pid']} {p.get('username') or 'user'} 10 {p['executable']}" for p in processes)
+    details = "\n".join(f"{p['pid']} {p.get('username') or 'user'} Fri Oct 30 18:29:39 2026 {p['executable']}" for p in processes)
     output = (f"__SERVERPILOT_GPU__\n{gpu_section}\n__SERVERPILOT_PROCESSES__\n{process_section}\n"
               f"__SERVERPILOT_PROCESS_DETAILS__\n{details}\n__SERVERPILOT_IDENTITY__\n{identity['hostname']}\n{identity['boot_id']}\n"
               f"__SERVERPILOT_HOST_RESOURCES__\n{host['cpu_count']}\n{host['memory_total_mib']} {host['memory_available_mib']}\n"

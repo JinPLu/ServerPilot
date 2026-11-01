@@ -14,7 +14,7 @@ import math
 import re
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, NamedTuple
 
@@ -660,23 +660,27 @@ def parse_combined_probe(raw: str) -> tuple[str, str, str, str, str]:
     )
 
 
-def parse_ps_output(raw: str, observed_at) -> dict[int, tuple[str | None, object, str]]:  # noqa: ANN001
-    """Map PID to (username, approximate-start, executable) from fixed `ps` output.
+def parse_ps_output(raw: str) -> dict[int, tuple[str | None, datetime, str]]:
+    """Map PID to (username, start, executable) from fixed `ps` output.
 
-    `etimes` avoids transmitting a full command line. Start time derives from the
-    collector's UTC observation time and is used with boot id to avoid PID reuse.
+    The probe asks for `lstart` in UTC, so the start time is the server's own
+    answer and a slow probe cannot move it. With boot id it guards against PID
+    reuse, and `comm` avoids transmitting a full command line.
     """
 
-    values: dict[int, tuple[str | None, object, str]] = {}
+    values: dict[int, tuple[str | None, datetime, str]] = {}
     for line in raw.splitlines():
-        parts = line.strip().split(maxsplit=3)
-        if len(parts) < 4:
+        parts = line.strip().split(maxsplit=7)
+        if len(parts) < 8:
             continue
         pid = _int(parts[0])
-        elapsed = _int(parts[2])
-        if pid is None or elapsed is None:
+        if pid is None:
             continue
-        values[pid] = (parts[1] or None, observed_at - timedelta(seconds=elapsed), parts[3])
+        try:
+            started_at = datetime.strptime(" ".join(parts[2:7]), "%a %b %d %H:%M:%S %Y")
+        except ValueError:
+            continue
+        values[pid] = (parts[1] or None, started_at.replace(tzinfo=UTC), parts[7])
     return values
 
 
@@ -721,7 +725,7 @@ def parse_raw_node_probe(raw: str, *, node_id: str, observed_at: datetime) -> No
     apps = parse_process_csv(process_raw) if gpu_probe_available else []
     _hostname, boot_id = parse_identity(identity_raw)
     host_snapshot = parse_host_resource_snapshot(host_raw)
-    details = parse_ps_output(process_details_raw, observed_at)
+    details = parse_ps_output(process_details_raw)
     processes = []
     for app in apps:
         username, started_at, executable = details.get(

@@ -56,7 +56,7 @@ RAW_SSH_COMBINED_QUERY = (
     "if (pid ~ /^[0-9]+$/ && pid > 0 && !seen[pid]++) "
     "{printf \"%s%s\", separator, pid; separator=\",\"}}'); "
     "if [ -n \"$serverpilot_pids\" ]; then "
-    "serverpilot_ps_output=$(ps -o pid=,user=,etimes=,comm= "
+    "serverpilot_ps_output=$(TZ=UTC LC_ALL=C ps -o pid=,user=,lstart=,comm= "
     "-p \"$serverpilot_pids\" 2>&1) && serverpilot_ps_rc=0 || serverpilot_ps_rc=$?; "
     "if [ \"$serverpilot_ps_rc\" = 0 ]; then printf '%s\\n' \"$serverpilot_ps_output\"; "
     "elif [ \"$serverpilot_ps_rc\" != 1 ] || [ -n \"$serverpilot_ps_output\" ]; then "
