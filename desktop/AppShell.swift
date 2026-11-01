@@ -87,74 +87,68 @@ struct NativeBrokerRoot: View {
             let compactNavigation = proxy.size.width < 1100
             let sidebarWidth: CGFloat = compactNavigation ? 60 : 216
 
-            ZStack {
-                AmbientBackground()
-
-                HStack(spacing: 0) {
-                    AppSidebar(
+            // The system's own sidebar column: its material is what the OS draws
+            // for every other app, and everything carrying data stays opaque.
+            NavigationSplitView(columnVisibility: .constant(.all)) {
+                AppSidebar(
+                    store: store,
+                    selectedSection: selectedDashboardSection,
+                    selectedGroupID: selectedGroupID,
+                    compact: compactNavigation,
+                    navigate: { section in
+                        selectedGroupID = nil
+                        resourceFilter = .all
+                        selectedDashboardSection = section
+                    },
+                    openGroup: { groupID in
+                        selectedGroupID = groupID
+                        resourceFilter = .all
+                        selectedDashboardSection = .resources
+                    }
+                )
+                .toolbar(removing: .sidebarToggle)
+                .navigationSplitViewColumnWidth(min: sidebarWidth, ideal: sidebarWidth, max: sidebarWidth)
+            } detail: {
+                VStack(spacing: 0) {
+                    AppToolbar(
                         store: store,
                         selectedSection: selectedDashboardSection,
-                        selectedGroupID: selectedGroupID,
-                        compact: compactNavigation,
-                        navigate: { section in
-                            selectedGroupID = nil
-                            resourceFilter = .all
-                            selectedDashboardSection = section
+                        addServer: { showAddServer = true },
+                        claimGPU: {
+                            claimInitialEndpointID = ""
+                            showClaim = true
                         },
-                        openGroup: { groupID in
-                            selectedGroupID = groupID
-                            resourceFilter = .all
-                            selectedDashboardSection = .resources
+                        refresh: store.reload
+                    )
+                    .fixedSize(horizontal: false, vertical: true)
+                    DashboardView(
+                        store: store,
+                        addServer: { showAddServer = true },
+                        claimGPU: {
+                            claimInitialEndpointID = ""
+                            showClaim = true
+                        },
+                        claimEndpoint: { endpointID in
+                            claimInitialEndpointID = endpointID
+                            showClaim = true
+                        },
+                        manageGroups: { showGroupManagement = true },
+                        openEndpoint: { endpoint in
+                            selectedEndpointDetailID = endpoint.id
+                        },
+                        selectedSection: $selectedDashboardSection,
+                        selectedGroupID: selectedGroupID,
+                        resourceFilter: $resourceFilter,
+                        selectGPU: { gpu in
+                            selectedGPUID = gpu.id
                         }
                     )
-                    .frame(width: sidebarWidth)
-                    .padding([.leading, .vertical], 8)
-
-                    VStack(spacing: 0) {
-                        AppToolbar(
-                            store: store,
-                            selectedSection: selectedDashboardSection,
-                            addServer: { showAddServer = true },
-                            claimGPU: {
-                                claimInitialEndpointID = ""
-                                showClaim = true
-                            },
-                            refresh: store.reload
-                        )
-                        .fixedSize(horizontal: false, vertical: true)
-                        DashboardView(
-                            store: store,
-                            addServer: { showAddServer = true },
-                            claimGPU: {
-                                claimInitialEndpointID = ""
-                                showClaim = true
-                            },
-                            claimEndpoint: { endpointID in
-                                claimInitialEndpointID = endpointID
-                                showClaim = true
-                            },
-                            manageGroups: { showGroupManagement = true },
-                            openEndpoint: { endpoint in
-                                selectedEndpointDetailID = endpoint.id
-                            },
-                            selectedSection: $selectedDashboardSection,
-                            selectedGroupID: selectedGroupID,
-                            resourceFilter: $resourceFilter,
-                            selectGPU: { gpu in
-                                selectedGPUID = gpu.id
-                            }
-                        )
-                    }
-                    .frame(
-                        width: max(0, proxy.size.width - sidebarWidth - 8),
-                        height: proxy.size.height
-                    )
-                    .clipped()
-                    .background(Color.clear)
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .background(DesignTokens.ambientSmoke)
+                .clipped()
+                .background(AmbientBackground())
             }
+            .navigationSplitViewStyle(.balanced)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .tint(DesignTokens.interaction)
@@ -234,8 +228,7 @@ private struct AppSidebar: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
-            // The window's own controls sit here.
-            Color.clear.frame(height: 40)
+            Color.clear.frame(height: 8)
 
             SidebarSelection(title: "总览", systemImage: "square.grid.2x2", selected: selectedSection == .overview, compact: compact) {
                 navigate(.overview)
@@ -288,14 +281,6 @@ private struct AppSidebar: View {
         }
         .padding(.bottom, 10)
         .frame(maxHeight: .infinity, alignment: .top)
-        // The one translucent surface in the window: navigation steps back onto
-        // the desktop, and everything carrying data stays opaque and legible.
-        .background(VisualEffect(material: .sidebar, blendingMode: .behindWindow))
-        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                .strokeBorder(DesignTokens.surfaceStroke, lineWidth: 1)
-        )
     }
 }
 

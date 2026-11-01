@@ -276,7 +276,8 @@ struct OverviewDashboard: View {
     }
 }
 
-/// The whole fleet over a day.  A gap in collection is a gap in the line.
+/// The whole fleet over a day.  A gap in collection carries no reading: a dashed
+/// line joins its two sides, unfilled, and says how long nothing was collected.
 private struct FleetTrendChart: View {
     let series: UtilizationSeries?
 
@@ -300,15 +301,42 @@ private struct FleetTrendChart: View {
         return answer
     }
 
+    private var gaps: [UtilizationSeries.Gap] { series?.gaps ?? [] }
+
+    private func gapLabel(_ seconds: Int) -> String {
+        if seconds < 3600 { return "未采集 \(seconds / 60) 分钟" }
+        let hours = Double(seconds) / 3600
+        return "未采集 \(hours.formatted(.number.precision(.fractionLength(0...1)))) 小时"
+    }
+
     var body: some View {
         if series?.hasData == true {
 #if canImport(Charts)
-            Chart(samples) { sample in
-                AreaMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", sample.run))
-                    .foregroundStyle(DesignTokens.interaction.opacity(DesignTokens.Alpha.fill))
-                LineMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", sample.run))
-                    .foregroundStyle(DesignTokens.interaction)
-                    .lineStyle(StrokeStyle(lineWidth: 2))
+            Chart {
+                ForEach(samples) { sample in
+                    AreaMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
+                        .foregroundStyle(DesignTokens.interaction.opacity(DesignTokens.Alpha.fill))
+                    LineMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
+                        .foregroundStyle(DesignTokens.interaction)
+                        .lineStyle(StrokeStyle(lineWidth: 2))
+                }
+                ForEach(gaps, id: \.beforeIndex) { gap in
+                    LineMark(x: .value("时间", gap.beforeIndex), y: .value("利用率", gap.before * 100), series: .value("段", "gap-\(gap.beforeIndex)"))
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
+                    LineMark(x: .value("时间", gap.afterIndex), y: .value("利用率", gap.after * 100), series: .value("段", "gap-\(gap.beforeIndex)"))
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
+                    PointMark(x: .value("时间", Double(gap.beforeIndex + gap.afterIndex) / 2), y: .value("利用率", (gap.before + gap.after) * 50))
+                        .opacity(0)
+                        .annotation(position: .top, spacing: 4) {
+                            Text(gapLabel(gap.seconds))
+                                .font(Typography.annotation)
+                                .foregroundStyle(DesignTokens.mutedInk)
+                                .lineLimit(1)
+                                .fixedSize()
+                        }
+                }
             }
             .chartXAxis(.hidden)
             .chartXScale(domain: 0...max((series?.points.count ?? 1) - 1, 1))

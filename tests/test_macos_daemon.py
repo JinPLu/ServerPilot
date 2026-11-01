@@ -843,9 +843,10 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
     toolbar_body = window_source.split("struct AppToolbar", maxsplit=1)[
         1
     ].split("struct NoticeBanner", maxsplit=1)[0]
-    # The sidebar is the one translucent surface: navigation steps back onto the
-    # desktop, and anything carrying data stays opaque and legible.
-    assert "VisualEffect(material: .sidebar, blendingMode: .behindWindow)" in sidebar_body
+    # The sidebar is the system's own column, so its material is the OS's; anything
+    # carrying data stays opaque and legible.
+    assert "NavigationSplitView(columnVisibility: .constant(.all))" in window_source
+    assert "VisualEffect" not in sidebar_body
     assert "VisualEffect" not in toolbar_body
     assert ".regularMaterial" not in sidebar_body
     assert ".regularMaterial" not in toolbar_body

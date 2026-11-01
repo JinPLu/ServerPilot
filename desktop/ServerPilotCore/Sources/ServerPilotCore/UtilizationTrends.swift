@@ -27,6 +27,36 @@ public struct UtilizationSeries: Equatable, Sendable {
     }
 
     public var hasData: Bool { latest != nil }
+
+    /// A stretch with no collection between two readings. Readings on only one
+    /// side have nothing to join, so they are not a gap.
+    public struct Gap: Equatable, Sendable {
+        public let beforeIndex: Int
+        public let afterIndex: Int
+        public let before: Double
+        public let after: Double
+        public let seconds: Int
+    }
+
+    public var gaps: [Gap] {
+        let bucketSeconds = points.isEmpty ? 0 : windowSeconds / points.count
+        var answer: [Gap] = []
+        var previous: (index: Int, value: Double)?
+        for (index, point) in points.enumerated() {
+            guard let point else { continue }
+            if let previous, index - previous.index > 1 {
+                answer.append(Gap(
+                    beforeIndex: previous.index,
+                    afterIndex: index,
+                    before: previous.value,
+                    after: point,
+                    seconds: (index - previous.index - 1) * bucketSeconds
+                ))
+            }
+            previous = (index, point)
+        }
+        return answer
+    }
 }
 
 /// The fleet line for the overview and one short line per server, from one read.
