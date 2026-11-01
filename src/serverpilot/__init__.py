@@ -26,4 +26,5 @@ API_CAPABILITIES = (
     "observation_profiles",
     "mcp_entry",
     "server_group_crud",
+    "utilization_trends",
 )

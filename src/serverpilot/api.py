@@ -1306,6 +1306,10 @@ def create_app(
             client_version=body.client_version, project_id=body.project,
         )
 
+    @app.get("/api/v2/utilization-trends")
+    def utilization_trends(actor: ApiActor) -> dict[str, Any]:
+        return service.utilization_trends(actor)
+
     @app.get("/api/v2/pulse")
     def pulse() -> dict[str, Any]:
         return service.pulse()

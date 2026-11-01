@@ -341,6 +341,13 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     serviceInfo: serviceInfo,
                     endpointTelemetryHistoryClient: FixtureEndpointTelemetryHistoryClient(history: history)
                 )
+            } else if let extrasFixture = environment["SERVERPILOT_DESKTOP_EXTRAS_FIXTURE"], !extrasFixture.isEmpty {
+                let extras = try FixtureSnapshots.loadDashboardExtras(from: FixtureSnapshots.resolve(
+                    extrasFixture,
+                    fixturesRoot: fixturesRoot,
+                    projectRoot: projectRoot
+                ))
+                brokerStore.useFixture(snapshot: snapshot, utilizationTrends: extras.trends, alerts: extras.alerts)
             } else {
                 brokerStore.useFixture(snapshot: snapshot)
             }

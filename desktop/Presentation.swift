@@ -180,13 +180,21 @@ func endpointRequiresAttention(endpoint: EndpointRecord, gpus: [GPURecord]) -> B
 }
 
 
+/// Colour is for pressure that needs a look.  Below the threshold a bar is
+/// neutral, so a row of healthy machines reads as calm rather than as green.
 func pressureColor(_ fraction: Double?) -> Color {
     guard let fraction else { return DesignTokens.mutedInk }
     switch fraction {
-    case ..<0.70: return DesignTokens.success
+    case ..<0.70: return DesignTokens.quietBar
     case ..<0.90: return DesignTokens.warning
     default: return DesignTokens.danger
     }
+}
+
+/// The same thresholds for the figure beside a bar, which stays ink until then.
+func pressureTextColor(_ fraction: Double?) -> Color {
+    guard let fraction else { return DesignTokens.mutedInk }
+    return fraction < 0.70 ? DesignTokens.ink : pressureColor(fraction)
 }
 
 
@@ -244,7 +252,8 @@ private func gpuStateColor(_ state: String) -> Color {
     // Held is real state but not a warning, and a user-chosen accent could sit
     // anywhere on the luminance scale — a neutral keeps the graphical floor.
     case "HELD", "LEASED_IDLE", "KEEPALIVE": return DesignTokens.hold
-    case "RUNNING_MANAGED", "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED", "MAINTENANCE": return DesignTokens.warning
+    case "RUNNING_MANAGED": return DesignTokens.interaction
+    case "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED", "MAINTENANCE": return DesignTokens.warning
     default: return DesignTokens.danger
     }
 }
@@ -377,3 +386,173 @@ private func historyTimestamp(_ value: String) -> String {
     return formatter.string(from: date)
 }
 
+
+// ---- shared across the overview, the server table and the menu bar ----
+
+extension Notification.Name {
+    /// The menu bar asks the window to open its claim sheet.
+    static let serverPilotRequestClaim = Notification.Name("serverPilotRequestClaim")
+}
+
+/// A server group as the overview and the sidebar show it: the groups in name
+/// order, then whatever is outside one.
+struct ServerFleet: Identifiable {
+    let id: String
+    let name: String
+    let servers: [EndpointRecord]
+
+    @MainActor
+    func freeCardCount(in snapshot: BrokerSnapshot) -> Int {
+        servers.reduce(0) { total, endpoint in
+            if let capacity = endpoint.schedulerCapacity { return total + capacity.freeGPUCount }
+            guard endpoint.monitorStatus == "ONLINE" else { return total }
+            return total + snapshot.gpus(for: endpoint).filter(\.isPubliclyAvailable).count
+        }
+    }
+}
+
+func serverFleets(in snapshot: BrokerSnapshot) -> [ServerFleet] {
+    let shown = snapshot.operationalEndpoints.filter {
+        !snapshot.gpus(for: $0).isEmpty || $0.schedulerCapacity != nil || !$0.nodes.isEmpty
+    }
+    let grouped = Dictionary(grouping: shown) { snapshot.serverGroup(for: $0)?.id ?? "" }
+    var fleets = snapshot.serverGroups
+        .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+        .compactMap { group in
+            grouped[group.id].map { ServerFleet(id: group.id, name: group.displayName, servers: $0) }
+        }
+    if let loose = grouped[""] {
+        fleets.append(ServerFleet(id: "", name: "未分组", servers: loose))
+    }
+    return fleets
+}
+
+/// The words that answer "can I ask this machine for a GPU", wherever a server
+/// is named: what it is doing, then how many cards are still free, because one
+/// conflicted GPU must never hide the rest.  A scheduler endpoint has no local
+/// inventory and is not a CPU node.
+///
+/// Unreachable is not one thing: a stale local snapshot is this machine's
+/// loopback hop, not the remote server, and monitorLabel already carries the
+/// distinct words for a first connection, a late reading and a failed probe.
+struct ServerStatus {
+    enum Tone { case free, working, held, attention, fault, quiet }
+
+    let word: String
+    let tone: Tone
+
+    init(endpoint: EndpointRecord, gpus: [GPURecord], group: ServerGroupRecord?, isSnapshotFresh: Bool) {
+        guard isSnapshotFresh else {
+            word = "本机未更新"
+            tone = .fault
+            return
+        }
+        guard endpoint.monitorStatus == "ONLINE" else {
+            word = endpoint.monitorLabel
+            tone = ["ERROR", "STALE"].contains(endpoint.monitorStatus) ? .fault : .attention
+            return
+        }
+        if endpoint.schedulerCapacity != nil || group?.allocation == .delegated {
+            let limit = group?.largestAllocatableBlock
+                ?? group?.limits?.maxGPUsPerLease
+                ?? endpoint.schedulerCapacity?.maxGPUsPerLease
+                ?? endpoint.schedulerCapacity?.largestFreeBlock
+            word = limit.map { "按需申请 · 一次最多 \($0) 卡" } ?? "按需申请"
+            let hasCapacity = endpoint.schedulerCapacity.map { $0.freeGPUCount > 0 }
+                ?? ((group?.largestAllocatableBlock ?? 0) > 0)
+            tone = hasCapacity ? .free : .quiet
+            return
+        }
+        guard !gpus.isEmpty else {
+            word = "CPU 节点"
+            tone = .quiet
+            return
+        }
+        // The state that needs a person most, in the one vocabulary agents read too.
+        let order = ["CONFLICT", "ORPHANED_BUSY", "BUSY_UNMANAGED", "HELD", "LEASED_IDLE", "RUNNING_MANAGED"]
+        let state = order.first { candidate in gpus.contains { $0.state == candidate } }
+        let free = gpus.filter(\.isPubliclyAvailable).count
+        if state == nil, free > 0 {
+            word = "空闲"
+            tone = .free
+            return
+        }
+        let label = CardVocabulary.label(forState: state ?? gpus.first?.state ?? "UNKNOWN_STALE")
+        word = free > 0 ? "\(label) · \(free) 张空闲" : label
+        switch state {
+        case "RUNNING_MANAGED": tone = .working
+        case "HELD", "LEASED_IDLE": tone = .held
+        case nil: tone = .fault
+        default: tone = .attention
+        }
+    }
+
+    var color: Color {
+        switch tone {
+        case .free: DesignTokens.success
+        case .working: DesignTokens.interaction
+        case .held: DesignTokens.hold
+        case .attention: DesignTokens.warning
+        case .fault: DesignTokens.danger
+        case .quiet: DesignTokens.mutedInk
+        }
+    }
+}
+
+/// Slurm's node words in the vocabulary the rest of the App uses.
+func schedulerNodeStateLabel(_ state: String) -> String {
+    let base = state.lowercased().trimmingCharacters(in: CharacterSet(charactersIn: "*~#!%$@^-+"))
+    switch base {
+    case "idle": return "空闲"
+    case "mix", "mixed": return "部分占用"
+    case "alloc", "allocated": return "已占满"
+    case "comp", "completing": return "正在收尾"
+    case "drain", "drng", "draining", "drained": return "维护中"
+    case "down", "fail", "failing", "maint", "reserved", "resv": return "不可用"
+    default: return state
+    }
+}
+
+/// "3 小时 5 分": how long something has been going, to the minute.
+func elapsedLabel(_ seconds: Int) -> String {
+    let minutes = seconds / 60
+    if minutes < 60 { return "\(max(minutes, 1)) 分钟" }
+    let hours = minutes / 60
+    if hours >= 48 { return "\(hours / 24) 天" }
+    return minutes % 60 == 0 ? "\(hours) 小时" : "\(hours) 小时 \(minutes % 60) 分"
+}
+
+/// A quiet line of recent values.  A gap in the data breaks the line.
+struct Sparkline: View {
+    let points: [Double?]
+    var color: Color = DesignTokens.quietBar
+    var lineWidth: CGFloat = 1.5
+
+    var body: some View {
+        GeometryReader { proxy in
+            Path { path in
+                guard points.count > 1 else { return }
+                let step = proxy.size.width / CGFloat(points.count - 1)
+                var drawing = false
+                for (index, value) in points.enumerated() {
+                    guard let value else {
+                        drawing = false
+                        continue
+                    }
+                    let point = CGPoint(
+                        x: CGFloat(index) * step,
+                        y: proxy.size.height * (1 - CGFloat(min(max(value, 0), 1)))
+                    )
+                    if drawing {
+                        path.addLine(to: point)
+                    } else {
+                        path.move(to: point)
+                        drawing = true
+                    }
+                }
+            }
+            .stroke(color, style: StrokeStyle(lineWidth: lineWidth, lineCap: .round, lineJoin: .round))
+        }
+        .accessibilityHidden(true)
+    }
+}

@@ -25,6 +25,7 @@ run_capture() {
     SERVERPILOT_DESKTOP_FIXTURE="${fixture}" \
     SERVERPILOT_DESKTOP_SECTION="${section}" \
     SERVERPILOT_DESKTOP_VIEWPORT="${viewport}" \
+    SERVERPILOT_DESKTOP_EXTRAS_FIXTURE="${SERVERPILOT_DESKTOP_EXTRAS_FIXTURE:-}" \
     SERVERPILOT_DESKTOP_SCREENSHOT="${screenshot}" \
     SERVERPILOT_DESKTOP_EXIT_AFTER_SCREENSHOT=1 \
     SERVERPILOT_DESKTOP_FORCE_INCREASE_CONTRAST="${SERVERPILOT_DESKTOP_FORCE_INCREASE_CONTRAST:-0}" \
@@ -40,6 +41,11 @@ for viewport in 1024x640 1280x800 1440x820; do
   run_capture "servers-${viewport}" resource-ownership server-pool "${viewport}"
   run_capture "usage-${viewport}" resource-ownership resource-usage "${viewport}"
   run_capture "settings-${viewport}" resource-ownership settings "${viewport}"
+done
+for viewport in 1024x640 1280x800 1440x820; do
+  SERVERPILOT_DESKTOP_EXTRAS_FIXTURE=dashboard-extras run_capture "dashboard-overview-${viewport}" dashboard overview "${viewport}"
+  SERVERPILOT_DESKTOP_EXTRAS_FIXTURE=dashboard-extras run_capture "dashboard-servers-${viewport}" dashboard server-pool "${viewport}"
+  SERVERPILOT_DESKTOP_EXTRAS_FIXTURE=dashboard-extras run_capture "dashboard-tasks-${viewport}" dashboard resource-usage "${viewport}"
 done
 run_capture empty-1024x640 0 server-pool 1024x640
 run_capture error-1024x640 error server-pool 1024x640

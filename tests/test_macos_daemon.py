@@ -842,11 +842,13 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
     ].split("struct SidebarSelection", maxsplit=1)[0]
     toolbar_body = window_source.split("struct AppToolbar", maxsplit=1)[
         1
-    ].split("struct FreshnessBadge", maxsplit=1)[0]
+    ].split("struct NoticeBanner", maxsplit=1)[0]
+    # The sidebar is the one translucent surface: navigation steps back onto the
+    # desktop, and anything carrying data stays opaque and legible.
+    assert "VisualEffect(material: .sidebar, blendingMode: .behindWindow)" in sidebar_body
+    assert "VisualEffect" not in toolbar_body
     assert ".regularMaterial" not in sidebar_body
     assert ".regularMaterial" not in toolbar_body
-    assert ".background(DesignTokens.surface)" in sidebar_body
-    assert ".background(DesignTokens.surface)" in toolbar_body
     assert "SERVERPILOT_DESKTOP_VIEWPORT" in window_source
     assert "SERVERPILOT_DESKTOP_SCREENSHOT" in window_source
     assert "SERVERPILOT_DESKTOP_EXIT_AFTER_SCREENSHOT" in window_source
@@ -861,32 +863,25 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
 
     resources_body = window_source.split(
         "struct ResourcesDashboard", maxsplit=1
-    )[1].split("struct ResourceInlineStat", maxsplit=1)[0]
+    )[1].split("struct FilterChip", maxsplit=1)[0]
     assert ".regularMaterial" not in resources_body
-    assert "background(DesignTokens.surface)" in resources_body
+    # The table is the one white surface on this page, not a stack of white bands.
+    assert "background(DesignTokens.surface)" not in resources_body
+    assert ".fill(DesignTokens.surface)" in resources_body
 
 
 def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> None:
     project_root = Path(__file__).resolve().parents[1]
-    split_source = (project_root / "desktop" / "ResizableSplitPane.swift").read_text(
-        encoding="utf-8"
-    )
     dashboard_source = desktop_swift_source(project_root)
-
-    assert "minimumMasterWidth: 400" in split_source
-    assert "minimumDetailWidth: 560" in split_source
-    assert "NSCursor.resizeLeftRight.push()" in split_source
-    assert "NSCursor.pop()" in split_source
-    assert 'accessibilityLabel("调整列表与详情宽度")' in split_source
 
     # The endpoint list is a table, because the page's job is comparing four
     # pressures across machines and only a column lets the eye do that.  Narrow
     # widths fold columns from the right instead of dropping to a compact row
-    # variant, and the SSH lane keeps a floor no tier may cross.
+    # variant, and the address lane keeps a floor no tier may cross.
     table_layout = dashboard_source.split(
         "enum EndpointTableLayout", maxsplit=1
     )[1].split("struct EndpointTableDivider", maxsplit=1)[0]
-    assert "static let sshLane: CGFloat = 304" in table_layout
+    assert "static let addressLane: CGFloat = 200" in table_layout
     assert "static func tier(width: CGFloat) -> Tier" in table_layout
     for tier in ("case wide", "case medium", "case compact"):
         assert tier in table_layout, tier
@@ -899,6 +894,11 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
 
     assert "EndpointTableLayout.tier(width:" in dashboard_source
     assert "LazyVStack(spacing: 0)" in dashboard_source
+    # One scroller for the fleet: a group is as long as it is, and the table
+    # fills the window.  A cap per group left half a window empty beside a list
+    # that had to be scrolled.
+    assert "sectionRowCount" not in dashboard_source
+    assert "group-scroll-" not in dashboard_source
 
     # Every metric the header sorts by is drawn the same way in the row: a
     # percentage and a bar.  A number without a bar cannot be compared down a
@@ -962,7 +962,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     assert ".help(removalMark == nil ? tooltip :" in row_body
 
 
-def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry_claims() -> None:
+def test_macos_task_page_lists_leases_without_claiming_a_tasks_own_telemetry() -> None:
     project_root = Path(__file__).resolve().parents[1]
     usage_source = (
         project_root / "desktop" / "ResourceUsageDashboard.swift"
@@ -971,32 +971,19 @@ def test_macos_resource_usage_groups_projects_agents_and_tasks_without_telemetry
 
     assert "ResourceUsageDashboard(store: store, claimGPU: claimGPU)" in window_source
     assert 'case "resource-usage", "leases": .leases' in window_source
-    for scope in ("case project", "case task"):
-        assert scope in usage_source
-    assert "static let visibleCases: [ResourceUsageScope] = [.project, .task]" in usage_source
-    for state, help_text in (
-        ("已分配", "资源已归属，尚未检测到任务"),
-        ("运行", "已检测到任务"),
-    ):
-        assert f'case "{state}": return "{help_text}"' in usage_source
-    assert "snapshot.leases" in usage_source
-    assert '$0.runtimeState == "RUNNING"' in usage_source
     # Nothing is ever queued, so the page reads leases and nothing else.
+    assert "store.snapshot.leases" in usage_source
     assert "snapshot.requests" not in usage_source
     assert "snapshot.resourceClaims" not in usage_source
-    assert "nativeLeaseIDs" not in usage_source
-    assert "nativeRequestIDs" not in usage_source
-    assert 'key = "\\(projectID)\\u{1F}\\(taskReference)"' in usage_source
-    assert "if snapshot.resourceClaims.isEmpty" not in usage_source
-    assert "claims.isEmpty ? requests : []" not in usage_source
+    # A held task with nothing running is what a person can act on, so it leads.
+    assert usage_source.index('section("需要留意"') < usage_source.index('section("运行中"')
+    assert '$0.runtimeState != "RUNNING"' in usage_source
+    # The line belongs to the server: nothing measures one task's own share.
+    assert "所在服务器" in usage_source
     assert "endpoint.cpuLoadFraction" not in usage_source
     assert "endpoint.memoryFraction" not in usage_source
-    assert ".onChange(of: store.snapshot.snapshotRevision)" in usage_source
-    assert "groupsByScope = [scope: makeResourceUsageGroups" in usage_source
-    assert "ResourceUsageScope.allCases.map" not in usage_source
-    assert "SERVERPILOT_DESKTOP_USAGE_SCOPE" in usage_source
-    for summary_title in ('title: "已分配"', 'title: "运行"'):
-        assert summary_title in usage_source
+    for action in ("归还", "改派"):
+        assert action in usage_source
 
 
 def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None:
@@ -1020,7 +1007,6 @@ def test_product_copy_is_anchored_on_one_user_with_projects_and_agents() -> None
         assert product_value in readme
     assert "| --- | --- | --- |" not in readme
     assert 'SidebarSelection(title: "任务"' in window_source
-    assert 'accessibilityLabel("按项目或任务查看使用情况")' in usage_source
     desktop_copy = window_source + usage_source
     for retired_copy in ("共享 GPU 工作区", "协作安排", "当前操作者"):
         assert retired_copy not in desktop_copy

@@ -1368,6 +1368,8 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
     public let manualRelease: ManualRelease
     public let taskReference: String?
     public let purpose: String?
+    /// What the holder said it would take; nil when it said nothing.
+    public let declaredDurationSeconds: Int?
 
     public init?(raw: [String: Any]) {
         guard let id = raw.string("id"), let actorID = raw.string("actor_id"), let projectID = raw.string("project_id") else {
@@ -1394,6 +1396,7 @@ public struct LeaseRecord: Identifiable, Equatable, Sendable {
         self.manualRelease = ManualRelease(raw: raw["manual_release"])
         self.taskReference = raw.string("task_ref")
         self.purpose = raw.string("purpose")
+        self.declaredDurationSeconds = raw["duration_declared"] as? Bool == true ? raw.optionalInt("duration_seconds") : nil
     }
 
     public var gpuCount: Int {

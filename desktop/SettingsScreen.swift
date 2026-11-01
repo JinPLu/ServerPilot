@@ -14,6 +14,8 @@ struct DashboardView: View {
     let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
     @Binding var selectedSection: DashboardSection
+    let selectedGroupID: String?
+    @Binding var resourceFilter: EndpointFilter
     let selectGPU: (GPURecord) -> Void
 
     var body: some View {
@@ -22,16 +24,21 @@ struct DashboardView: View {
             if store.feedback == nil, store.freshness == .stale {
                 NoticeBanner(message: "本机服务响应中断，显示上次数据。", color: DesignTokens.danger, icon: "wifi.exclamationmark")
                     .padding(.horizontal, 24)
-                    .padding(.top, 12)
+                    .padding(.bottom, 10)
             }
 
             Group {
                 switch selectedSection {
                 case .overview:
-                    OverviewDashboard(store: store, openEndpoint: openEndpoint) { selectedSection = $0 }
+                    OverviewDashboard(store: store, openEndpoint: openEndpoint) { section, filter in
+                        resourceFilter = filter
+                        selectedSection = section
+                    }
                 case .resources:
                     ResourcesDashboard(
                         store: store,
+                        groupID: selectedGroupID,
+                        filter: $resourceFilter,
                         claimEndpoint: claimEndpoint,
                         manageGroups: manageGroups,
                         openEndpoint: openEndpoint,

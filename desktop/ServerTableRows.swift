@@ -48,25 +48,52 @@ struct SchedulerNodeTableRow: View {
         }
     }
 
+    private var stateWord: String {
+        isSnapshotFresh ? schedulerNodeStateLabel(node.state) : "观测已过期"
+    }
+
     var body: some View {
         HStack(spacing: tier.columnSpacing) {
-            HStack(spacing: 9) {
-                Circle().fill(statusColor).frame(width: 8, height: 8)
-                Text(address).font(Typography.command).lineLimit(1).textSelection(.enabled)
-                Text(isSnapshotFresh ? node.state : "观测已过期")
-                    .font(Typography.annotation).foregroundStyle(statusColor)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(address)
+                    .font(Typography.rowPrimary)
                     .lineLimit(1)
-                Spacer(minLength: 0)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                HStack(spacing: 5) {
+                    Circle().fill(statusColor).frame(width: 7, height: 7)
+                    Text(stateWord)
+                        .font(Typography.annotation)
+                        .foregroundStyle(statusColor)
+                        .lineLimit(1)
+                }
             }
-            .frame(minWidth: EndpointTableLayout.sshLane, maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
             if tier.showsAssignment {
-                Text(assignment ?? "—").lineLimit(1).foregroundStyle(DesignTokens.mutedInk)
+                Text(assignment ?? "—")
+                    .font(Typography.identity)
+                    .lineLimit(1)
+                    .foregroundStyle(DesignTokens.mutedInk)
                     .frame(width: tier.assignmentWidth, alignment: .leading)
             }
             if tier.showsGPUModel {
-                Text(modelLabel)
-                    .font(Typography.identity).lineLimit(1)
-                    .frame(width: tier.gpuModelWidth, alignment: .leading)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 3) {
+                        ForEach(0..<node.totalGPUs, id: \.self) { index in
+                            CardPip(
+                                state: index < node.allocatedGPUs ? "RUNNING_MANAGED" : "AVAILABLE",
+                                size: 11
+                            )
+                        }
+                    }
+                    .fixedSize()
+                    .accessibilityHidden(true)
+                    Text(modelLabel)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .lineLimit(1)
+                }
+                .frame(width: tier.gpuModelWidth, alignment: .leading)
             }
             Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)/\(node.totalGPUs)" : "—/\(node.totalGPUs)")
                 .font(Typography.rowValue).monospacedDigit()
@@ -79,7 +106,7 @@ struct SchedulerNodeTableRow: View {
         .foregroundStyle(DesignTokens.ink)
         .padding(.horizontal, EndpointTableLayout.cardPadding)
         .frame(height: EndpointTableLayout.rowHeight)
-        .help("\(node.name) · \(node.state) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
+        .help("\(node.name) · \(stateWord) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
         .contentShape(Rectangle())
         .onTapGesture { showDetails = true }
         .accessibilityAction { showDetails = true }

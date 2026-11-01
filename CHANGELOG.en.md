@@ -6,6 +6,12 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
+- **The App is reorganized the macOS way: quieter and easier to read.** The sidebar is a translucent floating panel that lists server groups directly; page titles sit on a neutral ground and white is kept for cards and tables; a free card is an outline and pressure bars stay grey, so colour only appears where something needs a look.
+  - **Overview**: status chips double as filters, above free capacity, the 24-hour utilization of all GPUs, what needs handling, and server tiles by group with per-card state and a one-hour line.
+  - **Servers**: a group shows every server rather than four rows; each row has two lines, per-card squares and a GPU line; totals move to the foot of the table; Slurm node states read in Chinese.
+  - **Tasks**: one card per task, with those running nothing first, showing who holds it, for how long, and how long it has had no process.
+  - **Menu bar**: the icon opens a small overview, and can start a GPU claim.
+- Add `GET /api/v2/utilization-trends`, which returns all GPUs over 24 hours and each server over one hour in one read; a collection outage stays empty rather than reading as zero.
 - Agent sessions of one project now share its tasks: a coordinator, the sessions it starts, and a restarted session can act directly without taking over, and git worktrees count as the same project.
 - `gpu_release` accepts `lease_id` again.
 - Several agents connecting at once no longer restart ServerPilot over and over and time out: connecting no longer kills a running background service.

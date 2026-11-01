@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, TypeVar
 
 from pydantic import ValidationError
-from sqlalchemy import and_, delete, func, or_, select, text
+from sqlalchemy import Integer, and_, cast, delete, func, or_, select, text
 from sqlalchemy.orm import Session
 
 from serverpilot import SCHEMA_VERSION, __version__, retention
@@ -103,6 +103,10 @@ RETRY_MAX_SECONDS = 1800
 LEASE_SCOPED_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy", "idle_lease"}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
+FLEET_TREND_WINDOW_SECONDS = retention.TELEMETRY_SECONDS
+FLEET_TREND_BUCKET_SECONDS = 30 * 60
+SERVER_TREND_WINDOW_SECONDS = 60 * 60
+SERVER_TREND_BUCKET_SECONDS = 3 * 60
 # The collector derives a process start time from `ps etimes`, which has
 # one-second precision and is sampled after the endpoint observation begins.
 # Preserve the already-observed identity across this bounded measurement
@@ -2277,6 +2281,7 @@ class BrokerService:
             "purpose": lease.purpose,
             "constraints": json_load(lease.constraints_json),
             "duration_seconds": lease.duration_seconds,
+            "duration_declared": lease.duration_seconds != UNDECLARED_DURATION_SECONDS,
             "workloads": (
                 []
                 if lease.kind == "keepalive"
@@ -4953,6 +4958,81 @@ class BrokerService:
         )
         values = snapshot["data"]["gpus"]
         return {**snapshot, "data": values}
+
+    def utilization_trends(self, actor: ActorContext) -> dict[str, Any]:
+        """Recent GPU utilization for the whole fleet and per server, in one read.
+
+        The overview and the server table draw a line per server; asking the
+        endpoint history route for each would multiply requests by the fleet on
+        every refresh. A bucket with no sample stays null so a chart can break
+        the line rather than draw an outage as zero.
+        """
+
+        def samples(
+            session: Session, now: datetime, window_seconds: int, bucket_seconds: int
+        ) -> list[tuple[str, int, float, int]]:
+            bucket = cast(func.strftime("%s", TelemetrySnapshot.observed_at), Integer) / bucket_seconds
+            rows = session.execute(
+                select(
+                    GPUDevice.endpoint_id,
+                    bucket,
+                    func.sum(TelemetrySnapshot.gpu_utilization_pct),
+                    func.count(TelemetrySnapshot.gpu_utilization_pct),
+                )
+                .join(GPUDevice, GPUDevice.id == TelemetrySnapshot.gpu_id)
+                .where(
+                    TelemetrySnapshot.observed_at >= now - timedelta(seconds=window_seconds),
+                    TelemetrySnapshot.gpu_utilization_pct.is_not(None),
+                )
+                .group_by(GPUDevice.endpoint_id, bucket)
+            ).all()
+            return [(row[0], int(row[1]), float(row[2]), int(row[3])) for row in rows]
+
+        def series(
+            totals: dict[int, list[float]], now: datetime, window_seconds: int, bucket_seconds: int
+        ) -> dict[str, Any]:
+            last = int(now.timestamp()) // bucket_seconds
+            return {
+                "window_seconds": window_seconds,
+                "points": [
+                    {
+                        "at": _iso(datetime.fromtimestamp(index * bucket_seconds, UTC)),
+                        "gpu_utilization_pct": (
+                            round(totals[index][0] / totals[index][1], 1) if index in totals else None
+                        ),
+                    }
+                    for index in range(last - window_seconds // bucket_seconds + 1, last + 1)
+                ],
+            }
+
+        def operation(session: Session) -> dict[str, Any]:
+            now = utcnow()
+            fleet: dict[int, list[float]] = {}
+            for _, index, total, count in samples(
+                session, now, FLEET_TREND_WINDOW_SECONDS, FLEET_TREND_BUCKET_SECONDS
+            ):
+                entry = fleet.setdefault(index, [0.0, 0])
+                entry[0] += total
+                entry[1] += count
+            servers: dict[str, dict[int, list[float]]] = {}
+            for endpoint_id, index, total, count in samples(
+                session, now, SERVER_TREND_WINDOW_SECONDS, SERVER_TREND_BUCKET_SECONDS
+            ):
+                servers.setdefault(endpoint_id, {})[index] = [total, count]
+            return self.envelope(
+                session,
+                {
+                    "fleet": series(fleet, now, FLEET_TREND_WINDOW_SECONDS, FLEET_TREND_BUCKET_SECONDS),
+                    "servers": {
+                        endpoint_id: series(
+                            totals, now, SERVER_TREND_WINDOW_SECONDS, SERVER_TREND_BUCKET_SECONDS
+                        )
+                        for endpoint_id, totals in servers.items()
+                    },
+                },
+            )
+
+        return self._read(operation)
 
     def endpoint_history(
         self,

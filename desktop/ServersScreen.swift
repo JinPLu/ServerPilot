@@ -5,7 +5,7 @@ import SwiftUI
 import Charts
 #endif
 
-private enum EndpointFilter: String, CaseIterable, Identifiable {
+enum EndpointFilter: String, CaseIterable, Identifiable {
     case all
     case available
     case taskOccupied
@@ -17,7 +17,7 @@ private enum EndpointFilter: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .all: return "全部"
-        case .available: return "有空闲 GPU"
+        case .available: return "有空闲"
         case .taskOccupied: return "使用中"
         case .keepalive: return "占卡中"
         case .connectionFailed: return "连接失败"
@@ -42,14 +42,14 @@ enum EndpointSort: String, CaseIterable, Identifiable {
     var label: String {
         switch self {
         case .attention: return "连接状态"
-        case .id: return "SSH 连接"
-        case .assignment: return "项目 / 任务"
-        case .availableGPU: return "空闲 GPU"
-        case .gpuModel: return "GPU 配置"
-        case .gpuUtilization: return "GPU 利用率"
-        case .gpuMemory: return "显存占用率"
-        case .cpuLoad: return "CPU 负载"
-        case .memory: return "内存占用率"
+        case .id: return "服务器"
+        case .assignment: return "任务"
+        case .availableGPU: return "空闲"
+        case .gpuModel: return "每张卡"
+        case .gpuUtilization: return "GPU"
+        case .gpuMemory: return "显存"
+        case .cpuLoad: return "CPU"
+        case .memory: return "内存"
         }
     }
 
@@ -70,8 +70,10 @@ enum EndpointSortDirection: Equatable {
 
 struct ResourcesDashboard: View {
     @ObservedObject var store: BrokerStore
+    /// nil is every server; "" is the servers outside any group.
+    let groupID: String?
+    @Binding var filter: EndpointFilter
     @State private var searchText = ""
-    @State private var filter: EndpointFilter = .all
     @State private var sort: EndpointSort = .id
     @State private var sortDirection: EndpointSortDirection = .ascending
     @State private var isSelectingForRemoval = false
@@ -84,17 +86,17 @@ struct ResourcesDashboard: View {
 
     private var endpoints: [EndpointRecord] { store.snapshot.operationalEndpoints }
 
-    private var onlineEndpointCount: Int {
-        endpoints.filter { $0.monitorStatus == "ONLINE" }.count
-    }
-
     private var allocatableGPUCount: Int {
         guard store.freshness == .fresh else { return 0 }
-        return endpoints
+        return scopedEndpoints
             .filter { $0.monitorStatus == "ONLINE" }
             .flatMap { store.snapshot.gpus(for: $0) }
             .filter(\.isPubliclyAvailable)
             .count
+    }
+
+    private var scopedGPUCount: Int {
+        scopedEndpoints.flatMap { store.snapshot.gpus(for: $0) }.count
     }
 
     private var attentionEndpoints: [EndpointRecord] {
@@ -105,29 +107,36 @@ struct ResourcesDashboard: View {
         store.snapshot.operationalGPUs.filter { gpuNeedsAttention($0) }.count
     }
 
+    private func matches(_ endpoint: EndpointRecord, _ filter: EndpointFilter) -> Bool {
+        switch filter {
+        case .all:
+            true
+        case .available:
+            store.freshness == .fresh
+                && endpoint.monitorStatus == "ONLINE"
+                && (store.snapshot.gpus(for: endpoint).contains(where: \.isPubliclyAvailable)
+                    || (endpoint.schedulerCapacity?.freeGPUCount ?? 0) > 0)
+        case .taskOccupied:
+            store.snapshot.gpus(for: endpoint).contains {
+                ["RUNNING_MANAGED", "HELD", "LEASED_IDLE", "BUSY_UNMANAGED", "ORPHANED_BUSY", "CONFLICT"]
+                    .contains($0.state)
+            } || endpoint.nodes.contains { $0.allocatedGPUs > 0 }
+        case .keepalive:
+            endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning
+        case .connectionFailed:
+            ["ERROR", "STALE"].contains(endpoint.monitorStatus)
+        }
+    }
+
+    private var scopedEndpoints: [EndpointRecord] {
+        guard let groupID else { return endpoints }
+        return endpoints.filter { (store.snapshot.serverGroup(for: $0)?.id ?? "") == groupID }
+    }
+
     private var filteredEndpoints: [EndpointRecord] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        return endpoints
-            .filter { endpoint in
-                switch filter {
-                case .all:
-                    true
-                case .available:
-                    store.freshness == .fresh
-                        && endpoint.monitorStatus == "ONLINE"
-                        && (store.snapshot.gpus(for: endpoint).contains(where: \.isPubliclyAvailable)
-                            || (endpoint.schedulerCapacity?.freeGPUCount ?? 0) > 0)
-                case .taskOccupied:
-                    store.snapshot.gpus(for: endpoint).contains {
-                        ["RUNNING_MANAGED", "HELD", "LEASED_IDLE", "BUSY_UNMANAGED", "ORPHANED_BUSY", "CONFLICT"]
-                            .contains($0.state)
-                    } || endpoint.nodes.contains { $0.allocatedGPUs > 0 }
-                case .keepalive:
-                    endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning
-                case .connectionFailed:
-                    ["ERROR", "STALE"].contains(endpoint.monitorStatus)
-                }
-            }
+        return scopedEndpoints
+            .filter { matches($0, filter) }
             .filter { endpoint in
                 guard !query.isEmpty else { return true }
                 let endpointLeases = leases(for: endpoint)
@@ -183,241 +192,176 @@ struct ResourcesDashboard: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            resourceSummary
+        VStack(alignment: .leading, spacing: 10) {
+            controlBar
             ForEach(store.snapshot.pendingAllocations) { allocation in
                 HStack {
                     Text("\(allocation.taskReference ?? "任务") · \(allocation.stateLabel)")
                         .font(Typography.annotation).foregroundStyle(DesignTokens.warning)
                     Spacer()
                     if let endpoint = store.snapshot.endpoint(id: allocation.endpointID) {
-                        Button("查看申请") { openEndpoint(endpoint) }.buttonStyle(.plain)
+                        Button("查看申请") { openEndpoint(endpoint) }.buttonStyle(.link)
                     }
-                }.padding(.horizontal, 20).padding(.vertical, 6)
+                }
             }
-            Divider().opacity(DesignTokens.Alpha.strong)
+            if isSelectingForRemoval {
+                removalSelectionBar
+            }
             endpointTable
-                .background(DesignTokens.surface)
         }
+        .padding(.horizontal, 20)
+        .padding(.top, 2)
+        .padding(.bottom, 12)
         .onChange(of: sort) { _, newSort in
             sortDirection = newSort.defaultDirection
         }
     }
 
-    private var resourceSummary: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(spacing: 16) {
-                summaryStatus
-                Divider().frame(height: 24)
-                gpuInventorySummary
-                Spacer(minLength: 12)
-                if store.freshness != .fresh { snapshotTrustSummary }
+    private var controlBar: some View {
+        HStack(spacing: 8) {
+            ForEach(EndpointFilter.allCases) { item in
+                FilterChip(
+                    label: item.label,
+                    count: scopedEndpoints.filter { matches($0, item) }.count,
+                    selected: filter == item
+                ) { filter = item }
             }
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    summaryStatus
-                    Spacer(minLength: 8)
-                    if store.freshness != .fresh { snapshotTrustSummary }
-                }
-                gpuInventorySummary
-            }
-        }
-        .padding(.horizontal, 20)
-        .padding(.vertical, 12)
-        .background(DesignTokens.surface)
-    }
-
-    private var summaryStatus: some View {
-        HStack(spacing: 14) {
-            ResourceInlineStat(value: "\(endpoints.count)", label: "台服务器", color: DesignTokens.ink)
-            ResourceInlineStat(value: "\(store.snapshot.operationalGPUs.count)", label: "张 GPU", color: DesignTokens.ink)
-            ResourceInlineStat(value: "\(allocatableGPUCount)", label: "张空闲", color: DesignTokens.success)
-        }
-    }
-
-    private var gpuInventorySummary: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text("GPU 型号")
-                .font(Typography.metricLabel)
-                .foregroundStyle(DesignTokens.mutedInk)
-            Text(fleetGPUModelSummary)
-                .font(Typography.metricValue)
-                .foregroundStyle(DesignTokens.ink)
-                .lineLimit(1)
-                .truncationMode(.tail)
-                .help(fleetGPUModelSummary)
-        }
-    }
-
-    private var snapshotTrustSummary: some View {
-        Label(snapshotTrustLabel, systemImage: store.freshness == .fresh ? "checkmark.circle.fill" : "hand.raised.fill")
-            .font(Typography.annotation)
-            .foregroundStyle(store.freshness == .fresh ? DesignTokens.mutedInk : DesignTokens.danger)
-            .lineLimit(1)
-            .help(attentionSummary)
-    }
-
-    private var endpointTable: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                TextField("搜索 SSH、GPU、项目、任务或服务器组", text: $searchText)
-                    .textFieldStyle(.roundedBorder)
-                    .font(Typography.identity)
-                    .frame(maxWidth: 320)
-                    .accessibilityLabel("搜索端点")
-                Picker("过滤", selection: $filter) {
-                    ForEach(EndpointFilter.allCases) { item in
+            Spacer(minLength: 8)
+            TextField("搜索服务器、GPU、项目或任务", text: $searchText)
+                .textFieldStyle(.plain)
+                .font(.body)
+                .padding(.horizontal, 12)
+                .frame(minWidth: 120, idealWidth: 230, maxWidth: 230, minHeight: 28, maxHeight: 28)
+                .background(DesignTokens.ink.opacity(DesignTokens.Alpha.edge), in: Capsule())
+                .accessibilityLabel("搜索服务器")
+            Menu {
+                Picker("排序", selection: $sort) {
+                    ForEach(EndpointSort.allCases) { item in
                         Text(item.label).tag(item)
                     }
                 }
-                .pickerStyle(.segmented)
-                // The visible label wrapped to two stacked glyphs at 1440; the
-                // accessible name below carries it instead.
-                .labelsHidden()
-                .frame(maxWidth: 430)
-                .accessibilityLabel("端点过滤")
-
-                Label("资源指标：节点当前值", systemImage: "clock")
-                    .font(Typography.metricLabel)
-                    .foregroundStyle(DesignTokens.mutedInk)
-                    .lineLimit(1)
-                    .help("所有节点使用相同的实时采样与统计口径；点开可查看逐卡值、采样时间和采集错误。")
-
-                Spacer(minLength: 0)
-
-                Menu {
-                    Picker("排序", selection: $sort) {
-                        ForEach(EndpointSort.allCases) { item in
-                            Text(item.label).tag(item)
-                        }
-                    }
-                } label: {
-                    Label("排序", systemImage: "arrow.up.arrow.down")
-                        .font(Typography.identity)
-                }
-                .menuStyle(.borderlessButton)
-                .help("资源排序")
-                .accessibilityLabel("资源排序")
-
-                if store.supportsEndpointDelete {
-                    Button(action: toggleRemovalSelection) {
-                        Label(
-                            isSelectingForRemoval ? "完成" : "批量移除",
-                            systemImage: isSelectingForRemoval ? "checkmark" : "checklist"
-                        )
-                        .font(Typography.identity)
-                    }
-                    .buttonStyle(.borderless)
-                    .help(isSelectingForRemoval ? "退出批量移除" : "勾选多台服务器，一次从 ServerPilot 移除")
-                    .accessibilityIdentifier("endpoint-bulk-remove-mode")
-                }
-
-                Button(action: manageGroups) {
-                    Label("服务器组", systemImage: "rectangle.3.group")
-                        .font(Typography.identity)
+            } label: {
+                Image(systemName: "arrow.up.arrow.down")
+            }
+            .menuStyle(.borderlessButton)
+            .fixedSize()
+            .help("资源排序")
+            .accessibilityLabel("资源排序")
+            if store.supportsEndpointDelete {
+                Button(action: toggleRemovalSelection) {
+                    Image(systemName: isSelectingForRemoval ? "checkmark.circle.fill" : "checklist")
                 }
                 .buttonStyle(.borderless)
-                .help("管理服务器组")
-                .accessibilityLabel("管理服务器组")
-                .accessibilityIdentifier("manage-server-groups")
+                .help(isSelectingForRemoval ? "退出批量移除" : "批量移除：勾选多台服务器，一次从 ServerPilot 移除")
+                .accessibilityLabel(isSelectingForRemoval ? "完成批量移除" : "批量移除")
+                .accessibilityIdentifier("endpoint-bulk-remove-mode")
             }
-            .padding(.horizontal, 20)
-            .padding(.vertical, 11)
-
-            if isSelectingForRemoval {
-                removalSelectionBar
+            Button(action: manageGroups) {
+                Image(systemName: "rectangle.3.group")
             }
+            .buttonStyle(.borderless)
+            .help("管理服务器组")
+            .accessibilityLabel("管理服务器组")
+            .accessibilityIdentifier("manage-server-groups")
+        }
+    }
 
-            GeometryReader { proxy in
-                // Columns fold from the right as the window narrows; the SSH
-                // lane and all four pressure bars survive every tier.
-                let tier = EndpointTableLayout.tier(width: proxy.size.width - EndpointTableLayout.scrollbarWidth * 2)
-                VStack(alignment: .leading, spacing: 0) {
-                    EndpointTableHeader(
-                        tier: tier,
-                        sort: sort,
-                        direction: sortDirection,
-                        selectSort: selectSort
-                    )
-                    .padding(.trailing, EndpointTableLayout.scrollbarWidth * 2)
-                    EndpointTableDivider()
-                    if filteredEndpoints.isEmpty {
-                        VStack(spacing: 8) {
-                            Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
-                                .font(.title2)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                            Text(endpoints.isEmpty ? "暂无端点" : "没有匹配端点")
-                                .font(Typography.sectionTitle)
-                            Text(endpoints.isEmpty ? "添加服务器后会显示资源。" : "调整搜索或过滤条件。")
-                                .font(Typography.secondary)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                        }
-                        .frame(maxWidth: .infinity, maxHeight: .infinity)
-                        .accessibilityElement(children: .combine)
-                    } else {
-                        ScrollView {
-                            LazyVStack(spacing: 0) {
-                                ForEach(Array(tableSections.enumerated()), id: \.element.id) { sectionIndex, section in
-                                    if section.showsHeader {
-                                        if sectionIndex > 0 { EndpointTableDivider() }
-                                        groupSectionHeader(section)
-                                        EndpointTableDivider()
-                                    } else if sectionIndex > 0 {
-                                        EndpointTableDivider()
+    private var endpointTable: some View {
+        GeometryReader { proxy in
+            // Columns fold from the right as the window narrows; the address
+            // lane and all four pressure cells survive every tier.
+            let tier = EndpointTableLayout.tier(width: proxy.size.width - EndpointTableLayout.scrollbarWidth)
+            VStack(alignment: .leading, spacing: 0) {
+                EndpointTableHeader(
+                    tier: tier,
+                    sort: sort,
+                    direction: sortDirection,
+                    selectSort: selectSort
+                )
+                .padding(.trailing, EndpointTableLayout.scrollbarWidth)
+                EndpointTableDivider()
+                if filteredEndpoints.isEmpty {
+                    VStack(spacing: 8) {
+                        Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
+                            .font(.title2)
+                            .foregroundStyle(DesignTokens.mutedInk)
+                        Text(endpoints.isEmpty ? "暂无端点" : "没有匹配端点")
+                            .font(Typography.sectionTitle)
+                        Text(endpoints.isEmpty ? "添加服务器后会显示资源。" : "调整搜索或过滤条件。")
+                            .font(Typography.secondary)
+                            .foregroundStyle(DesignTokens.mutedInk)
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .accessibilityElement(children: .combine)
+                } else {
+                    ScrollView {
+                        // One scroller for the whole fleet: a group is as long
+                        // as it is, and the table fills the window.
+                        LazyVStack(spacing: 0) {
+                            ForEach(tableSections) { section in
+                                if section.showsHeader {
+                                    groupSectionHeader(section)
+                                }
+                                ForEach(sectionRows(section)) { row in
+                                    switch row {
+                                    case .endpoint(let endpoint):
+                                        endpointRow(endpoint, tier: tier)
+                                    case .node(let endpoint, let node):
+                                        nodeRow(endpoint, node: node, tier: tier)
                                     }
-                                    ScrollView(.vertical, showsIndicators: true) {
-                                        LazyVStack(spacing: 0) {
-                                            ForEach(sectionRows(section)) { row in
-                                                switch row {
-                                                case .endpoint(let endpoint):
-                                                    endpointRow(endpoint, tier: tier)
-                                                case .node(let endpoint, let node):
-                                                    nodeRow(endpoint, node: node, tier: tier)
-                                                }
-                                                EndpointTableDivider()
-                                            }
-                                        }
-                                        .frame(width: proxy.size.width - EndpointTableLayout.scrollbarWidth * 2)
-                                        .frame(maxWidth: .infinity, alignment: .leading)
-                                        .background(TableScrollStyle(hideWhenUnused: true))
-                                    }
-                                    .scrollIndicators(.visible)
-                                    .frame(height: min(CGFloat(sectionRowCount(section)), 4) * (EndpointTableLayout.rowHeight + 1))
-                                    .accessibilityIdentifier("group-scroll-\(section.id)")
-                                    .id("\(section.id)-\(sort.rawValue)-\(sortDirection == .ascending)")
+                                    EndpointTableDivider()
                                 }
                             }
-                            .background(TableScrollStyle())
                         }
+                        .id("\(sort.rawValue)-\(sortDirection == .ascending)")
+                        .background(TableScrollStyle(hideWhenUnused: true))
                     }
                 }
-                .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                .background(
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                        .fill(DesignTokens.surface)
-                )
-                // Increase Contrast asks for a drawn boundary; `tileStroke` is
-                // fully transparent otherwise, so the resting card keeps its
-                // outline-free Home look.
-                .overlay(
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                        .strokeBorder(DesignTokens.tileStroke, lineWidth: 1)
-                )
-                .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
+                EndpointTableDivider()
+                tableFooter
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            // Labelling this container turned it into one leaf element and hid
-            // every row inside it.  The page summary strip above is visible
-            // text and already carries the same overview.
-            .accessibilityElement(children: .contain)
-            .padding(.horizontal, 20)
-            .padding(.top, 12)
-            .padding(.bottom, 12)
-            // The page plane, painted here rather than inherited: the white
-            // table only reads as a card against the one visible elevation step.
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(DesignTokens.ambientSmoke)
+            .background(
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+                    .fill(DesignTokens.surface)
+            )
+            // Increase Contrast asks for a drawn boundary; `tileStroke` is
+            // fully transparent otherwise.
+            .overlay(
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+                    .strokeBorder(DesignTokens.tileStroke, lineWidth: 1)
+            )
+            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
         }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        // Labelling this container turned it into one leaf element and hid
+        // every row inside it.
+        .accessibilityElement(children: .contain)
+    }
+
+    /// The totals sit where a Mac app keeps them, at the foot of the window's
+    /// content, rather than taking a band above the table.
+    private var tableFooter: some View {
+        HStack(spacing: 14) {
+            Text("\(scopedEndpoints.count) 台服务器")
+            Text("\(scopedGPUCount) 张 GPU")
+            Text("\(allocatableGPUCount) 张空闲")
+            Text(fleetGPUModelSummary)
+                .lineLimit(1)
+                .truncationMode(.tail)
+                .help(fleetGPUModelSummary)
+            Spacer(minLength: 8)
+            if store.freshness != .fresh {
+                Label(snapshotTrustLabel, systemImage: "hand.raised.fill")
+                    .foregroundStyle(DesignTokens.danger)
+                    .help(attentionSummary)
+            }
+        }
+        .font(Typography.annotation)
+        .monospacedDigit()
+        .foregroundStyle(DesignTokens.mutedInk)
+        .padding(.horizontal, EndpointTableLayout.cardPadding)
+        .frame(height: 30)
     }
 
     private var removalSelectionBar: some View {
@@ -450,8 +394,6 @@ struct ResourcesDashboard: View {
                     : store.endpointLifecycleMutationUnavailableReason)
                 .accessibilityIdentifier("endpoint-bulk-remove-action")
         }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 4)
     }
 
     private func toggleRemovalSelection() {
@@ -478,10 +420,6 @@ struct ResourcesDashboard: View {
                 isSelectingForRemoval = false
             }
         }
-    }
-
-    private func sectionRowCount(_ section: EndpointOverviewSection) -> Int {
-        sectionRows(section).count
     }
 
     private func sectionRows(_ section: EndpointOverviewSection) -> [EndpointOverviewRow] {
@@ -517,6 +455,7 @@ struct ResourcesDashboard: View {
             endpoint: endpoint, gpus: store.snapshot.gpus(for: endpoint),
             leases: leases(for: endpoint), group: store.snapshot.serverGroup(for: endpoint),
             isSnapshotFresh: store.freshness == .fresh, tier: tier,
+            trend: store.utilizationTrends.servers[endpoint.id],
             removalMark: isSelectingForRemoval ? selectedEndpointIDs.contains(endpoint.id) : nil
         ) {
             if isSelectingForRemoval {
@@ -584,13 +523,8 @@ struct ResourcesDashboard: View {
         }
     }
 
-    private var allocatableGPUSummary: String {
-        guard store.freshness == .fresh else { return "未确认" }
-        return "\(allocatableGPUCount)/\(store.snapshot.operationalGPUs.count)"
-    }
-
     private var fleetGPUModelSummary: String {
-        let groups = Dictionary(grouping: store.snapshot.operationalGPUs, by: \.name)
+        let groups = Dictionary(grouping: scopedEndpoints.flatMap { store.snapshot.gpus(for: $0) }, by: \.name)
         guard !groups.isEmpty else { return "未检测到 GPU" }
         let labels = groups.keys.sorted().map { name in
             "\(name) × \(groups[name]?.count ?? 0)"
@@ -626,84 +560,86 @@ struct ResourcesDashboard: View {
 }
 
 
-private struct ResourceInlineStat: View {
-    let value: String
+/// A filter is a pill you can read the answer off: the count is already there.
+private struct FilterChip: View {
     let label: String
-    let color: Color
+    let count: Int
+    let selected: Bool
+    let action: () -> Void
 
     var body: some View {
-        HStack(spacing: 6) {
-            Circle()
-                .fill(color)
-                .frame(width: 7, height: 7)
-            Text(value)
-                .font(Typography.label)
-                .foregroundStyle(DesignTokens.ink)
-            Text(label)
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(DesignTokens.mutedInk)
+        Button(action: action) {
+            HStack(spacing: 5) {
+                Text(label)
+                Text("\(count)").fontWeight(.semibold).monospacedDigit()
+            }
+            .font(Typography.identity.weight(.regular))
+            .foregroundStyle(selected ? DesignTokens.onInteraction : DesignTokens.ink)
+            .padding(.horizontal, 11)
+            .frame(height: 28)
+            .background(
+                selected ? AnyShapeStyle(DesignTokens.ink) : AnyShapeStyle(DesignTokens.ink.opacity(DesignTokens.Alpha.edge)),
+                in: Capsule()
+            )
+            .contentShape(Capsule())
         }
-        .accessibilityElement(children: .ignore)
+        .buttonStyle(.plain)
+        .focusable()
+        .fixedSize()
         .accessibilityLabel(label)
-        .accessibilityValue(value)
+        .accessibilityValue("\(count) 台\(selected ? "，已选中" : "")")
     }
 }
 
 /// Column geometry for the server table, in three folding tiers.
 ///
-/// The eight-column table needs about 1080 pt of content width and only about
-/// 1010 pt exists at the 1280-wide acceptance viewport.  That is what sent this
-/// page to a card grid — but a grid bought the width by giving up the one thing
-/// the page is for, comparing four pressures down a column.  So the width is
-/// solved here instead: the SSH lane keeps a hard floor at every viewport, and
-/// the two columns whose facts are also in the row tooltip and the detail sheet
-/// fold away beneath it.  No tier drops a pressure bar.
+/// A grid would buy width by giving up the one thing this page is for, comparing
+/// four pressures down a column, so width is solved here instead: the address
+/// lane keeps a hard floor at every viewport, and the two columns whose facts are
+/// also in the row tooltip and the detail sheet fold away beneath it.  No tier
+/// drops a pressure cell.
 
 enum EndpointTableLayout {
     static let scrollbarWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-    /// 46 characters at 11 pt SF Mono, the longest SSH command a fixture
-    /// carries.  Below this the command truncates, which is the failure the
-    /// card grid was built to escape.
-    static let sshLane: CGFloat = 304
+    /// host:port at 13 pt.  The status word now has its own line beneath, so
+    /// this no longer has to fit a whole SSH command.
+    static let addressLane: CGFloat = 200
     static let cardPadding: CGFloat = 16
-    static let rowHeight: CGFloat = 44
-    static let headerHeight: CGFloat = 34
-    /// Percentage lane inside a pressure cell; the bar takes what is left.
-    static let percentageWidth: CGFloat = 40
+    /// Two lines: what it is, then what it is doing.
+    static let rowHeight: CGFloat = 50
+    static let headerHeight: CGFloat = 32
 
     enum Tier {
         /// Every column.
         case wide
-        /// Without GPU 配置.
+        /// Without 每张卡.
         case medium
-        /// Without GPU 配置 and 项目 / 任务.
+        /// Without 每张卡 and 任务.
         case compact
 
         var showsGPUModel: Bool { self == .wide }
         var showsAssignment: Bool { self != .compact }
 
         var columnSpacing: CGFloat { self == .wide ? 12 : 10 }
-        var assignmentWidth: CGFloat { self == .wide ? 160 : 140 }
-        /// Wide enough for a full vendor-qualified name and its count —
-        /// "NVIDIA A100-SXM4-80GB × 8" — because a model truncated to
-        /// "NVIDIA A100-SXM4-80G…" cannot be told from its siblings.
-        var gpuModelWidth: CGFloat { 180 }
-        var availabilityWidth: CGFloat { self == .wide ? 60 : 56 }
+        var assignmentWidth: CGFloat { self == .wide ? 160 : 150 }
+        /// Eight squares at 12 pt, and a vendor-qualified model name beneath.
+        var gpuModelWidth: CGFloat { 170 }
+        var availabilityWidth: CGFloat { 48 }
 
-        /// A percentage and its bar.  The bar never disappears: a number that
+        /// A percentage above its bar.  The bar never disappears: a number that
         /// cannot be compared down a column is the defect this table exists to
         /// fix, and four metrics drawn two ways read as two classes of fact.
         var pressureWidth: CGFloat {
             switch self {
-            case .wide: 80
-            case .medium: 76
-            case .compact: 68
+            case .wide: 72
+            case .medium: 68
+            case .compact: 64
             }
         }
 
-        /// Content width this tier needs before the SSH lane would be squeezed.
+        /// Content width this tier needs before the address lane would be squeezed.
         var minimumWidth: CGFloat {
-            var total = EndpointTableLayout.sshLane + availabilityWidth + pressureWidth * 4
+            var total = EndpointTableLayout.addressLane + availabilityWidth + pressureWidth * 4
             var columns = 5
             if showsAssignment {
                 total += assignmentWidth
@@ -798,10 +734,11 @@ private struct EndpointGroupSectionHeader: View {
                 .font(Typography.label)
                 .foregroundStyle(DesignTokens.ink)
                 .lineLimit(1)
-            Spacer(minLength: 8)
             Text(summary)
-                .font(Typography.rowValue)
+                .font(Typography.annotation)
+                .monospacedDigit()
                 .foregroundStyle(DesignTokens.mutedInk)
+            Spacer(minLength: 8)
             ForEach(connections) { endpoint in
                 Menu(endpoint.connection.label) {
                     if let message = endpoint.connection.message { Text(message) }
@@ -825,8 +762,8 @@ private struct EndpointGroupSectionHeader: View {
             }
         }
         .padding(.horizontal, EndpointTableLayout.cardPadding)
-        .frame(height: 32)
-        .background(DesignTokens.ink.opacity(DesignTokens.Alpha.hairline))
+        .padding(.top, 12)
+        .padding(.bottom, 5)
         .accessibilityAddTraits(.isHeader)
         .modifier(EndpointGroupSectionHeaderAccessibility(
             title: title,
@@ -866,7 +803,7 @@ private struct EndpointTableHeader: View {
     var body: some View {
         HStack(spacing: tier.columnSpacing) {
             header(.id, trailing: false)
-                .frame(minWidth: EndpointTableLayout.sshLane, maxWidth: .infinity, alignment: .leading)
+                .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
             if tier.showsAssignment {
                 header(.assignment, trailing: false)
                     .frame(width: tier.assignmentWidth, alignment: .leading)
@@ -877,14 +814,14 @@ private struct EndpointTableHeader: View {
             }
             header(.availableGPU, trailing: true)
                 .frame(width: tier.availabilityWidth, alignment: .trailing)
-            header(.gpuUtilization, trailing: true)
-                .frame(width: tier.pressureWidth, alignment: .trailing)
-            header(.gpuMemory, trailing: true)
-                .frame(width: tier.pressureWidth, alignment: .trailing)
-            header(.cpuLoad, trailing: true)
-                .frame(width: tier.pressureWidth, alignment: .trailing)
-            header(.memory, trailing: true)
-                .frame(width: tier.pressureWidth, alignment: .trailing)
+            header(.gpuUtilization, trailing: false)
+                .frame(width: tier.pressureWidth, alignment: .leading)
+            header(.gpuMemory, trailing: false)
+                .frame(width: tier.pressureWidth, alignment: .leading)
+            header(.cpuLoad, trailing: false)
+                .frame(width: tier.pressureWidth, alignment: .leading)
+            header(.memory, trailing: false)
+                .frame(width: tier.pressureWidth, alignment: .leading)
         }
         .padding(.horizontal, EndpointTableLayout.cardPadding)
         .frame(height: EndpointTableLayout.headerHeight)
@@ -922,23 +859,30 @@ private struct EndpointTableHeader: View {
     }
 }
 
-/// One pressure column: the percentage, then its bar, on one baseline.
+/// One pressure column: the percentage above its bar.  Where a recent line
+/// exists it stands in for the bar, since it says the same thing and more.
 
 struct TablePressureCell: View {
     let label: String
     let fraction: Double?
     let width: CGFloat
+    var trend: UtilizationSeries? = nil
 
     var body: some View {
-        HStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: 3) {
             Text(percentageLabel(fraction))
-                .font(Typography.rowValue)
-                .foregroundStyle(fraction == nil ? DesignTokens.mutedInk : DesignTokens.ink)
+                .font(Typography.identity)
+                .monospacedDigit()
+                .foregroundStyle(pressureTextColor(fraction))
                 .lineLimit(1)
-                .frame(width: EndpointTableLayout.percentageWidth, alignment: .trailing)
-            PressureMeter(fraction: fraction, color: pressureColor(fraction), height: 4)
+            if let trend, trend.hasData {
+                Sparkline(points: trend.points, color: pressureColor(fraction))
+                    .frame(height: 14)
+            } else {
+                PressureMeter(fraction: fraction, color: pressureColor(fraction), height: 4)
+            }
         }
-        .frame(width: width, alignment: .trailing)
+        .frame(width: width, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(percentageLabel(fraction))
@@ -955,6 +899,7 @@ private struct EndpointTableRow: View {
     let group: ServerGroupRecord?
     let isSnapshotFresh: Bool
     let tier: EndpointTableLayout.Tier
+    let trend: UtilizationSeries?
     /// nil outside bulk removal; otherwise whether this row is checked.
     let removalMark: Bool?
     let select: () -> Void
@@ -986,7 +931,7 @@ private struct EndpointTableRow: View {
                         .foregroundStyle(checked ? DesignTokens.danger : DesignTokens.mutedInk)
                 }
                 serverCell
-                    .frame(minWidth: EndpointTableLayout.sshLane, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
                 if tier.showsAssignment {
                     assignmentCell.frame(width: tier.assignmentWidth, alignment: .leading)
                 }
@@ -994,7 +939,7 @@ private struct EndpointTableRow: View {
                     gpuModelCell.frame(width: tier.gpuModelWidth, alignment: .leading)
                 }
                 availabilityCell.frame(width: tier.availabilityWidth, alignment: .trailing)
-                TablePressureCell(label: "GPU 利用率", fraction: gpuPressure, width: tier.pressureWidth)
+                TablePressureCell(label: "GPU 利用率", fraction: gpuPressure, width: tier.pressureWidth, trend: trend)
                 TablePressureCell(label: "显存占用率", fraction: gpuMemoryPressure, width: tier.pressureWidth)
                 TablePressureCell(label: "CPU 负载", fraction: cpuLoadPressure, width: tier.pressureWidth)
                 TablePressureCell(label: "内存占用率", fraction: memoryPressure, width: tier.pressureWidth)
@@ -1008,7 +953,7 @@ private struct EndpointTableRow: View {
         .focusable()
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
-        // Everything a 44 pt row cannot print — the workspace path, per-card
+        // Everything a two-line row cannot print — the workspace path, per-card
         // VRAM, the full lease list — is one hover away, and all of it is in
         // the detail sheet a click away.
         .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
@@ -1023,52 +968,70 @@ private struct EndpointTableRow: View {
         .accessibilityValue(accessibilityValue)
     }
 
-    /// The row's identity: a status pip, host:port, and the one
-    /// word that answers "can I ask this machine for a GPU".
+    /// The row's identity: host:port, then the one word that answers "can I ask
+    /// this machine for a GPU".
     private var serverCell: some View {
-        HStack(spacing: 9) {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(endpoint.connectionAddress)
-                .font(Typography.command)
-                .foregroundStyle(DesignTokens.ink)
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .textSelection(.enabled)
-            Text(statusWord)
-                .font(Typography.annotation)
-                .foregroundStyle(statusColor)
-                .lineLimit(1)
-                .fixedSize()
-            if endpoint.workspacePath == nil {
-                Image(systemName: "exclamationmark.triangle.fill")
-                    .font(Typography.annotation)
-                    .foregroundStyle(DesignTokens.warning)
-                    .help("工作区未设置")
+        VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 6) {
+                Text(endpoint.connectionAddress)
+                    .font(Typography.rowPrimary)
+                    .foregroundStyle(DesignTokens.ink)
+                    .lineLimit(1)
+                    .truncationMode(.middle)
+                    .textSelection(.enabled)
+                if endpoint.workspacePath == nil {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.warning)
+                        .help("工作区未设置")
+                }
             }
-            Spacer(minLength: 0)
+            HStack(spacing: 5) {
+                Circle()
+                    .fill(status.color)
+                    .frame(width: 7, height: 7)
+                Text(status.word)
+                    .font(Typography.annotation)
+                    .foregroundStyle(status.color)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
         }
     }
 
     private var assignmentCell: some View {
-        Text(assignmentLine)
-            .font(Typography.identity)
-            .foregroundStyle(assignmentIsUnassigned ? DesignTokens.mutedInk : DesignTokens.ink)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .help(assignmentHelp)
+        VStack(alignment: .leading, spacing: 2) {
+            Text(assignmentPrimary)
+                .font(Typography.identity)
+                .foregroundStyle(assignmentIsUnassigned ? DesignTokens.mutedInk : DesignTokens.ink)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let assignmentSecondary {
+                Text(assignmentSecondary)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(assignmentHelp)
     }
 
     private var gpuModelCell: some View {
-        Text(gpuModelLine)
-            .font(Typography.identity)
-            .foregroundStyle(gpus.isEmpty && endpoint.schedulerCapacity == nil ? DesignTokens.mutedInk : DesignTokens.ink)
-            .lineLimit(1)
-            .truncationMode(.tail)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .help(gpuModelDetail)
+        VStack(alignment: .leading, spacing: 4) {
+            if !gpus.isEmpty {
+                CardSquares(gpus: gpus.sorted { $0.index < $1.index }, size: 11)
+                    .fixedSize()
+            }
+            Text(gpuModelLine)
+                .font(Typography.annotation)
+                .foregroundStyle(DesignTokens.mutedInk)
+                .lineLimit(1)
+                .truncationMode(.tail)
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .help(gpuModelDetail)
     }
 
     /// The count that decides whether this machine is worth clicking.  A
@@ -1080,7 +1043,7 @@ private struct EndpointTableRow: View {
             Spacer(minLength: 0)
             if let claimable = claimableLabel {
                 Text(claimable)
-                    .font(Typography.cardValue)
+                    .font(Font.title3.weight(.semibold).monospacedDigit())
                     .foregroundStyle(availabilityTint)
                 Text("/\(gpus.count)")
                     .font(Typography.annotation)
@@ -1126,6 +1089,18 @@ private struct EndpointTableRow: View {
         assignmentTitle == "—" ? "—" : "\(assignmentTitle) · \(assignmentDetail)"
     }
 
+    /// The task first: it is what a person looks for, and it is usually the
+    /// only part of a long lease name that tells two rows apart.
+    private var assignmentPrimary: String {
+        primaryLease == nil ? assignmentTitle : assignmentDetail
+    }
+
+    private var assignmentSecondary: String? {
+        if let primaryLease { return "\(primaryLease.holderLabel) · \(primaryLease.projectID)" }
+        if assignmentTitle == "—" { return nil }
+        return assignmentDetail
+    }
+
     /// A GPU host names its hardware.  A scheduler endpoint names the pool
     /// model, not a local inventory count.  A CPU node names how much machine
     /// it is, because "无 GPU" would only repeat the status word beside the command.
@@ -1135,61 +1110,12 @@ private struct EndpointTableRow: View {
         return hostScale
     }
 
-    /// First match wins.  A free card outranks a busy sibling: the contract's
-    /// fault-isolation rule says one conflicted GPU must never hide the rest.
-    /// Scheduler-backed endpoints have no local GPU inventory; they are not
-    /// CPU nodes.
-    ///
-    /// Unreachable is not one thing: a stale local snapshot is this machine's
-    /// loopback hop, not the remote server, and monitorLabel already carries
-    /// the distinct words for a first connection, a late reading and a failed
-    /// probe — collapsing them into "无响应" would relabel a wait as a failure.
-    private var statusWord: String {
-        if !isSnapshotFresh { return "本机未更新" }
-        if endpoint.monitorStatus != "ONLINE" { return endpoint.monitorLabel }
-        if isOnDemandEndpoint {
-            if let limit = onDemandApplyLimit {
-                return "按需申请 · 一次最多 \(limit) 卡"
-            }
-            return "按需申请"
-        }
-        if gpus.isEmpty { return "CPU 节点" }
-        if availableGPUCount > 0 { return "空闲" }
-        // The state that needs a person most, in the one vocabulary agents read too.
-        for state in ["CONFLICT", "ORPHANED_BUSY", "BUSY_UNMANAGED", "HELD", "LEASED_IDLE", "RUNNING_MANAGED"] {
-            if gpus.contains(where: { $0.state == state }) { return CardVocabulary.label(forState: state) }
-        }
-        return CardVocabulary.label(forState: gpus.first?.state ?? "UNKNOWN_STALE")
-    }
-
-    private var statusColor: Color {
-        if !isSnapshotFresh { return DesignTokens.danger }
-        if endpoint.monitorStatus != "ONLINE" { return endpointMonitorStatusColor(endpoint.monitorStatus) }
-        if isOnDemandEndpoint {
-            return onDemandHasCapacity ? DesignTokens.success : DesignTokens.mutedInk
-        }
-        if gpus.isEmpty { return DesignTokens.mutedInk }
-        if availableGPUCount > 0 { return DesignTokens.success }
-        if gpus.contains(where: { $0.state == "HELD" || $0.state == "LEASED_IDLE" || $0.state == "KEEPALIVE" }) { return DesignTokens.hold }
-        return DesignTokens.warning
+    private var status: ServerStatus {
+        ServerStatus(endpoint: endpoint, gpus: gpus, group: group, isSnapshotFresh: isSnapshotFresh)
     }
 
     private var isOnDemandEndpoint: Bool {
         endpoint.schedulerCapacity != nil || group?.allocation == .delegated
-    }
-
-    /// One-apply cap, never the pool's remaining total.
-    private var onDemandApplyLimit: Int? {
-        group?.largestAllocatableBlock
-            ?? group?.limits?.maxGPUsPerLease
-            ?? endpoint.schedulerCapacity?.maxGPUsPerLease
-            ?? endpoint.schedulerCapacity?.largestFreeBlock
-    }
-
-    private var onDemandHasCapacity: Bool {
-        if let free = endpoint.schedulerCapacity?.freeGPUCount { return free > 0 }
-        if let block = group?.largestAllocatableBlock { return block > 0 }
-        return false
     }
 
     private var primaryLease: LeaseRecord? {
@@ -1357,7 +1283,7 @@ private struct EndpointTableRow: View {
     }
 
     private var accessibilityValue: String {
-        "\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为节点当前值：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
+        "\(status.word)，\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为节点当前值：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
     }
 }
 

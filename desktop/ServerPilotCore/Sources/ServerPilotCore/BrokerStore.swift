@@ -161,6 +161,7 @@ public final class BrokerStore: ObservableObject {
     @Published public var feedback: Feedback?
     @Published public private(set) var alerts: [AlertRecord] = []
     @Published public private(set) var openAlertCount = 0
+    @Published public private(set) var utilizationTrends = UtilizationTrends.empty
     /// How often to ask whether anything changed: quickly while someone is
     /// looking, slowly from the menu bar.
     @Published public var windowVisible = true
@@ -178,6 +179,7 @@ public final class BrokerStore: ObservableObject {
     private var pendingRefresh = false
     private var pulseTask: Task<Void, Never>?
     private var lastPulse: PulseRecord?
+    private var lastTrendsFetch: Date?
     private var consecutiveRefreshFailures = 0
     /// True while `errorMessage` describes a refresh, the one kind of error a
     /// later successful refresh may clear.
@@ -193,6 +195,8 @@ public final class BrokerStore: ObservableObject {
     private static let failuresBeforeStale = 2
     private static let pulseIntervalVisibleSeconds: TimeInterval = 3
     private static let pulseIntervalHiddenSeconds: TimeInterval = 15
+    /// The lines move a bucket at a time, every few minutes at the finest.
+    private static let trendsIntervalSeconds: TimeInterval = 60
     private static let endpointTelemetryHistoryCacheMaximumAge: TimeInterval = 30
     private static let endpointTelemetryHistoryCacheLimit = 12
 
@@ -324,11 +328,16 @@ public final class BrokerStore: ObservableObject {
     public func useFixture(
         snapshot: BrokerSnapshot,
         serviceInfo: ServiceInfo = .fixture,
-        endpointTelemetryHistoryClient: BrokerEndpointTelemetryHistoryClient? = nil
+        endpointTelemetryHistoryClient: BrokerEndpointTelemetryHistoryClient? = nil,
+        utilizationTrends: UtilizationTrends = .empty,
+        alerts: [AlertRecord] = []
     ) {
         invalidateRefreshWork()
         invalidateEndpointTelemetryHistoryWork()
         self.endpointTelemetryHistoryClient = endpointTelemetryHistoryClient
+        self.utilizationTrends = utilizationTrends
+        self.alerts = alerts
+        self.openAlertCount = alerts.filter(\.isOpen).count
         self.snapshot = snapshot
         self.lastGoodSnapshot = snapshot
         // A fixture can contain offline endpoints, but the fixture itself was
@@ -1431,6 +1440,7 @@ public final class BrokerStore: ObservableObject {
     public func checkPulse() async {
         guard let payload = await requestJSON(path: "api/v2/pulse"),
               let pulse = PulseRecord(payload) else { return }
+        await reloadUtilizationTrendsIfDue()
         let previous = lastPulse
         lastPulse = pulse
         if openAlertCount != pulse.openAlerts {
@@ -1441,6 +1451,19 @@ public final class BrokerStore: ObservableObject {
             requestRefresh()
         }
         await reloadAlerts()
+    }
+
+    private func reloadUtilizationTrendsIfDue() async {
+        guard windowVisible else { return }
+        let now = dateProvider()
+        if let last = lastTrendsFetch, now.timeIntervalSince(last) < Self.trendsIntervalSeconds { return }
+        lastTrendsFetch = now
+        guard let envelope = await requestJSON(path: "api/v2/utilization-trends"),
+              let payload = envelope["data"] as? [String: Any],
+              let trends = UtilizationTrends(payload: payload) else { return }
+        if utilizationTrends != trends {
+            utilizationTrends = trends
+        }
     }
 
     public func reloadAlerts() async {

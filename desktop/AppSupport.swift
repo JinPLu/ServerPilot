@@ -69,9 +69,14 @@ struct CardSectionLabel: View {
 }
 
 enum Typography {
-    /// 26 · The one dominant number on a screen.  Never more than one.
+    /// 42 · The capacity figure the overview exists to answer.  One per screen,
+    /// and only there: everywhere else a number sits in its row.
+    static let display = Font.system(size: 42, weight: .bold, design: .rounded).monospacedDigit()
+    /// 26 · The page title, set directly on the page plane.
+    static let screenTitle = Font.largeTitle.weight(.bold)
+    /// 26 · The second-largest number a screen may show.
     static let hero = Font.system(.largeTitle, design: .rounded).weight(.semibold).monospacedDigit()
-    /// 17 · Page and sheet titles.
+    /// 17 · Sheet titles, and the figures on a task card.
     static let pageTitle = Font.title2.weight(.semibold)
     /// 15 · The primary value on a card or ring.
     static let cardValue = Font.system(.title3, design: .rounded).weight(.semibold).monospacedDigit()
@@ -83,6 +88,8 @@ enum Typography {
     static let prose = Font.body
     /// 13 · Percentages, counts, ratios inside a row.
     static let rowValue = Font.body.weight(.medium).monospacedDigit()
+    /// 13 · The first line of a two-line row: an address, a task.
+    static let rowPrimary = Font.body.weight(.medium).monospacedDigit()
     /// 12 · Project, task, model.
     static let identity = Font.callout.weight(.medium)
     /// 12 · SSH commands and GPU identifiers stay monospaced.
@@ -198,6 +205,28 @@ enum DesignTokens {
     /// Held or keepalive-owned: real state, but not a warning.  Neutral so a
     /// user-chosen accent can never drop it below the graphical floor.
     static let hold = Color(red: 91.0 / 255.0, green: 97.0 / 255.0, blue: 107.0 / 255.0)
+    /// A held card that is running nothing, as a filled square.  Lighter than
+    /// `hold`, which is legal on text, so it reads apart from a running card.
+    static let heldCard = statusColor(
+        normal: (142.0, 142.0, 147.0),
+        increased: (99.0, 99.0, 102.0)
+    )
+    /// A free card is an outline: the fleet at rest stays quiet, and colour is
+    /// left for what is using a card or needs a person.
+    static let freeCardStroke = statusColor(
+        normal: (168.0, 172.0, 180.0),
+        increased: (110.0, 114.0, 122.0)
+    )
+    /// A card nobody can currently speak for.
+    static let staleCard = statusColor(
+        normal: (229.0, 229.0, 234.0),
+        increased: (199.0, 199.0, 204.0)
+    )
+    /// A pressure bar below the attention threshold, and a resting trend line.
+    static let quietBar = statusColor(
+        normal: (142.0, 142.0, 147.0),
+        increased: (99.0, 99.0, 102.0)
+    )
     /// Unused portion of every pressure bar.  Under Increase Contrast the
     /// track darkens too, so the bar's full extent stays readable.
     static let track = statusColor(
@@ -233,10 +262,12 @@ enum DesignTokens {
         _ = appearance
         return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.20 : 0.08)
     })
-    /// Page plane.  1.184:1 below `surface` — one step, deliberately visible.
+    /// Page plane.  A neutral grey with no blue in it, 1.12:1 below `surface`,
+    /// the step Apple's grouped backgrounds use.  Increase Contrast darkens it
+    /// and draws `tileStroke` around every tile.
     static let ambientSmoke = statusColor(
-        normal: (233.0, 236.0, 241.0),
-        increased: (221.0, 225.0, 233.0)
+        normal: (242.0, 242.0, 245.0),
+        increased: (229.0, 229.0, 234.0)
     )
     /// Tile edge.  Home tiles carry no outline normally — the elevation step
     /// does that work — but Increase Contrast asks for a drawn boundary.
@@ -258,7 +289,7 @@ enum DesignTokens {
         /// Inner panels nested inside a tile, and sheet sections.
         static let panel: CGFloat = 10
         /// The tile itself, and any page-level card that is one.
-        static let tile: CGFloat = 20
+        static let tile: CGFloat = 16
     }
 
     /// Five alphas.  Same reasoning as `Radius`: twenty-two values cannot be
@@ -353,8 +384,8 @@ struct PrimaryActionButtonStyle: ButtonStyle {
         configuration.label
             .font(.callout.weight(.semibold))
             .foregroundStyle(DesignTokens.onInteraction.opacity(isEnabled ? 1 : 0.58))
-            .padding(.horizontal, 15)
-            .frame(height: 34)
+            .padding(.horizontal, 14)
+            .frame(height: 30)
             .background(
                 DesignTokens.interaction.opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.26),
                 in: Capsule()
@@ -370,13 +401,12 @@ struct SecondaryActionButtonStyle: ButtonStyle {
         configuration.label
             .font(.callout.weight(.semibold))
             .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
-            .padding(.horizontal, 14)
-            .frame(height: 34)
+            .padding(.horizontal, 12)
+            .frame(height: 30)
             .background(
-                DesignTokens.surface.opacity(isEnabled ? (configuration.isPressed ? 0.74 : 1) : 0.46),
+                DesignTokens.ink.opacity(configuration.isPressed ? DesignTokens.Alpha.fill : DesignTokens.Alpha.edge),
                 in: Capsule()
             )
-            .overlay(Capsule().stroke(DesignTokens.surfaceStroke.opacity(isEnabled ? 1 : 0.50), lineWidth: 1))
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
 }
@@ -387,12 +417,11 @@ struct IconActionButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
-            .frame(width: 34, height: 34)
+            .frame(width: 30, height: 30)
             .background(
-                DesignTokens.surface.opacity(isEnabled ? (configuration.isPressed ? 0.74 : 1) : 0.46),
+                DesignTokens.ink.opacity(configuration.isPressed ? DesignTokens.Alpha.fill : DesignTokens.Alpha.edge),
                 in: Circle()
             )
-            .overlay(Circle().stroke(DesignTokens.surfaceStroke.opacity(isEnabled ? 1 : 0.50), lineWidth: 1))
             .scaleEffect(configuration.isPressed ? 0.95 : 1)
     }
 }

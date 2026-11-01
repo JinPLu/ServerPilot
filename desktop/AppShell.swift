@@ -21,6 +21,9 @@ struct NativeBrokerRoot: View {
     @State private var selectedEndpointDetailID: String?
     @State private var editingEndpointID: String?
     @State private var selectedDashboardSection: DashboardSection
+    /// nil is every server; "" is the servers outside any group.
+    @State private var selectedGroupID: String?
+    @State private var resourceFilter: EndpointFilter = .all
 
     init(store: BrokerStore) {
         self.store = store
@@ -81,8 +84,8 @@ struct NativeBrokerRoot: View {
 
     private var rootBody: some View {
         GeometryReader { proxy in
-            let compactNavigation = proxy.size.width < 1180
-            let sidebarWidth: CGFloat = compactNavigation ? 72 : 224
+            let compactNavigation = proxy.size.width < 1100
+            let sidebarWidth: CGFloat = compactNavigation ? 60 : 216
 
             ZStack {
                 AmbientBackground()
@@ -91,12 +94,21 @@ struct NativeBrokerRoot: View {
                     AppSidebar(
                         store: store,
                         selectedSection: selectedDashboardSection,
+                        selectedGroupID: selectedGroupID,
                         compact: compactNavigation,
-                        navigate: { selectedDashboardSection = $0 }
+                        navigate: { section in
+                            selectedGroupID = nil
+                            resourceFilter = .all
+                            selectedDashboardSection = section
+                        },
+                        openGroup: { groupID in
+                            selectedGroupID = groupID
+                            resourceFilter = .all
+                            selectedDashboardSection = .resources
+                        }
                     )
                     .frame(width: sidebarWidth)
-
-                    Divider().opacity(DesignTokens.Alpha.muted)
+                    .padding([.leading, .vertical], 8)
 
                     VStack(spacing: 0) {
                         AppToolbar(
@@ -126,13 +138,15 @@ struct NativeBrokerRoot: View {
                                 selectedEndpointDetailID = endpoint.id
                             },
                             selectedSection: $selectedDashboardSection,
+                            selectedGroupID: selectedGroupID,
+                            resourceFilter: $resourceFilter,
                             selectGPU: { gpu in
                                 selectedGPUID = gpu.id
                             }
                         )
                     }
                     .frame(
-                        width: max(0, proxy.size.width - sidebarWidth - 1),
+                        width: max(0, proxy.size.width - sidebarWidth - 8),
                         height: proxy.size.height
                     )
                     .clipped()
@@ -186,6 +200,10 @@ struct NativeBrokerRoot: View {
         .onAppear {
             openFixtureDetailIfRequested(endpointIDs: store.snapshot.endpoints.map(\.id))
         }
+        .onReceive(NotificationCenter.default.publisher(for: .serverPilotRequestClaim)) { _ in
+            claimInitialEndpointID = ""
+            showClaim = true
+        }
         .onChange(of: store.snapshot.endpoints.map(\.id)) { _, endpointIDs in
             openFixtureDetailIfRequested(endpointIDs: endpointIDs)
             if let selectedEndpointDetailID, !endpointIDs.contains(selectedEndpointDetailID) {
@@ -207,74 +225,77 @@ struct NativeBrokerRoot: View {
 private struct AppSidebar: View {
     @ObservedObject var store: BrokerStore
     let selectedSection: DashboardSection
+    let selectedGroupID: String?
     let compact: Bool
     let navigate: (DashboardSection) -> Void
+    let openGroup: (String) -> Void
+
+    private var fleets: [ServerFleet] { serverFleets(in: store.snapshot) }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            HStack(spacing: 10) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
-                        .fill(DesignTokens.interaction)
-                    Image(systemName: "server.rack")
-                        .font(.title3.weight(.semibold))
-                        .foregroundStyle(DesignTokens.onInteraction)
-                }
-                .frame(width: 36, height: 36)
-                if !compact {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("ServerPilot")
-                            .font(.title3.weight(.bold))
-                            .foregroundStyle(DesignTokens.ink)
+        VStack(alignment: .leading, spacing: 2) {
+            // The window's own controls sit here.
+            Color.clear.frame(height: 40)
+
+            SidebarSelection(title: "总览", systemImage: "square.grid.2x2", selected: selectedSection == .overview, compact: compact) {
+                navigate(.overview)
+            }
+            SidebarSelection(title: "服务器", systemImage: "server.rack", selected: selectedSection == .resources && selectedGroupID == nil, compact: compact) {
+                navigate(.resources)
+            }
+            SidebarSelection(title: "任务", systemImage: "list.bullet.rectangle", badge: store.snapshot.leases.isEmpty ? nil : "\(store.snapshot.leases.count)", selected: selectedSection == .leases, compact: compact) {
+                navigate(.leases)
+            }
+            SidebarSelection(title: "提醒", systemImage: "bell", badge: store.openAlertCount > 0 ? "\(store.openAlertCount)" : nil, selected: selectedSection == .alerts, compact: compact) {
+                navigate(.alerts)
+            }
+
+            // Server groups are the rooms of this house: go straight to one.
+            if !compact, !fleets.isEmpty {
+                Text("服务器组")
+                    .font(Typography.annotation.weight(.semibold))
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .padding(.horizontal, 20)
+                    .padding(.top, 18)
+                    .padding(.bottom, 4)
+                    .accessibilityAddTraits(.isHeader)
+                ForEach(fleets) { fleet in
+                    SidebarSelection(title: fleet.name, systemImage: nil, badge: "\(fleet.freeCardCount(in: store.snapshot))", selected: selectedSection == .resources && selectedGroupID == fleet.id, compact: false) {
+                        openGroup(fleet.id)
                     }
                 }
             }
-            .frame(maxWidth: .infinity, alignment: compact ? .center : .leading)
-            .padding(.horizontal, compact ? 10 : 18)
-            .padding(.top, 30)
-            .padding(.bottom, 25)
 
-            SidebarSelection(title: "总览", systemImage: "square.grid.2x2.fill", color: DesignTokens.interaction, selected: selectedSection == .overview, compact: compact) {
-                navigate(.overview)
-            }
-            SidebarSelection(title: "服务器", systemImage: "server.rack", color: DesignTokens.interaction, selected: selectedSection == .resources, compact: compact) {
-                navigate(.resources)
-            }
-            SidebarSelection(title: "任务", systemImage: "chart.bar.xaxis", color: DesignTokens.interaction, selected: selectedSection == .leases, compact: compact) {
-                navigate(.leases)
-            }
-            SidebarSelection(title: store.openAlertCount > 0 ? "提醒 \(store.openAlertCount)" : "提醒", systemImage: "bell.fill", color: DesignTokens.interaction, selected: selectedSection == .alerts, compact: compact) {
-                navigate(.alerts)
-            }
-            SidebarSelection(title: "设置", systemImage: "gearshape.fill", color: DesignTokens.interaction, selected: selectedSection == .settings, compact: compact) {
-                navigate(.settings)
-            }
+            Spacer(minLength: 16)
 
-            Spacer(minLength: 22)
-
-            if !store.isConnected, let error = store.errorMessage {
-                VStack(alignment: compact ? .center : .leading, spacing: 6) {
-                HStack(spacing: 7) {
+            if !store.isConnected, let error = store.errorMessage, !compact {
+                HStack(alignment: .firstTextBaseline, spacing: 7) {
                     Circle()
                         .fill(DesignTokens.danger)
                         .frame(width: 7, height: 7)
-                    if !compact {
-                        Text(error)
-                            .font(.callout.weight(.medium))
-                            .foregroundStyle(DesignTokens.ink)
-                            .lineLimit(2)
-                    }
+                    Text(error)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.ink)
+                        .lineLimit(2)
                 }
-                }
-                .padding(.horizontal, compact ? 10 : 18)
-                .padding(.vertical, 16)
-                .overlay(alignment: .top) {
-                    Divider().padding(.horizontal, 18)
-                }
+                .padding(.horizontal, 20)
+                .padding(.bottom, 8)
+            }
+
+            SidebarSelection(title: "设置", systemImage: "gearshape", selected: selectedSection == .settings, compact: compact) {
+                navigate(.settings)
             }
         }
+        .padding(.bottom, 10)
         .frame(maxHeight: .infinity, alignment: .top)
-        .background(DesignTokens.surface)
+        // The one translucent surface in the window: navigation steps back onto
+        // the desktop, and everything carrying data stays opaque and legible.
+        .background(VisualEffect(material: .sidebar, blendingMode: .behindWindow))
+        .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+                .strokeBorder(DesignTokens.surfaceStroke, lineWidth: 1)
+        )
     }
 }
 
@@ -283,42 +304,51 @@ private struct SidebarSelection: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var hovering = false
     let title: String
-    let systemImage: String
-    let color: Color
+    let systemImage: String?
+    var badge: String? = nil
     let selected: Bool
     let compact: Bool
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 11) {
-                Image(systemName: systemImage)
-                    .font(.body.weight(.semibold))
-                    .symbolRenderingMode(.hierarchical)
-                    .foregroundStyle(selected ? color : DesignTokens.mutedInk)
-                    .frame(width: 18)
+            HStack(spacing: 9) {
+                if let systemImage {
+                    Image(systemName: systemImage)
+                        .font(.body)
+                        .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
+                        .frame(width: 18)
+                }
                 if !compact {
                     Text(title)
-                        .font(Font.body.weight(selected ? .semibold : .medium))
+                        .font(Font.body.weight(selected ? .semibold : .regular))
                         .foregroundStyle(DesignTokens.ink)
-                    Spacer()
+                        .lineLimit(1)
+                    Spacer(minLength: 4)
+                    if let badge {
+                        Text(badge)
+                            .font(Typography.annotation)
+                            .monospacedDigit()
+                            .foregroundStyle(DesignTokens.mutedInk)
+                    }
                 }
             }
-            .padding(.horizontal, compact ? 0 : 15)
-            .frame(height: 38)
+            .padding(.horizontal, compact ? 0 : 10)
+            .frame(height: 32)
             .frame(maxWidth: .infinity)
             .background(
-                selected ? color.opacity(DesignTokens.Alpha.fill) : DesignTokens.ink.opacity(hovering ? 0.045 : 0),
-                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                DesignTokens.ink.opacity(selected ? DesignTokens.Alpha.edge : (hovering ? DesignTokens.Alpha.hairline : 0)),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
             )
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focusable()
-        .padding(.horizontal, compact ? 12 : 10)
+        .padding(.horizontal, compact ? 8 : 10)
         .focusEffectDisabled()
         .help(title)
         .accessibilityLabel(title)
-        .accessibilityValue(selected ? "当前页面" : "未选中")
+        .accessibilityValue(selected ? "当前页面" : (badge ?? "未选中"))
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
     }
@@ -326,7 +356,6 @@ private struct SidebarSelection: View {
 
 
 private struct AppToolbar: View {
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @ObservedObject var store: BrokerStore
     let selectedSection: DashboardSection
     let addServer: () -> Void
@@ -334,58 +363,20 @@ private struct AppToolbar: View {
     let refresh: () -> Void
 
     var body: some View {
-        HStack(alignment: .center, spacing: 14) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title)
-                    .font(.title.weight(.semibold))
-                    .foregroundStyle(DesignTokens.ink)
+        HStack(alignment: .center, spacing: 8) {
+            Text(title)
+                .font(Typography.screenTitle)
+                .foregroundStyle(DesignTokens.ink)
+                .lineLimit(1)
+                .fixedSize()
+            VStack(alignment: .leading, spacing: 1) {
                 Text(statusText)
-                    .font(.callout.weight(.medium))
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .lineLimit(1)
-            }
-            Spacer(minLength: 14)
-            VStack(alignment: .trailing, spacing: 6) {
-                HStack(spacing: 8) {
-                    Button(action: addServer) {
-                        Label("添加服务器", systemImage: "plus")
-                            .font(.callout.weight(.semibold))
-                    }
-                    .buttonStyle(SecondaryActionButtonStyle())
-                    .focusable()
-                    .disabled(!store.allowsMutations)
-                    .help(store.allowsMutations ? "添加服务器到本机资源池" : store.mutationUnavailableReason)
-                    .accessibilityLabel("添加服务器")
-                    if selectedSection == .leases {
-                        Button(action: claimGPU) {
-                            Label("申请 GPU", systemImage: "key.fill")
-                                .font(.callout.weight(.semibold))
-                        }
-                        .buttonStyle(PrimaryActionButtonStyle())
-                        .focusable()
-                        .disabled(!store.allowsMutations || store.snapshot.operationalEndpoints.isEmpty)
-                        .help(claimHelp)
-                        .accessibilityLabel("申请 GPU")
-                        .accessibilityHint(claimHint)
-                        .accessibilityValue(claimHint)
-                    }
-                    Button(action: refresh) {
-                        // Pulse refreshes every few seconds, so this must not
-                        // react to a refresh a person did not ask for.
-                        Label("刷新", systemImage: "arrow.clockwise")
-                            .font(.callout.weight(.semibold))
-                    }
-                    .buttonStyle(SecondaryActionButtonStyle())
-                    .focusable()
-                    .disabled(!store.canRefresh)
-                    .keyboardShortcut("r", modifiers: [.command])
-                    .help(store.canRefresh ? "更新资源数据" : "测试数据不能刷新")
-                    .accessibilityLabel("更新资源数据")
-                    .accessibilityValue(store.isRefreshing ? "正在更新" : (store.canRefresh ? "可以更新" : "测试数据"))
-                }
                 if let error = store.errorMessage {
-                    Label(error, systemImage: "exclamationmark.triangle.fill")
-                        .font(.caption2.weight(.medium))
+                    Text(error)
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.danger)
                         .lineLimit(1)
                         .truncationMode(.middle)
@@ -393,9 +384,46 @@ private struct AppToolbar: View {
                         .accessibilityValue(error)
                 }
             }
+            .padding(.leading, 6)
+            Spacer(minLength: 14)
+            Button(action: refresh) {
+                // Pulse refreshes every few seconds, so this must not react to
+                // a refresh a person did not ask for.
+                Image(systemName: "arrow.clockwise")
+                    .font(.callout.weight(.medium))
+            }
+            .buttonStyle(IconActionButtonStyle())
+            .focusable()
+            .disabled(!store.canRefresh)
+            .keyboardShortcut("r", modifiers: [.command])
+            .help(store.canRefresh ? "更新资源数据" : "测试数据不能刷新")
+            .accessibilityLabel("更新资源数据")
+            .accessibilityValue(store.isRefreshing ? "正在更新" : (store.canRefresh ? "可以更新" : "测试数据"))
+            if selectedSection == .resources {
+                Button(action: addServer) {
+                    Text("添加服务器")
+                }
+                .buttonStyle(SecondaryActionButtonStyle())
+                .focusable()
+                .disabled(!store.allowsMutations)
+                .help(store.allowsMutations ? "添加服务器到本机资源池" : store.mutationUnavailableReason)
+                .accessibilityLabel("添加服务器")
+            }
+            if [.overview, .resources, .leases].contains(selectedSection) {
+                Button(action: claimGPU) {
+                    Text("申请 GPU")
+                }
+                .buttonStyle(PrimaryActionButtonStyle())
+                .focusable()
+                .disabled(!store.allowsMutations || store.snapshot.operationalEndpoints.isEmpty)
+                .help(claimHelp)
+                .accessibilityLabel("申请 GPU")
+                .accessibilityHint(claimHint)
+                .accessibilityValue(claimHint)
+            }
         }
-        .padding(.horizontal, 28)
-        .padding(.top, 22)
+        .padding(.horizontal, 24)
+        .padding(.top, 14)
         .padding(.bottom, 10)
     }
 
@@ -409,17 +437,11 @@ private struct AppToolbar: View {
         return store.isConnected ? "正在读取资源" : "正在连接"
     }
 
-    private var lastSuccessText: String {
-        guard let lastUpdated = store.lastUpdated else { return "等待首次更新" }
-        let elapsed = max(0, Int(Date().timeIntervalSince(lastUpdated)))
-        return elapsed < 5 ? "刚刚" : "\(elapsed) 秒前"
-    }
-
     private var lastUpdatedText: String {
         guard let lastUpdated = store.lastUpdated else { return "—" }
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "zh_CN")
-        formatter.dateFormat = "M 月 d 日 HH:mm"
+        formatter.dateFormat = "HH:mm"
         return formatter.string(from: lastUpdated)
     }
 

@@ -310,7 +310,8 @@ struct GPUDetailSheet: View {
         switch gpu.state {
         case "AVAILABLE": return DesignTokens.success
         case "HELD", "LEASED_IDLE", "KEEPALIVE": return DesignTokens.interaction
-        case "RUNNING_MANAGED", "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED": return DesignTokens.warning
+        case "RUNNING_MANAGED": return DesignTokens.interaction
+        case "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED": return DesignTokens.warning
         default: return DesignTokens.danger
         }
     }
