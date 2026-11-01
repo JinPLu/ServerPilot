@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.1.1 - 2026-11-02
 
 - **The sidebar is now the system's own**, so macOS draws its floating, translucent look instead of a flat grey panel.
 - **The GPU utilization chart shows a gap for what it is.** While the Mac sleeps or collection stops there are no readings: a grey dashed line joins the two sides and says "未采集 N 小时" (not collected for N hours), with no invented data and no look of a broken chart.
