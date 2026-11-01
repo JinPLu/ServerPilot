@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.1.0 - 2026-11-02
 
 - **The App is reorganized the macOS way: quieter and easier to read.** The sidebar is a translucent floating panel that lists server groups directly; page titles sit on a neutral ground and white is kept for cards and tables; a free card is an outline and pressure bars stay grey, so colour only appears where something needs a look.
   - **Overview**: status chips double as filters, above free capacity, the 24-hour utilization of all GPUs, what needs handling, and server tiles by group with per-card state and a one-hour line.

@@ -8,7 +8,7 @@
 
 ## Project current state
 
-- **App 界面重新整理（11 月 2 日，未发布）**：原生 macOS 骨架，总览吸收数据仪表与分组方块，中性底，暂不做深色。契约见 [DESIGN_SYSTEM](../DESIGN_SYSTEM.md)，未验证项见 `docs/IMPLEMENTATION_STATUS_zh.md` 顶部条目。
+- **App 界面重新整理（11 月 2 日，4.1.0）**：原生 macOS 骨架，总览吸收数据仪表与分组方块，中性底，暂不做深色。契约见 [DESIGN_SYSTEM](../DESIGN_SYSTEM.md)，未验证项见 `docs/IMPLEMENTATION_STATUS_zh.md` 顶部条目。
 - **4.0.0 已发布（10 月 31 日）**：见[计划](plans/v4-agent-and-app-redesign.md)。
   P0–P6 完成，本机运行该构建，直连链路实机通过。Slurm 真实流程经用户决定暂不验证。
   已发布为 4.0.1：MCP 收为三个工具。未验证项见 `docs/IMPLEMENTATION_STATUS_zh.md` 顶部条目。
