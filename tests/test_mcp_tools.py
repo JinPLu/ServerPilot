@@ -345,6 +345,32 @@ def test_a_request_that_never_left_is_retried_once(scripted) -> None:  # type: i
     assert len(client.posts) == 2
 
 
+def test_no_capacity_after_an_unsent_retry_is_still_an_answer(scripted) -> None:  # type: ignore[no-untyped-def]
+    client = scripted(
+        BrokerClientError("connect failed", unsent=True),
+        BrokerClientError(
+            "broker HTTP 409: no_capacity: no cards are available",
+            code="no_capacity",
+            status_code=409,
+            details={"retry_after_seconds": 60, "reason": "cards_busy"},
+        ),
+    )
+
+    reply = tools.gpu_apply(task="t", duration_seconds=60)
+
+    assert reply == {
+        "ok": False,
+        "error": {
+            "code": "no_capacity",
+            "message": "no cards are available",
+            "retryable": True,
+            "retry_after_seconds": 60,
+            "details": {"reason": "cards_busy"},
+        },
+    }
+    assert client.posts == ["/api/v2/leases", "/api/v2/leases"]
+
+
 def test_a_read_timeout_is_not_replayed(scripted) -> None:  # type: ignore[no-untyped-def]
     client = scripted(BrokerClientError("read timed out", unsent=False), LEASE)
     with pytest.raises(BrokerClientError):

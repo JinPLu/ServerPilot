@@ -100,7 +100,15 @@ serverpilot daemon install --source-root "$PWD"
 serverpilot daemon status
 ```
 
-`daemon install` 注册用户 LaunchAgent，由它拉起这份 `uv tool` 安装，且只在 macOS 上可用。以后升级包装后，还要确认 `http://127.0.0.1:8787/health/live` 里的进程版本确实换了，见[升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)。
+`daemon install` 注册用户 LaunchAgent，由它拉起这份 `uv tool` 安装，且只在 macOS 上可用。
+
+以后更新本机环境，先将当前检出的源码同步到要运行的内容，再执行完整更新入口；需要 macOS Swift 工具链：
+
+```bash
+zsh desktop/update-macos-app.sh
+```
+
+这条命令同时原地替换根目录 `ServerPilot.app` 和正式后端，重启两者，再核对运行版本与代码内容构建标识。流程会清理经身份确认的旧 App 副本，并要求只有一个从根目录重新启动的 App；重启失败或标识不一致都会报失败。现有数据和 GPU workload 保留。脚本部署当前检出内容，Git 同步、版本号和 tag 发布另行执行。MCP 客户端和远端 helper 的后续检查见[升级检查清单](docs/UPGRADE_CHECKLIST_zh.md)。
 
 无论哪边，服务都监听 `http://127.0.0.1:8787`。
 

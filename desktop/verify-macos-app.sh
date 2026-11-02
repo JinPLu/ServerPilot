@@ -9,6 +9,12 @@ inventory="${app_bundle}/Contents/Resources/configs/inventory.yaml"
 runtime_root="${app_bundle}/Contents/Resources/ServerPilotRuntime"
 info_plist="${app_bundle}/Contents/Info.plist"
 
+if [[ "${app_bundle:a}" != "${project_root}/ServerPilot.app" ]]; then
+  print -u2 "Only the canonical root ServerPilot.app may be verified"
+  exit 1
+fi
+python3 "${project_root}/scripts/macos_app_bundle.py" verify --project-root "${project_root}"
+
 if [[ ! -e "${frontend}" ]]; then
   print -u2 "Missing standalone app resource: ${frontend}"
   exit 1
@@ -50,33 +56,19 @@ if [[ -n "${external_links}" ]]; then
   exit 1
 fi
 
-resolve_installed_cli() {
-  local candidates=()
-  if [[ -n "${SERVERPILOT_CLI:-}" ]]; then
-    candidates+=("${SERVERPILOT_CLI}")
-  fi
-  candidates+=("${HOME}/.local/share/uv/tools/serverpilot/bin/serverpilot")
-  local from_path
-  from_path="$(command -v serverpilot || true)"
-  if [[ -n "${from_path}" ]]; then
-    candidates+=("${from_path}")
-  fi
-  candidates+=("/opt/homebrew/bin/serverpilot" "/usr/local/bin/serverpilot")
-  local candidate
-  for candidate in "${candidates[@]}"; do
-    if [[ -x "${candidate}" ]]; then
-      print -- "${candidate}"
-      return 0
-    fi
-  done
-  return 1
-}
-
-cli="$(resolve_installed_cli || true)"
-if [[ -z "${cli}" ]]; then
-  print -u2 "No installed ServerPilot CLI found. Install or upgrade with: uv tool install --force ."
+cli="${HOME}/.local/share/uv/tools/serverpilot/bin/serverpilot"
+python="${HOME}/.local/share/uv/tools/serverpilot/bin/python"
+if [[ ! -x "${cli}" || ! -x "${python}" ]]; then
+  print -u2 "No canonical ServerPilot backend found. Run: zsh desktop/update-macos-app.sh"
   exit 1
 fi
 "${cli}" --help >/dev/null
+installed_version="$("${cli}" --version)"
+installed_build="$("${python}" -I -c 'from serverpilot.runtime_identity import package_build_id; print(package_build_id())')"
+expected_build="$(plutil -extract ServerPilotBackendBuildID raw "${info_plist}")"
+if [[ "${installed_version}" != "${bundle_version}" || "${installed_build}" != "${expected_build}" ]]; then
+  print -u2 "App and canonical backend builds differ. Run: zsh desktop/update-macos-app.sh"
+  exit 1
+fi
 
 print "Standalone macOS app verification: PASS"

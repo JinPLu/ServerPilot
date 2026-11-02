@@ -33,6 +33,7 @@ from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
 from serverpilot.provider_contract import ProviderConnectionUpdate
+from serverpilot.runtime_identity import package_build_id
 from serverpilot.schemas import (
     AlertMark,
     ApplyBody,
@@ -342,6 +343,7 @@ def create_app(
     collector: SSHCollector | None = None,
     keepalive_adapter_resolver: Callable[[str], Any] = endpoint_keepalive_adapter,
 ) -> FastAPI:
+    build_id = package_build_id()
     inventory = load_inventory(settings.inventory_path)
     project_root = settings.project_root or _find_project_root()
     service = BrokerService(Database(settings.database_url, project_root), inventory)
@@ -1170,6 +1172,7 @@ def create_app(
             "status": "live",
             "schema_version": SCHEMA_VERSION,
             "version": __version__,
+            "build_id": build_id,
             "capabilities": list(API_CAPABILITIES),
         }
 
@@ -1185,6 +1188,7 @@ def create_app(
                 "single_writer": True,
                 "daemon_instance_id": settings.daemon_instance_id,
                 "process_id": os.getpid(),
+                "build_id": build_id,
             },
         )
 

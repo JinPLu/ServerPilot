@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- Add a complete local macOS update command that replaces the App and backend together, restarts and verifies both, and removes duplicate App copies.
+
 ## 4.2.0 - 2026-11-02
 
 - Fix per-server GPU utilization trends to average all samples in each time interval instead of showing only the last reading.

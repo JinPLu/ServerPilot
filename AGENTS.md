@@ -21,6 +21,7 @@
 - 运行最贴近改动面的测试与 Ruff；除非用户明确要求只读 shadow 采集，否则不得连接真实 GPU。
 - 仓库中的唯一桌面应用固定为根目录 `ServerPilot.app`。不得在 `dist/`、`build/`、`~/Applications` 或仓库其他位置创建、复制或保留第二个 `ServerPilot*.app`，也不得用编号副本规避覆盖。
 - 每次桌面端修改后必须运行 `zsh desktop/build-macos-app.sh`，该脚本原地替换根目录 `ServerPilot.app`；随后运行 `zsh desktop/verify-macos-app.sh`。评审和启动一律使用根目录这一份，不能打开旧路径或缓存副本。
+- 用户要求更新本机运行环境时，必须运行 `zsh desktop/update-macos-app.sh`：同步覆盖唯一根目录 App 与正式后端、重启两者并验证实际运行的构建标识和新进程；仅构建、安装包装或推送提交不算更新完成。`build-macos-app.sh` 仍用于单独构建和 CI。
 
 ## 发布与版本
 

@@ -63,6 +63,20 @@ if [[ -d "${script_dir}/Fixtures" ]]; then
   mkdir -p "${resources_dir}/Fixtures"
   cp "${script_dir}/Fixtures"/*.json(N) "${resources_dir}/Fixtures/"
 fi
+python3 "${project_root}/scripts/macos_app_bundle.py" identity --project-root "${project_root}" >"${staging_root}/identity.json"
+python3 - "${staging_root}/identity.json" "${app_bundle}/Contents/Info.plist" <<'PY'
+import json
+import plistlib
+import sys
+from pathlib import Path
+
+identity = json.loads(Path(sys.argv[1]).read_text())
+path = Path(sys.argv[2])
+info = plistlib.loads(path.read_bytes())
+info["ServerPilotBuildID"] = identity["app_build_id"]
+info["ServerPilotBackendBuildID"] = identity["backend_build_id"]
+path.write_bytes(plistlib.dumps(info))
+PY
 plutil -lint "${app_bundle}/Contents/Info.plist" >/dev/null
 
 # From the macOS 27 SDK @State is a macro, and the Command Line Tools do not
@@ -115,38 +129,8 @@ COPYFILE_DISABLE=1 ditto --norsrc "${final_app_bundle}" "${verification_bundle}"
 xattr -cr "${verification_bundle}"
 codesign --verify --deep --strict "${verification_bundle}"
 
-remove_legacy_app() {
-  local entry="$1"
-  [[ -e "${entry}" || -L "${entry}" ]] || return 0
-  if [[ -L "${entry}" ]]; then
-    unlink "${entry}"
-    return 0
-  fi
-  local bundle_id
-  bundle_id="$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "${entry}/Contents/Info.plist" 2>/dev/null || true)"
-  if [[ "${bundle_id}" != "local.serverpilot.desktop" &&
-        "${bundle_id}" != "local.gpu-broker.desktop" ]]; then
-    print -u2 "Refusing to remove unrelated app: ${entry}"
-    exit 1
-  fi
-  rm -rf "${entry}"
-}
-
-# Before the root-bundle rule, builds installed a second copy in ~/Applications
-# and exposed aliases under dist/. Remove only verified ServerPilot bundles or
-# symlinks after the new canonical bundle has passed signature verification.
-remove_legacy_app "${HOME}/Applications/ServerPilot.app"
-legacy_dist_entries=("${project_root}/dist"/ServerPilot*.app(N))
-for legacy_entry in "${legacy_dist_entries[@]}"; do
-  remove_legacy_app "${legacy_entry}"
-done
-# A numbered copy beside the canonical bundle is the one duplicate the rule
-# names and the one .gitignore hides, so `git status` never shows it. Sweep it
-# here, where the rule is enforced rather than remembered.
-numbered_root_entries=("${project_root}"/ServerPilot*.app(N))
-for legacy_entry in "${numbered_root_entries[@]}"; do
-  [[ "${legacy_entry}" == "${final_app_bundle}" ]] && continue
-  remove_legacy_app "${legacy_entry}"
-done
+# One owner for discovery, identity checks and cleanup, including nested build
+# copies and numbered bundles. Unknown app identities make the build fail.
+python3 "${project_root}/scripts/macos_app_bundle.py" cleanup --project-root "${project_root}"
 
 echo "Built ${final_app_bundle}"

@@ -128,10 +128,23 @@ serverpilot daemon status
 ```
 
 `daemon install` registers a user LaunchAgent that starts the `uv tool`
-install, and is macOS-only. After a later upgrade, confirm the process on
-`http://127.0.0.1:8787/health/live` actually reports the new version — see the
+install, and is macOS-only.
+
+For later local updates, sync this checkout to the source you want to run, then
+use the complete update entry. It also requires the macOS Swift toolchain:
+
+```bash
+zsh desktop/update-macos-app.sh
+```
+
+This replaces the root `ServerPilot.app` and the canonical backend together,
+restarts both, and verifies the running code by content build ID as well as
+version. It cleans verified old App copies and requires one freshly launched
+root App; a failed restart or mismatch fails the update. Existing data and GPU
+workloads are preserved. The script deploys the current checkout; Git syncing
+and version/tag releases remain separate actions. See the
 [upgrade checklist](https://github.com/JinPLu/ServerPilot/blob/master/docs/UPGRADE_CHECKLIST_zh.md)
-(Chinese).
+(Chinese) for MCP-client and remote-helper follow-up.
 
 Either way it listens on `http://127.0.0.1:8787`.
 

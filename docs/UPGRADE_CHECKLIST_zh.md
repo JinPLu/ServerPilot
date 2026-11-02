@@ -1,8 +1,26 @@
 # 升级检查清单
 
+## 本机完整更新入口
+
+先将源码检出同步到本次要运行的内容，然后在仓库根目录执行：
+
+```bash
+zsh desktop/update-macos-app.sh
+```
+
+需要 macOS、Python 3.12、uv 和 macOS Swift 工具链。这是本机 App 与后端的统一更新入口；`build-macos-app.sh` 和 `verify-macos-app.sh` 保留给单独构建、校验和 CI。
+
+完整更新会原地替换根目录唯一的 `ServerPilot.app`，重装 `~/.local/share/uv/tools/serverpilot` 的正式后端，显式重启归属本用户的 daemon，并退出、重新打开根目录 App。校验同时检查源码、安装包和运行进程的版本及内容构建标识，以及 App 的新进程、标准路径和唯一实例。即使语义版本号没变，也要确认新代码已加载；任一步失败都不能报告更新成功。
+
+经 bundle 身份确认的旧 App 副本会被清理；身份不明的同名 App 会使流程失败，避免误删。现有数据库、inventory、租约和 GPU workload 保留。流程只部署当前检出内容，Git 拉取、提交、版本号和 tag 发布另行执行。
+
+后端从干净的临时源码目录打包，不复用仓库里的旧 `build/lib` 或 egg-info；临时目录不复制 App。构建期间即使 App 被重新打开，末尾也会先正常退出该进程，再启动并验证唯一的新实例。失败会说明停在哪一步，修复原因后重新执行同一命令；不会悄悄回退到旧版并报告成功。
+
+本机更新入口不重启外部 MCP 客户端，也不向 GPU 服务器分发 helper；下面保留这些项目的后续检查。
+
 ## 升级到 4.0
 
-4.0 起 MCP 只有三个工具，不保留旧工具，升级后必须完成下面三步：
+4.0 起 MCP 只有三个工具，不保留旧工具，升级后核对以下项目：
 
 1. 重启 daemon，确认 `/health/live` 的 `version` 是新版本。迁移保留全部数据和活跃租约，并重置它们的心跳与空闲计时。
 2. 重启每个 MCP 客户端。旧客户端调用时会收到 `restart_client`。
@@ -12,7 +30,7 @@
 升级前已有的租约显示在 `gpu_status` 的 `recoverable` 里，Agent 用 `gpu_apply(task=..., take_over=true)` 认领。
 
 
-包换了、源码对了，不等于现场在跑新契约。下面这些步骤**没有自动入口**；漏做时通常不报升级失败，只是旧进程、旧客户端缓存或旧远端入口继续工作。
+包换了、源码对了，不等于现场在跑新契约。本机 App 和后端由上面的完整更新入口负责；MCP 客户端缓存和远端 helper 仍需分别核对。
 
 升级后按顺序核对。每一项都写了「怎么确认」和「漏做会怎样」。
 
@@ -20,17 +38,15 @@
 
 `uv tool install --force .` 只换磁盘上的包。macOS 上 daemon 由 LaunchAgent 拉起，进程不会因为包装好了就重载内存里的模块。同一语义版本号也可以仍在跑旧代码。
 
-怎么做：
+本机更新使用完整更新入口。需要排查运行状态时：
 
 ```bash
 serverpilot --version
-serverpilot daemon stop
-serverpilot daemon start
-# 或：serverpilot daemon ensure --source-root "$PWD"
-curl -s http://127.0.0.1:8787/health/live
+serverpilot daemon status --json
+curl --noproxy '*' -s http://127.0.0.1:8787/health/live
 ```
 
-`/health/live` 里的 `version` 必须和 `serverpilot --version` 一致。`serverpilot daemon status` 只报告 installed / loaded / live / ready 和数据路径，**不含版本号**，不能用来判断进程是否换过。
+`daemon status --json` 已报告 `installed_version`、`running_version` 及 installed / loaded / live / ready 和数据路径。`/health/live` 的 `version` 必须和安装版一致，`build_id` 则是该进程启动时冻结的代码内容标识。版本号相同不足以证明补丁已加载，完整更新入口还会比对构建标识并确认进程已重启。
 
 漏做：CLI 已经是新版本，8787 上仍是旧控制面。MCP 工具数、插件 schema、分组投影都会按旧进程回答。
 
