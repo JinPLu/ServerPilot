@@ -39,7 +39,12 @@ struct OverviewDashboard: View {
                     }
                 }
                 ForEach(fleets) { fleet in
-                    VStack(alignment: .leading, spacing: 8) {
+                    VStack(alignment: .leading, spacing: 10) {
+                        Rectangle()
+                            .fill(DesignTokens.surfaceStroke)
+                            .frame(height: 1)
+                            .padding(.bottom, 4)
+                            .accessibilityHidden(true)
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(fleet.name)
                                 .font(.title3.weight(.semibold))
@@ -86,26 +91,26 @@ struct OverviewDashboard: View {
     // ---- the summary a person reads first ----
 
     private struct StatusChip: Identifiable {
-        let id: String
-        let state: String
-        let label: String
+        let load: CardLoad
         let count: Int
-        let filter: EndpointFilter
+        var id: String { load.rawValue }
+
+        var filter: EndpointFilter {
+            switch load {
+            case .free: .available
+            case .low, .nearFull, .unmeasured: .taskOccupied
+            case .fault: .all
+            case .stale: .connectionFailed
+            }
+        }
     }
 
-    /// One chip per thing a card can be, only when a card is that thing.
+    /// One chip per thing a square can say, so the row doubles as the squares' legend.
     private var chips: [StatusChip] {
         let gpus = store.snapshot.operationalGPUs
-        let count: ([String]) -> Int = { states in gpus.filter { states.contains($0.state) }.count }
-        let all: [StatusChip] = [
-            StatusChip(id: "free", state: "AVAILABLE", label: "空闲", count: count(["AVAILABLE", "KEEPALIVE"]), filter: .available),
-            StatusChip(id: "running", state: "RUNNING_MANAGED", label: CardVocabulary.label(forState: "RUNNING_MANAGED"), count: count(["RUNNING_MANAGED"]), filter: .taskOccupied),
-            StatusChip(id: "held", state: "HELD", label: CardVocabulary.label(forState: "HELD"), count: count(["HELD", "LEASED_IDLE"]), filter: .taskOccupied),
-            StatusChip(id: "foreign", state: "BUSY_UNMANAGED", label: CardVocabulary.label(forState: "BUSY_UNMANAGED"), count: count(["BUSY_UNMANAGED"]), filter: .taskOccupied),
-            StatusChip(id: "conflict", state: "CONFLICT", label: CardVocabulary.label(forState: "CONFLICT"), count: count(["CONFLICT", "ORPHANED_BUSY", "UNHEALTHY", "ERROR", "MAINTENANCE"]), filter: .all),
-            StatusChip(id: "stale", state: "UNKNOWN_STALE", label: CardVocabulary.label(forState: "UNKNOWN_STALE"), count: count(["UNKNOWN_STALE", "UNKNOWN_RECOVERING"]), filter: .connectionFailed),
-        ]
-        return all.filter { $0.count > 0 }
+        return CardLoad.allCases
+            .map { load in StatusChip(load: load, count: gpus.filter { $0.load == load }.count) }
+            .filter { $0.count > 0 }
     }
 
     private var statusChips: some View {
@@ -113,8 +118,8 @@ struct OverviewDashboard: View {
             ForEach(chips) { chip in
                 Button { navigate(.resources, chip.filter) } label: {
                     HStack(spacing: 7) {
-                        CardPip(state: chip.state, size: 10)
-                        Text(chip.label).foregroundStyle(DesignTokens.ink)
+                        CardPip(load: chip.load, size: 10)
+                        Text(chip.load.label).foregroundStyle(DesignTokens.ink)
                         Text("\(chip.count)")
                             .fontWeight(.semibold)
                             .monospacedDigit()
@@ -129,7 +134,7 @@ struct OverviewDashboard: View {
                 }
                 .buttonStyle(.plain)
                 .help("在服务器页查看")
-                .accessibilityLabel("\(chip.label) \(chip.count) 张，在服务器页查看")
+                .accessibilityLabel("\(chip.load.label) \(chip.count) 张，在服务器页查看")
             }
         }
     }
@@ -195,7 +200,7 @@ struct OverviewDashboard: View {
 
     private var trend: some View {
         HomeCard(padding: 16) {
-            VStack(alignment: .leading, spacing: 6) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
                     Text("GPU 利用率")
                         .font(Typography.identity.weight(.semibold))
@@ -205,15 +210,34 @@ struct OverviewDashboard: View {
                         .monospacedDigit()
                         .foregroundStyle(DesignTokens.ink)
                     Spacer(minLength: 8)
-                    Text("近 24 小时")
-                        .font(Typography.annotation)
-                        .foregroundStyle(DesignTokens.mutedInk)
+                    ViewThatFits(in: .horizontal) {
+                        trendCaption("近 24 小时\(uncollectedCaption.map { " · \($0)" } ?? "")")
+                        trendCaption("近 24 小时")
+                    }
                 }
                 FleetTrendChart(series: store.utilizationTrends.fleet)
-                    .frame(height: 96)
+                    .frame(maxHeight: .infinity)
             }
             .frame(height: 124)
         }
+    }
+
+    private func trendCaption(_ text: String) -> some View {
+        Text(text)
+            .font(Typography.annotation)
+            .foregroundStyle(DesignTokens.mutedInk)
+            .lineLimit(1)
+            .fixedSize()
+    }
+
+    /// Words belong up here, not on the line: several gaps' labels collide over
+    /// the plot and over the figure above it.
+    private var uncollectedCaption: String? {
+        let seconds = store.utilizationTrends.fleet?.gaps.map(\.seconds).reduce(0, +) ?? 0
+        guard seconds > 0 else { return nil }
+        if seconds < 3600 { return "未采集 \(seconds / 60) 分钟" }
+        let hours = Double(seconds) / 3600
+        return "未采集 \(hours.formatted(.number.precision(.fractionLength(0...1)))) 小时"
     }
 
     private var attention: some View {
@@ -276,8 +300,8 @@ struct OverviewDashboard: View {
     }
 }
 
-/// The whole fleet over a day.  A gap in collection carries no reading: a dashed
-/// line joins its two sides, unfilled, and says how long nothing was collected.
+/// The whole fleet over a day.  A gap in collection carries no reading: a faint
+/// dotted line joins its two sides, unfilled, and the header says how long.
 private struct FleetTrendChart: View {
     let series: UtilizationSeries?
 
@@ -303,11 +327,7 @@ private struct FleetTrendChart: View {
 
     private var gaps: [UtilizationSeries.Gap] { series?.gaps ?? [] }
 
-    private func gapLabel(_ seconds: Int) -> String {
-        if seconds < 3600 { return "未采集 \(seconds / 60) 分钟" }
-        let hours = Double(seconds) / 3600
-        return "未采集 \(hours.formatted(.number.precision(.fractionLength(0...1)))) 小时"
-    }
+    private static let gapLine = StrokeStyle(lineWidth: 1, lineCap: .round, dash: [1, 4])
 
     var body: some View {
         if series?.hasData == true {
@@ -315,38 +335,39 @@ private struct FleetTrendChart: View {
             Chart {
                 ForEach(samples) { sample in
                     AreaMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
-                        .foregroundStyle(DesignTokens.interaction.opacity(DesignTokens.Alpha.fill))
+                        .interpolationMethod(.monotone)
+                        .foregroundStyle(
+                            LinearGradient(
+                                colors: [DesignTokens.interaction.opacity(0.18), DesignTokens.interaction.opacity(0.02)],
+                                startPoint: .top,
+                                endPoint: .bottom
+                            )
+                        )
                     LineMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
+                        .interpolationMethod(.monotone)
                         .foregroundStyle(DesignTokens.interaction)
-                        .lineStyle(StrokeStyle(lineWidth: 2))
+                        .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
                 }
                 ForEach(gaps, id: \.beforeIndex) { gap in
                     LineMark(x: .value("时间", gap.beforeIndex), y: .value("利用率", gap.before * 100), series: .value("段", "gap-\(gap.beforeIndex)"))
                         .foregroundStyle(DesignTokens.mutedInk)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
+                        .lineStyle(Self.gapLine)
                     LineMark(x: .value("时间", gap.afterIndex), y: .value("利用率", gap.after * 100), series: .value("段", "gap-\(gap.beforeIndex)"))
                         .foregroundStyle(DesignTokens.mutedInk)
-                        .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [3, 4]))
-                    PointMark(x: .value("时间", Double(gap.beforeIndex + gap.afterIndex) / 2), y: .value("利用率", (gap.before + gap.after) * 50))
-                        .opacity(0)
-                        .annotation(position: .top, spacing: 4) {
-                            Text(gapLabel(gap.seconds))
-                                .font(Typography.annotation)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                                .lineLimit(1)
-                                .fixedSize()
-                        }
+                        .lineStyle(Self.gapLine)
                 }
             }
             .chartXAxis(.hidden)
             .chartXScale(domain: 0...max((series?.points.count ?? 1) - 1, 1))
             .chartYScale(domain: 0...100)
             .chartYAxis {
-                AxisMarks(values: [0, 50, 100]) { value in
+                AxisMarks(position: .trailing, values: [0, 50, 100]) { value in
                     AxisGridLine().foregroundStyle(DesignTokens.surfaceStroke)
                     AxisValueLabel {
                         if let percent = value.as(Int.self) {
-                            Text("\(percent)%").font(Typography.annotation)
+                            Text("\(percent)%")
+                                .font(Typography.annotation)
+                                .foregroundStyle(DesignTokens.mutedInk)
                         }
                     }
                 }
@@ -476,16 +497,27 @@ private struct ServerTile: View {
 /// One GPU as one square, the same on every page.  A free card is an outline so
 /// a fleet at rest stays quiet; a filled square means something is on the card.
 struct CardPip: View {
-    let state: String
+    let load: CardLoad
     var size: CGFloat
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.pip, style: .continuous)
         Group {
-            if ["AVAILABLE", "KEEPALIVE"].contains(state) {
+            switch load {
+            case .free:
                 shape.strokeBorder(DesignTokens.freeCardStroke, lineWidth: 1.5)
-            } else {
-                shape.fill(cardStatusColor(state))
+            case .nearFull:
+                // Yellow is too light to hold its own edge on white.
+                shape.fill(DesignTokens.nearFullCard)
+                    .overlay(shape.strokeBorder(DesignTokens.nearFullCardEdge, lineWidth: 1))
+            case .low:
+                shape.fill(DesignTokens.interaction)
+            case .unmeasured:
+                shape.fill(DesignTokens.unmeasuredCard)
+            case .fault:
+                shape.fill(DesignTokens.danger)
+            case .stale:
+                shape.fill(DesignTokens.staleCard)
             }
         }
         .frame(width: size, height: size)
@@ -500,8 +532,8 @@ struct CardSquares: View {
     var body: some View {
         HStack(spacing: 3) {
             ForEach(gpus) { gpu in
-                CardPip(state: gpu.state, size: size)
-                    .help("GPU \(gpu.index) · \(gpuPresentationLabel(gpu))")
+                CardPip(load: gpu.load, size: size)
+                    .help("GPU \(gpu.index) · \(gpuPresentationLabel(gpu)) · \(cardLoadDetail(gpu))")
             }
         }
         .accessibilityElement(children: .ignore)
@@ -509,22 +541,36 @@ struct CardSquares: View {
     }
 }
 
-/// "6 张运行中，2 张空闲" rather than one element per square.
-func cardSquaresSummary(_ gpus: [GPURecord]) -> String {
-    Dictionary(grouping: gpus) { CardVocabulary.label(forState: $0.state) }
-        .sorted { $0.key < $1.key }
-        .map { "\($0.value.count) 张\($0.key)" }
-        .joined(separator: "，")
+/// The readings behind a square's colour, where there are any.
+private func cardLoadDetail(_ gpu: GPURecord) -> String {
+    guard gpu.load == .low || gpu.load == .nearFull else { return gpu.load.label }
+    let utilization = gpu.utilization.map { percentageLabel(Double($0) / 100) } ?? "—"
+    let memory = gpu.memoryUsedMiB == nil ? "—" : percentageLabel(gpu.memoryFraction)
+    return "\(gpu.load.label)（利用率 \(utilization)，显存 \(memory)）"
 }
 
-func cardStatusColor(_ state: String) -> Color {
-    switch state {
-    case "AVAILABLE", "KEEPALIVE": DesignTokens.freeCardStroke
-    case "RUNNING_MANAGED": DesignTokens.interaction
-    case "HELD", "LEASED_IDLE": DesignTokens.heldCard
-    case "BUSY_UNMANAGED": DesignTokens.warning
-    case "CONFLICT", "ORPHANED_BUSY", "UNHEALTHY", "ERROR", "MAINTENANCE": DesignTokens.danger
-    default: DesignTokens.staleCard
+/// "6 张利用率低，2 张空闲" rather than one element per square.
+func cardSquaresSummary(_ gpus: [GPURecord]) -> String {
+    CardLoad.allCases.compactMap { load in
+        let count = gpus.filter { $0.load == load }.count
+        return count > 0 ? "\(count) 张\(load.label)" : nil
+    }
+    .joined(separator: "，")
+}
+
+/// What the squares mean, for a page without the overview's chips.
+struct CardLegend: View {
+    var body: some View {
+        HStack(spacing: 10) {
+            ForEach(CardLoad.allCases, id: \.self) { load in
+                HStack(spacing: 4) {
+                    CardPip(load: load, size: 9)
+                    Text(load.label).lineLimit(1)
+                }
+                .fixedSize()
+            }
+        }
+        .accessibilityElement(children: .combine)
     }
 }
 

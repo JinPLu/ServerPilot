@@ -279,7 +279,6 @@ struct ResourcesDashboard: View {
                     selectSort: selectSort
                 )
                 .padding(.trailing, EndpointTableLayout.scrollbarWidth)
-                EndpointTableDivider()
                 if filteredEndpoints.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
@@ -297,41 +296,22 @@ struct ResourcesDashboard: View {
                     ScrollView {
                         // One scroller for the whole fleet: a group is as long
                         // as it is, and the table fills the window.
-                        LazyVStack(spacing: 0) {
+                        LazyVStack(spacing: EndpointTableLayout.groupSpacing) {
                             ForEach(tableSections) { section in
-                                if section.showsHeader {
-                                    groupSectionHeader(section)
-                                }
-                                ForEach(sectionRows(section)) { row in
-                                    switch row {
-                                    case .endpoint(let endpoint):
-                                        endpointRow(endpoint, tier: tier)
-                                    case .node(let endpoint, let node):
-                                        nodeRow(endpoint, node: node, tier: tier)
-                                    }
-                                    EndpointTableDivider()
-                                }
+                                groupCard(section, tier: tier)
                             }
                         }
+                        // The same width the header reserves, with or without a
+                        // scroller, so the columns stay under their titles.
+                        .frame(width: proxy.size.width - EndpointTableLayout.scrollbarWidth, alignment: .leading)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                         .id("\(sort.rawValue)-\(sortDirection == .ascending)")
                         .background(TableScrollStyle(hideWhenUnused: true))
                     }
                 }
-                EndpointTableDivider()
-                tableFooter
+                tableFooter(tier: tier)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-            .background(
-                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                    .fill(DesignTokens.surface)
-            )
-            // Increase Contrast asks for a drawn boundary; `tileStroke` is
-            // fully transparent otherwise.
-            .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                    .strokeBorder(DesignTokens.tileStroke, lineWidth: 1)
-            )
-            .clipShape(RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Labelling this container turned it into one leaf element and hid
@@ -339,9 +319,38 @@ struct ResourcesDashboard: View {
         .accessibilityElement(children: .contain)
     }
 
+    /// A group is its own card, so the page plane between two cards is the
+    /// boundary; the columns above still line up with every row in every card.
+    private func groupCard(_ section: EndpointOverviewSection, tier: EndpointTableLayout.Tier) -> some View {
+        let rows = sectionRows(section)
+        let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+        return VStack(spacing: 0) {
+            if section.showsHeader {
+                groupSectionHeader(section)
+                EndpointTableDivider()
+            }
+            ForEach(rows) { row in
+                switch row {
+                case .endpoint(let endpoint):
+                    endpointRow(endpoint, tier: tier)
+                case .node(let endpoint, let node):
+                    nodeRow(endpoint, node: node, tier: tier)
+                }
+                if row.id != rows.last?.id {
+                    EndpointTableDivider()
+                }
+            }
+        }
+        .background(shape.fill(DesignTokens.surface))
+        // Increase Contrast asks for a drawn boundary; `tileStroke` is fully
+        // transparent otherwise.
+        .overlay(shape.strokeBorder(DesignTokens.tileStroke, lineWidth: 1))
+        .clipShape(shape)
+    }
+
     /// The totals sit where a Mac app keeps them, at the foot of the window's
     /// content, rather than taking a band above the table.
-    private var tableFooter: some View {
+    private func tableFooter(tier: EndpointTableLayout.Tier) -> some View {
         HStack(spacing: 14) {
             Text("\(scopedEndpoints.count) 台服务器")
             Text("\(scopedGPUCount) 张 GPU")
@@ -351,6 +360,9 @@ struct ResourcesDashboard: View {
                 .truncationMode(.tail)
                 .help(fleetGPUModelSummary)
             Spacer(minLength: 8)
+            if tier.showsGPUModel {
+                CardLegend()
+            }
             if store.freshness != .fresh {
                 Label(snapshotTrustLabel, systemImage: "hand.raised.fill")
                     .foregroundStyle(DesignTokens.danger)
@@ -608,6 +620,7 @@ enum EndpointTableLayout {
     /// Two lines: what it is, then what it is doing.
     static let rowHeight: CGFloat = 50
     static let headerHeight: CGFloat = 32
+    static let groupSpacing: CGFloat = 12
 
     enum Tier {
         /// Every column.
@@ -762,8 +775,8 @@ private struct EndpointGroupSectionHeader: View {
             }
         }
         .padding(.horizontal, EndpointTableLayout.cardPadding)
-        .padding(.top, 12)
-        .padding(.bottom, 5)
+        .padding(.vertical, 10)
+        .background(DesignTokens.ink.opacity(DesignTokens.Alpha.hairline))
         .accessibilityAddTraits(.isHeader)
         .modifier(EndpointGroupSectionHeaderAccessibility(
             title: title,

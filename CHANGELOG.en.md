@@ -8,6 +8,9 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 - Fix per-server GPU utilization trends to average all samples in each time interval instead of showing only the last reading.
 - **Fixes an issue from 4.1.2: a task's last-seen process time could be wrong.** When a server's clock differed from this machine's, a process started soon after handover might not count as the task's, so the task card's time without a process and the release confirmation could mislead. The check now uses when ServerPilot first saw the process. The value is display only and never affected release or reclaim.
+- **A card's square now says how full the card is.** Hollow is free (including keepalive), blue is low utilization, yellow is nearly full (current utilization or memory at 80% or more), and red is an error. A card in use with no reading, such as on a cluster that reports allocation counts but whose compute nodes cannot be observed yet, is grey rather than passing for low. The overview's status chips and a legend at the foot of the server page use the same colours.
+- **Server groups are easier to tell apart.** On the server page each group is its own card, and on the overview each group has a divider above it.
+- **The overview's GPU utilization chart no longer crowds its text.** Gap durations are summed in the title row, leaving only the line and its scale in the plot.
 
 ## 4.1.2 - 2026-11-02
 

@@ -205,11 +205,20 @@ enum DesignTokens {
     /// Held or keepalive-owned: real state, but not a warning.  Neutral so a
     /// user-chosen accent can never drop it below the graphical floor.
     static let hold = Color(red: 91.0 / 255.0, green: 97.0 / 255.0, blue: 107.0 / 255.0)
-    /// A held card that is running nothing, as a filled square.  Lighter than
-    /// `hold`, which is legal on text, so it reads apart from a running card.
-    static let heldCard = statusColor(
+    /// A card in use whose load nothing measured, as a filled square.
+    static let unmeasuredCard = statusColor(
         normal: (142.0, 142.0, 147.0),
         increased: (99.0, 99.0, 102.0)
+    )
+    /// A card close to full.  A brighter yellow than the `warning` used on text,
+    /// so the square reads as a load, not as something needing a person.
+    static let nearFullCard = statusColor(
+        normal: (255.0, 196.0, 0.0),
+        increased: (214.0, 148.0, 0.0)
+    )
+    static let nearFullCardEdge = statusColor(
+        normal: (214.0, 158.0, 0.0),
+        increased: (150.0, 100.0, 0.0)
     )
     /// A free card is an outline: the fleet at rest stays quiet, and colour is
     /// left for what is using a card or needs a person.

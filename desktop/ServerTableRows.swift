@@ -25,6 +25,17 @@ struct SchedulerNodeTableRow: View {
         isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == node.name }) : nil
     }
 
+    /// A node reports one reading for all its cards, and only once its compute
+    /// node can be observed; until then an allocation is a scheduling fact.
+    private func nodeCardLoad(allocated: Bool) -> CardLoad {
+        guard isSnapshotFresh else { return .stale }
+        return CardLoad(
+            state: allocated ? "RUNNING_MANAGED" : "AVAILABLE",
+            utilization: usage?.gpuUtilizationFraction,
+            memory: usage?.gpuMemoryFraction
+        )
+    }
+
     private var statusColor: Color {
         if !isSnapshotFresh || !node.schedulable { return DesignTokens.warning }
         return node.freeGPUs > 0 ? DesignTokens.success : DesignTokens.mutedInk
@@ -80,10 +91,7 @@ struct SchedulerNodeTableRow: View {
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(spacing: 3) {
                         ForEach(0..<node.totalGPUs, id: \.self) { index in
-                            CardPip(
-                                state: index < node.allocatedGPUs ? "RUNNING_MANAGED" : "AVAILABLE",
-                                size: 11
-                            )
+                            CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
                         }
                     }
                     .fixedSize()

@@ -894,7 +894,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     assert "pressureWidth * 4" in table_layout
 
     assert "EndpointTableLayout.tier(width:" in dashboard_source
-    assert "LazyVStack(spacing: 0)" in dashboard_source
+    assert "LazyVStack(spacing: EndpointTableLayout.groupSpacing)" in dashboard_source
     # One scroller for the fleet: a group is as long as it is, and the table
     # fills the window.  A cap per group left half a window empty beside a list
     # that had to be scrolled.
