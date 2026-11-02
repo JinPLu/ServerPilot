@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 4.2.0 - 2026-11-02
 
 - Fix per-server GPU utilization trends to average all samples in each time interval instead of showing only the last reading.
 - **Fixes an issue from 4.1.2: a task's last-seen process time could be wrong.** When a server's clock differed from this machine's, a process started soon after handover might not count as the task's, so the task card's time without a process and the release confirmation could mislead. The check now uses when ServerPilot first saw the process. The value is display only and never affected release or reclaim.
