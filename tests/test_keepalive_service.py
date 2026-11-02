@@ -13,7 +13,7 @@ from serverpilot.models import (
     ProcessObservation,
     TelemetryCurrent,
 )
-from serverpilot.schemas import EndpointUpdate, LeaseObservedBind, RequestCreate
+from serverpilot.schemas import EndpointUpdate, LeaseObservedBind, ProcessInput, RequestCreate
 from serverpilot.service import BrokerError, BrokerService
 from serverpilot.timeutil import utcnow
 from tests.helpers import (
@@ -962,6 +962,71 @@ def test_a_new_lease_never_inherits_the_previous_holders_process_time(service, a
         observation(count=1, processes=[process_for_gpu(gpu_uuid, pid=4002)])
     )
     assert last_process(second) is not None
+
+
+def _skewed_process(gpu_uuid: str, *, pid: int, seconds: int) -> ProcessInput:
+    """A process whose start time is read off a server clock this far from ours."""
+
+    return process_for_gpu(gpu_uuid, pid=pid).model_copy(
+        update={"process_started_at": utcnow() + timedelta(seconds=seconds)}
+    )
+
+
+def _claim_one(service, admin, task: str) -> str:  # noqa: ANN001
+    claimed = service.create_request(
+        admin,
+        RequestCreate.model_validate(
+            {
+                "project_id": "project-a",
+                "task_ref": task,
+                "purpose": task,
+                "constraints": {"gpu_count": 1},
+            }
+        ),
+        idempotency_key=task,
+    )
+    assert claimed["lease"] is not None
+    return claimed["lease"]["id"]
+
+
+def _last_process(service, admin, lease_id: str) -> str | None:  # noqa: ANN001
+    data = service.snapshot(admin)["data"]
+    payload = next(item for item in data["leases"] if item["id"] == lease_id)
+    return payload["last_process_observed_at"]
+
+
+def test_a_server_clock_behind_ours_does_not_hide_a_holders_process(service, admin) -> None:
+    """A job started right after handover reads as older than the lease over there."""
+
+    service.ingest_observation(observation(count=1))
+    lease_id = _claim_one(service, admin, "behind-clock")
+
+    service.ingest_observation(
+        observation(
+            count=1, processes=[_skewed_process("GPU-endpoint-a-0", pid=5001, seconds=-232)]
+        )
+    )
+
+    assert _last_process(service, admin, lease_id) is not None
+
+
+def test_a_server_clock_ahead_of_ours_does_not_lend_the_last_jobs_time(service, admin) -> None:
+    """The previous job's start reads as newer than the lease; it still is not this holder's."""
+
+    service.ingest_observation(observation(count=1))
+    first = _claim_one(service, admin, "ahead-first")
+    service.ingest_observation(
+        observation(
+            count=1, processes=[_skewed_process("GPU-endpoint-a-0", pid=5002, seconds=600)]
+        )
+    )
+    age_out_processes(service)
+    service.ingest_observation(observation(count=1))
+    service.release_lease(admin, first, reason="done", idempotency_key="ahead-release")
+
+    second = _claim_one(service, admin, "ahead-second")
+
+    assert _last_process(service, admin, second) is None
 
 
 def _backdate_workload_release(service, lease_id: str, seconds: int) -> None:  # noqa: ANN001

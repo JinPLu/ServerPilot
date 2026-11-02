@@ -4454,14 +4454,16 @@ class BrokerService:
             # Deliberately not the current-process set: the moment this matters
             # is the moment a lease looks empty, and a process that has gone is
             # exactly the one whose timing has to survive. The bound is when
-            # each process *started*, not when it was last seen: only a process
-            # begun after the cards were handed over can be this holder's, and
+            # each process was *first seen*, not last seen: only a process that
+            # appeared after the cards were handed over can be this holder's, and
             # a card is routinely re-let seconds after its previous job -- or
-            # after ServerPilot's own keepalive worker -- stopped.
+            # after ServerPilot's own keepalive worker -- stopped. Its reported
+            # start time cannot answer this: that is the server's clock, and
+            # the lease's is this machine's.
             own_processes = [
                 and_(
                     ProcessObservation.gpu_id == gpu_id,
-                    ProcessObservation.process_started_at >= started,
+                    ProcessObservation.first_seen_at >= started,
                 )
                 for gpu_id, lease in lease_by_gpu.items()
                 if (started := _as_utc(lease.issued_at)) is not None
