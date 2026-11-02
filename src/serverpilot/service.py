@@ -4970,7 +4970,8 @@ class BrokerService:
         def samples(
             session: Session, now: datetime, window_seconds: int, bucket_seconds: int
         ) -> list[tuple[str, int, float, int]]:
-            bucket = cast(func.strftime("%s", TelemetrySnapshot.observed_at), Integer) / bucket_seconds
+            # Group by integer buckets in SQL so different sample times are averaged together.
+            bucket = cast(func.strftime("%s", TelemetrySnapshot.observed_at), Integer) // bucket_seconds
             rows = session.execute(
                 select(
                     GPUDevice.endpoint_id,

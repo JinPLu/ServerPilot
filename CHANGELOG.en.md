@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- Fix per-server GPU utilization trends to average all samples in each time interval instead of showing only the last reading.
+
 ## 4.1.2 - 2026-11-02
 
 - **Held cards are no longer falsely reported as an ownership conflict.** A probe two seconds or more slower than usual, such as the first connection after a daemon restart, made the same keepalive process look new, turning its card red and unclaimable for a minute or two. The start time was calculated as local time minus the process's age, so the probe's own duration counted against it. It now comes straight from the server, so probe speed no longer matters. A few cards may flash once more on the first collection after upgrading.

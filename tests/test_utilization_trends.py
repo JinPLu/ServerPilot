@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from fastapi.testclient import TestClient
 from sqlalchemy import delete, select
@@ -25,10 +25,15 @@ def _sample(gpu_id: str, at: datetime, utilization: int | None) -> TelemetrySnap
     )
 
 
-def _seed(service: BrokerService, rows: dict[str, list[tuple[timedelta, int | None]]]) -> None:
+def _seed(
+    service: BrokerService,
+    rows: dict[str, list[tuple[timedelta, int | None]]],
+    *,
+    now: datetime | None = None,
+) -> None:
     """Replace history with samples per endpoint, one card at a time."""
 
-    now = utcnow()
+    now = now or utcnow()
     with service.database.session() as session:
         session.execute(delete(TelemetrySnapshot))
         for endpoint_id, samples in rows.items():
@@ -57,6 +62,61 @@ def test_the_fleet_line_weighs_cards_not_servers(service, admin) -> None:
     assert _values(data["fleet"]) == [60.0]
     assert _values(data["servers"]["endpoint-a"]) == [90.0]
     assert _values(data["servers"]["endpoint-b"]) == [0.0]
+
+
+def test_server_buckets_average_readings_from_different_seconds(service, admin, monkeypatch) -> None:
+    """Keep every sample in a bucket, separately for each server and ignoring nulls."""
+
+    now = datetime(2026, 11, 2, 0, 4, tzinfo=UTC)
+    monkeypatch.setattr("serverpilot.service.utcnow", lambda: now)
+    service.ingest_observation(observation("endpoint-a", count=1))
+    service.ingest_observation(observation("endpoint-b", count=2))
+    _seed(
+        service,
+        {
+            "endpoint-a": [(timedelta(seconds=230), 0), (timedelta(seconds=170), 100)],
+            "endpoint-b": [
+                (timedelta(seconds=220), 20),
+                (timedelta(seconds=160), 40),
+                (timedelta(seconds=150), None),
+            ],
+        },
+        now=now,
+    )
+
+    data = service.utilization_trends(admin)["data"]
+
+    assert _values(data["servers"]["endpoint-a"]) == [50.0]
+    assert _values(data["servers"]["endpoint-b"]) == [30.0]
+    assert _values(data["fleet"]) == [40.0]
+
+
+def test_server_buckets_keep_readings_on_opposite_sides_of_a_boundary_separate(
+    service, admin, monkeypatch
+) -> None:
+    now = datetime(2026, 11, 2, 0, 6, 30, tzinfo=UTC)
+    monkeypatch.setattr("serverpilot.service.utcnow", lambda: now)
+    service.ingest_observation(observation("endpoint-a", count=1))
+    _seed(
+        service,
+        {
+            "endpoint-a": [
+                (timedelta(seconds=211), 10),  # 00:02:59
+                (timedelta(seconds=210), 20),  # 00:03:00
+                (timedelta(seconds=31), 80),  # 00:05:59
+            ]
+        },
+        now=now,
+    )
+
+    points = service.utilization_trends(admin)["data"]["servers"]["endpoint-a"]["points"]
+    buckets = {
+        datetime.fromisoformat(point["at"]): point["gpu_utilization_pct"] for point in points
+    }
+
+    assert buckets[datetime(2026, 11, 2, 0, 0, tzinfo=UTC)] == 10.0
+    assert buckets[datetime(2026, 11, 2, 0, 3, tzinfo=UTC)] == 50.0
+    assert buckets[datetime(2026, 11, 2, 0, 6, tzinfo=UTC)] is None
 
 
 def test_a_gap_stays_a_gap(service, admin) -> None:
