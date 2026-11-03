@@ -10,18 +10,16 @@ struct DashboardView: View {
     @ObservedObject var store: BrokerStore
     let addServer: () -> Void
     let claimGPU: () -> Void
-    let claimEndpoint: (String) -> Void
     let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
     @Binding var selectedSection: DashboardSection
     let selectedGroupID: String?
     @Binding var resourceFilter: EndpointFilter
-    let selectGPU: (GPURecord) -> Void
 
     var body: some View {
         VStack(spacing: 0) {
             FeedbackBanner(store: store)
-            if store.feedback == nil, store.freshness == .stale {
+            if store.freshness == .stale {
                 NoticeBanner(message: "本机服务响应中断，显示上次数据。", color: DesignTokens.danger, icon: "wifi.exclamationmark")
                     .padding(.horizontal, 24)
                     .padding(.bottom, 10)
@@ -39,10 +37,8 @@ struct DashboardView: View {
                         store: store,
                         groupID: selectedGroupID,
                         filter: $resourceFilter,
-                        claimEndpoint: claimEndpoint,
                         manageGroups: manageGroups,
-                        openEndpoint: openEndpoint,
-                        selectGPU: selectGPU
+                        openEndpoint: openEndpoint
                     )
                 case .leases:
                     ResourceUsageDashboard(store: store, claimGPU: claimGPU)

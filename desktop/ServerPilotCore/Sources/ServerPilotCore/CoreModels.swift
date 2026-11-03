@@ -563,6 +563,21 @@ public struct ServerGroupRecord: Identifiable, Equatable, Sendable {
     }
 }
 
+/// One node's readings, whole fractions of what it has.
+public struct ResourceNodeUsage: Equatable, Sendable {
+    public let gpuUtilization: Double?
+    public let gpuMemory: Double?
+    public let cpu: Double?
+    public let memory: Double?
+
+    init(raw: [String: Any]) {
+        gpuUtilization = raw.optionalPercent("gpu_utilization_pct")
+        gpuMemory = raw.optionalPercent("gpu_memory_used_pct")
+        cpu = raw.optionalPercent("cpu_utilization_pct")
+        memory = raw.optionalPercent("memory_used_pct")
+    }
+}
+
 public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
     public let id: String
     public let fresh: Bool
@@ -573,6 +588,9 @@ public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
     public let gpuMemoryFraction: Double?
     public let cpuUtilizationFraction: Double?
     public let memoryFraction: Double?
+    /// The newest reading however old it is, to show greyed once `fresh` is false.
+    /// Nothing may decide from it; the fractions above are nil for a quiet node.
+    public let lastUsage: ResourceNodeUsage?
 
     public init?(raw: [String: Any]) {
         guard let id = raw.string("node_id") else { return nil }
@@ -586,6 +604,7 @@ public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
         gpuMemoryFraction = fresh ? usage.optionalPercent("gpu_memory_used_pct") : nil
         cpuUtilizationFraction = fresh ? usage.optionalPercent("cpu_utilization_pct") : nil
         memoryFraction = fresh ? usage.optionalPercent("memory_used_pct") : nil
+        lastUsage = (raw["last_usage"] as? [String: Any]).map(ResourceNodeUsage.init(raw:))
     }
 }
 

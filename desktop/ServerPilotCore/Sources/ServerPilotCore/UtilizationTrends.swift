@@ -28,6 +28,11 @@ public struct UtilizationSeries: Equatable, Sendable {
 
     public var hasData: Bool { latest != nil }
 
+    /// The reading to call current: a value hours old is history, not a figure for now.
+    public var current: Double? {
+        points.suffix(2).last(where: { $0 != nil }) ?? nil
+    }
+
     /// A stretch with no collection between two readings. Readings on only one
     /// side have nothing to join, so they are not a gap.
     public struct Gap: Equatable, Sendable {

@@ -106,6 +106,12 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         return true
     }
 
+    /// Minimized or fully covered is not being looked at, any more than closed is.
+    func windowDidChangeOcclusionState(_ notification: Notification) {
+        guard let window else { return }
+        brokerStore.windowVisible = window.occlusionState.contains(.visible)
+    }
+
     func windowWillClose(_ notification: Notification) {
         brokerStore.windowVisible = false
         NSApp.setActivationPolicy(.accessory)
@@ -118,12 +124,21 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         NSApp.activate(ignoringOtherApps: true)
     }
 
+    @objc private func openSettings() {
+        showMainWindow()
+        NotificationCenter.default.post(name: .serverPilotOpenSettings, object: nil)
+    }
+
     private func configureMainMenu() {
         let mainMenu = NSMenu()
 
         let appMenuItem = NSMenuItem()
         mainMenu.addItem(appMenuItem)
         let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "设置…", action: #selector(openSettings), keyEquivalent: ",").target = self
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "隐藏 ServerPilot", action: #selector(NSApplication.hide(_:)), keyEquivalent: "h")
+        appMenu.addItem(.separator())
         appMenu.addItem(withTitle: "退出 ServerPilot", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appMenuItem.submenu = appMenu
 
@@ -135,6 +150,14 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
         editMenu.addItem(withTitle: "粘贴", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "全选", action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
         editMenuItem.submenu = editMenu
+
+        let windowMenuItem = NSMenuItem()
+        mainMenu.addItem(windowMenuItem)
+        let windowMenu = NSMenu(title: "窗口")
+        windowMenu.addItem(withTitle: "最小化", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "关闭窗口", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
+        windowMenuItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
 
         NSApp.mainMenu = mainMenu
     }

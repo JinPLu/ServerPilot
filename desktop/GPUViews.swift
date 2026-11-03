@@ -225,7 +225,7 @@ struct GPUMemoryStatusRow: View {
 
     private func memoryPressureColor(_ gpu: GPURecord) -> Color {
         guard gpu.memoryUsedMiB != nil, gpu.totalVRAMMiB > 0 else { return DesignTokens.mutedInk }
-        return pressureColor(gpu.memoryFraction)
+        return metricColor(.gpuMemory, gpu.memoryFraction)
     }
 }
 
@@ -252,7 +252,7 @@ struct GPUDetailSheet: View {
                 DetailCallout(
                     icon: "info.circle.fill",
                     color: DesignTokens.warning,
-                    message: "任务仍保持 GPU 指派，采集到的计算进程与此前观测不同。worker 重启或替换会出现这一提示，并不表示 GPU 硬件故障；仅在实际任务-GPU 指派需要更正时，才到“使用情况”调整分配。"
+                    message: "任务仍保持 GPU 指派，采集到的计算进程与此前观测不同。worker 重启或替换会出现这一提示，并不表示 GPU 硬件故障；仅在实际任务-GPU 指派需要更正时，才到“任务”页调整分配。"
                 )
             } else if let reason = gpu.stateReason {
                 DetailCallout(icon: "info.circle.fill", color: stateColor, message: localizedStateReason(reason))
@@ -310,7 +310,7 @@ struct GPUDetailSheet: View {
         switch gpu.state {
         case "AVAILABLE": return DesignTokens.success
         case "HELD", "LEASED_IDLE", "KEEPALIVE": return DesignTokens.interaction
-        case "RUNNING_MANAGED": return DesignTokens.interaction
+        case "RUNNING_MANAGED": return DesignTokens.loadBlue
         case "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED": return DesignTokens.warning
         default: return DesignTokens.danger
         }

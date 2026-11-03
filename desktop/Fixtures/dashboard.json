@@ -218,6 +218,12 @@
         "gpu_memory_used_pct": 87.99641927083333,
         "cpu_utilization_pct": 55,
         "memory_used_pct": 71.0
+       },
+       "last_usage": {
+        "gpu_utilization_pct": 97.0,
+        "gpu_memory_used_pct": 87.99641927083333,
+        "cpu_utilization_pct": 55,
+        "memory_used_pct": 71.0
        }
       }
      ]
@@ -362,6 +368,12 @@
         "gpu_memory_used_pct": 8.87451171875,
         "cpu_utilization_pct": 92,
         "memory_used_pct": 64.0
+       },
+       "last_usage": {
+        "gpu_utilization_pct": 11.875,
+        "gpu_memory_used_pct": 8.87451171875,
+        "cpu_utilization_pct": 92,
+        "memory_used_pct": 64.0
        }
       }
      ]
@@ -390,12 +402,12 @@
      "created_at": "2026-11-01T16:49:30.057666+00:00",
      "updated_at": "2026-11-01T16:49:30.600188+00:00",
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
-      "active_gpu_count": 0,
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
+      "active_gpu_count": 8,
       "error_gpu_count": 0,
       "eligible_idle_gpu_count": 0,
       "reasons": []
@@ -502,8 +514,14 @@
         "infer-03:GPU-infer-03-7"
        ],
        "usage": {
-        "gpu_utilization_pct": 0.0,
-        "gpu_memory_used_pct": 0.9969075520833334,
+        "gpu_utilization_pct": 65.0,
+        "gpu_memory_used_pct": 80.0,
+        "cpu_utilization_pct": 4,
+        "memory_used_pct": 9.0
+       },
+       "last_usage": {
+        "gpu_utilization_pct": 65.0,
+        "gpu_memory_used_pct": 80.0,
         "cpu_utilization_pct": 4,
         "memory_used_pct": 9.0
        }
@@ -601,7 +619,39 @@
       "error_code": null,
       "last_error": null
      },
-     "resource_nodes": []
+     "resource_nodes": [
+      {
+       "node_id": "self",
+       "observed_at": "2026-11-01T16:49:30.359945+00:00",
+       "fresh": false,
+       "last_attempt_at": "2026-11-01T16:49:30.359945+00:00",
+       "error_code": "auth_failed",
+       "message": null,
+       "host_telemetry": null,
+       "gpu_ids": [
+        "spare-01:GPU-spare-01-0",
+        "spare-01:GPU-spare-01-1",
+        "spare-01:GPU-spare-01-2",
+        "spare-01:GPU-spare-01-3",
+        "spare-01:GPU-spare-01-4",
+        "spare-01:GPU-spare-01-5",
+        "spare-01:GPU-spare-01-6",
+        "spare-01:GPU-spare-01-7"
+       ],
+       "usage": {
+        "gpu_utilization_pct": null,
+        "gpu_memory_used_pct": null,
+        "cpu_utilization_pct": null,
+        "memory_used_pct": null
+       },
+       "last_usage": {
+        "gpu_utilization_pct": 18.0,
+        "gpu_memory_used_pct": 22.0,
+        "cpu_utilization_pct": 6.0,
+        "memory_used_pct": 14.0
+       }
+      }
+     ]
     },
     {
      "id": "train-01",
@@ -739,6 +789,12 @@
         "train-01:GPU-train-01-7"
        ],
        "usage": {
+        "gpu_utilization_pct": 0.0,
+        "gpu_memory_used_pct": 3.9990234375,
+        "cpu_utilization_pct": 2,
+        "memory_used_pct": 15.0
+       },
+       "last_usage": {
         "gpu_utilization_pct": 0.0,
         "gpu_memory_used_pct": 3.9990234375,
         "cpu_utilization_pct": 2,
@@ -887,6 +943,12 @@
         "gpu_memory_used_pct": 54.24957275390625,
         "cpu_utilization_pct": 41,
         "memory_used_pct": 38.0
+       },
+       "last_usage": {
+        "gpu_utilization_pct": 65.0,
+        "gpu_memory_used_pct": 54.24957275390625,
+        "cpu_utilization_pct": 41,
+        "memory_used_pct": 38.0
        }
       }
      ]
@@ -1027,6 +1089,12 @@
         "train-03:GPU-train-03-7"
        ],
        "usage": {
+        "gpu_utilization_pct": 0.0,
+        "gpu_memory_used_pct": 0.999755859375,
+        "cpu_utilization_pct": 6,
+        "memory_used_pct": 12.0
+       },
+       "last_usage": {
         "gpu_utilization_pct": 0.0,
         "gpu_memory_used_pct": 0.999755859375,
         "cpu_utilization_pct": 6,
@@ -4158,7 +4226,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4166,9 +4234,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4191,11 +4259,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4215,7 +4283,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4223,9 +4291,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4248,11 +4316,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4272,7 +4340,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4280,9 +4348,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4305,11 +4373,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4329,7 +4397,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4337,9 +4405,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4362,11 +4430,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4386,7 +4454,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4394,9 +4462,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4419,11 +4487,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4443,7 +4511,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4451,9 +4519,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4476,11 +4544,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4500,7 +4568,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4508,9 +4576,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4533,11 +4601,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },
@@ -4557,7 +4625,7 @@
      "labels": [],
      "health": "OK",
      "present": true,
-     "state": "AVAILABLE",
+     "state": "KEEPALIVE",
      "state_reason": null,
      "first_seen_at": "2026-11-01T16:49:30.353939+00:00",
      "last_seen_at": "2026-11-01T16:49:30.600078+00:00",
@@ -4565,9 +4633,9 @@
      "telemetry": {
       "observed_at": "2026-11-01T16:49:30.600078+00:00",
       "collected_at": "2026-11-01T16:49:30.600188+00:00",
-      "memory_used_mib": 245,
+      "memory_used_mib": 19660,
       "memory_free_mib": 24331,
-      "gpu_utilization_pct": 0,
+      "gpu_utilization_pct": 65,
       "memory_utilization_pct": 1,
       "temperature_c": 48,
       "power_watts": 150.0,
@@ -4590,11 +4658,11 @@
      "processes": [],
      "lease": null,
      "keepalive": {
-      "configured": false,
-      "policy": "disabled",
-      "desired": "OFF",
-      "actual": "OFF",
-      "state": "OFF",
+      "configured": true,
+      "policy": "idle_keepalive",
+      "desired": "ON",
+      "actual": "ON",
+      "state": "ON",
       "reason": null,
       "lease_id": null
      },

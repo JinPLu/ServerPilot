@@ -22,6 +22,12 @@ struct UtilizationTrendsTests {
         #expect(UtilizationSeries(windowSeconds: 3600, points: [nil, nil]).hasData == false)
     }
 
+    @Test func aReadingHoursOldIsNotTheCurrentOne() {
+        #expect(UtilizationSeries(windowSeconds: 3600, points: [0.4, nil, 0.2]).current == 0.2)
+        #expect(UtilizationSeries(windowSeconds: 3600, points: [0.4, 0.2, nil]).current == 0.2)
+        #expect(UtilizationSeries(windowSeconds: 3600, points: [0.4, nil, nil]).current == nil)
+    }
+
     @Test func aGapIsOnlyWhatLiesBetweenTwoReadings() {
         let line = UtilizationSeries(windowSeconds: 3600, points: [nil, 0.5, 0.6, nil, nil, 0.4, nil])
         #expect(line.gaps == [

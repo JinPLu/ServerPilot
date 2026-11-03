@@ -10,7 +10,7 @@ import Charts
 /// glance; comparing machines is the server table's job.
 struct OverviewDashboard: View {
     private static let shownAlerts = 3
-    private static let tileMinimumWidth: CGFloat = 228
+    private static let tileMinimumWidth: CGFloat = 320
 
     @ObservedObject var store: BrokerStore
     let openEndpoint: (EndpointRecord) -> Void
@@ -23,19 +23,16 @@ struct OverviewDashboard: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                statusChips
                 ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 14) {
-                        capacity.frame(width: 300)
-                        trend.frame(minWidth: 280)
-                        attention.frame(width: 320)
+                    HStack(alignment: .top, spacing: 12) {
+                        capacity.frame(minWidth: 240, maxWidth: .infinity)
+                        trend.frame(minWidth: 240, maxWidth: .infinity)
+                        attention.frame(minWidth: 240, maxWidth: .infinity)
                     }
-                    VStack(spacing: 14) {
-                        HStack(alignment: .top, spacing: 14) {
-                            capacity.frame(width: 300)
-                            attention
-                        }
+                    VStack(spacing: 12) {
+                        capacity
                         trend
+                        attention
                     }
                 }
                 ForEach(fleets) { fleet in
@@ -80,6 +77,13 @@ struct OverviewDashboard: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 28)
                     }
+                } else {
+                    HStack {
+                        Spacer(minLength: 0)
+                        CardLegend()
+                            .font(Typography.annotation)
+                            .foregroundStyle(DesignTokens.mutedInk)
+                    }
                 }
             }
             .padding(.horizontal, 24)
@@ -90,55 +94,6 @@ struct OverviewDashboard: View {
 
     // ---- the summary a person reads first ----
 
-    private struct StatusChip: Identifiable {
-        let load: CardLoad
-        let count: Int
-        var id: String { load.rawValue }
-
-        var filter: EndpointFilter {
-            switch load {
-            case .free: .available
-            case .low, .nearFull, .unmeasured: .taskOccupied
-            case .fault: .all
-            case .stale: .connectionFailed
-            }
-        }
-    }
-
-    /// One chip per thing a square can say, so the row doubles as the squares' legend.
-    private var chips: [StatusChip] {
-        let gpus = store.snapshot.operationalGPUs
-        return CardLoad.allCases
-            .map { load in StatusChip(load: load, count: gpus.filter { $0.load == load }.count) }
-            .filter { $0.count > 0 }
-    }
-
-    private var statusChips: some View {
-        HStack(spacing: 8) {
-            ForEach(chips) { chip in
-                Button { navigate(.resources, chip.filter) } label: {
-                    HStack(spacing: 7) {
-                        CardPip(load: chip.load, size: 10)
-                        Text(chip.load.label).foregroundStyle(DesignTokens.ink)
-                        Text("\(chip.count)")
-                            .fontWeight(.semibold)
-                            .monospacedDigit()
-                            .foregroundStyle(DesignTokens.ink)
-                    }
-                    .font(.body)
-                    .padding(.horizontal, 12)
-                    .frame(height: 30)
-                    .background(DesignTokens.surface, in: Capsule())
-                    .overlay(Capsule().strokeBorder(DesignTokens.tileStroke, lineWidth: 1))
-                    .contentShape(Capsule())
-                }
-                .buttonStyle(.plain)
-                .help("在服务器页查看")
-                .accessibilityLabel("\(chip.load.label) \(chip.count) 张，在服务器页查看")
-            }
-        }
-    }
-
     private var largestSingleApply: Int? {
         let direct = store.snapshot.operationalEndpoints.map { endpoint -> Int in
             guard endpoint.monitorStatus == "ONLINE" else { return 0 }
@@ -148,38 +103,49 @@ struct OverviewDashboard: View {
         return (direct + delegated).max()
     }
 
+    /// Whether the numbers on this page say anything about now.
+    private var isCurrent: Bool { store.freshness == .fresh }
+
     private var freeFraction: Double {
-        summary.totalGPUs > 0 ? Double(summary.availableGPUs) / Double(summary.totalGPUs) : 0
+        guard isCurrent, summary.totalGPUs > 0 else { return 0 }
+        return Double(summary.availableGPUs) / Double(summary.totalGPUs)
     }
 
     private var capacity: some View {
         Button { navigate(.resources, .available) } label: {
             HomeCard(padding: 16) {
-                HStack(spacing: 14) {
-                    ZStack {
-                        Circle().stroke(DesignTokens.track, lineWidth: 12)
-                        Circle()
-                            .trim(from: 0, to: freeFraction)
-                            .stroke(DesignTokens.success, style: StrokeStyle(lineWidth: 12, lineCap: .round))
-                            .rotationEffect(.degrees(-90))
-                    }
-                    .frame(width: 92, height: 92)
-                    .padding(6)
-                    .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text("空闲 GPU")
-                            .font(Typography.identity.weight(.semibold))
-                            .foregroundStyle(DesignTokens.success)
-                        Text("\(summary.availableGPUs)")
+                VStack(alignment: .leading, spacing: 0) {
+                    Text("空闲 GPU")
+                        .font(Typography.identity)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                    HStack(alignment: .firstTextBaseline, spacing: 6) {
+                        Text(isCurrent ? "\(summary.availableGPUs)" : "—")
                             .font(Typography.display)
                             .foregroundStyle(DesignTokens.ink)
-                            .lineLimit(1)
-                        Text(capacityCaption)
-                            .font(Typography.annotation)
+                        Text("/ \(summary.totalGPUs) 张")
+                            .font(.body)
+                            .monospacedDigit()
                             .foregroundStyle(DesignTokens.mutedInk)
-                            .lineLimit(2)
                     }
-                    Spacer(minLength: 0)
+                    .lineLimit(1)
+                    .padding(.top, 6)
+                    Spacer(minLength: 8)
+                    Capsule()
+                        .fill(DesignTokens.track)
+                        .frame(height: 8)
+                        .overlay(alignment: .leading) {
+                            GeometryReader { proxy in
+                                Capsule()
+                                    .fill(DesignTokens.ink)
+                                    .frame(width: proxy.size.width * freeFraction)
+                            }
+                        }
+                        .accessibilityHidden(true)
+                    Text(capacityCaption)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .lineLimit(1)
+                        .padding(.top, 10)
                 }
                 .frame(height: 124)
             }
@@ -188,7 +154,7 @@ struct OverviewDashboard: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("空闲 GPU")
-        .accessibilityValue("\(summary.availableGPUs) 张，共 \(summary.totalGPUs) 张")
+        .accessibilityValue(isCurrent ? "\(summary.availableGPUs) 张，共 \(summary.totalGPUs) 张" : "暂时无法确认")
         .accessibilityAddTraits(.isButton)
     }
 
@@ -200,23 +166,26 @@ struct OverviewDashboard: View {
 
     private var trend: some View {
         HomeCard(padding: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack(alignment: .firstTextBaseline, spacing: 10) {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("GPU 利用率")
-                        .font(Typography.identity.weight(.semibold))
-                        .foregroundStyle(DesignTokens.interaction)
-                    Text(percentageLabel(store.utilizationTrends.fleet?.latest))
-                        .font(Typography.pageTitle)
-                        .monospacedDigit()
-                        .foregroundStyle(DesignTokens.ink)
+                        .font(Typography.identity)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .fixedSize()
                     Spacer(minLength: 8)
                     ViewThatFits(in: .horizontal) {
                         trendCaption("近 24 小时\(uncollectedCaption.map { " · \($0)" } ?? "")")
                         trendCaption("近 24 小时")
                     }
                 }
+                Text(percentageLabel(isCurrent ? store.utilizationTrends.fleet?.current : nil))
+                    .font(Typography.display)
+                    .foregroundStyle(DesignTokens.ink)
+                    .lineLimit(1)
+                    .padding(.top, 6)
                 FleetTrendChart(series: store.utilizationTrends.fleet)
                     .frame(maxHeight: .infinity)
+                    .padding(.top, 6)
             }
             .frame(height: 124)
         }
@@ -240,45 +209,49 @@ struct OverviewDashboard: View {
         return "未采集 \(hours.formatted(.number.precision(.fractionLength(0...1)))) 小时"
     }
 
+    /// Only what a person has to act on.  A card coming free is good news: the
+    /// notification tells it, and the alerts page keeps it.
+    private var problems: [AlertRecord] {
+        openAlerts.filter { $0.category != .capacityAvailable }
+    }
+
     private var attention: some View {
         HomeCard(padding: 16) {
-            VStack(alignment: .leading, spacing: 8) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack {
-                    Text(openAlerts.isEmpty ? "需要处理" : "需要处理 · \(openAlerts.count)")
-                        .font(Typography.identity.weight(.semibold))
-                        .foregroundStyle(openAlerts.isEmpty ? DesignTokens.mutedInk : DesignTokens.warning)
+                    Text("需要处理")
+                        .font(Typography.identity)
+                        .foregroundStyle(DesignTokens.mutedInk)
                     Spacer()
-                    if openAlerts.count > Self.shownAlerts {
-                        Button("全部") { navigate(.alerts, .all) }
+                    if problems.count > Self.shownAlerts {
+                        Button("全部 \(problems.count)") { navigate(.alerts, .all) }
                             .buttonStyle(.link)
                             .font(Typography.annotation)
                     }
                 }
-                if openAlerts.isEmpty {
+                if problems.isEmpty {
                     Spacer(minLength: 0)
-                    Label("现在没有要处理的事", systemImage: "checkmark.circle")
+                    Label(
+                        isCurrent ? "现在没有要处理的事" : "暂时无法确认",
+                        systemImage: isCurrent ? "checkmark.circle" : "questionmark.circle"
+                    )
                         .font(.body)
                         .foregroundStyle(DesignTokens.mutedInk)
                     Spacer(minLength: 0)
                 } else {
-                    ForEach(openAlerts.prefix(Self.shownAlerts)) { alert in
+                    ForEach(problems.prefix(Self.shownAlerts)) { alert in
                         Button {
                             navigate(alert.category == .serverAbnormal ? .resources : .leases, .all)
                         } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Circle()
-                                    .fill(alert.category == .serverAbnormal ? DesignTokens.danger : DesignTokens.warning)
+                                    .fill(alert.category == .serverAbnormal ? DesignTokens.danger : DesignTokens.nearFullCard)
                                     .frame(width: 8, height: 8)
-                                VStack(alignment: .leading, spacing: 1) {
-                                    Text(alert.category.title)
-                                        .font(Typography.annotation)
-                                        .foregroundStyle(DesignTokens.mutedInk)
-                                    Text(alert.message)
-                                        .font(Typography.identity)
-                                        .foregroundStyle(DesignTokens.ink)
-                                        .lineLimit(1)
-                                        .truncationMode(.tail)
-                                }
+                                Text(alert.message)
+                                    .font(.body)
+                                    .foregroundStyle(DesignTokens.ink)
+                                    .lineLimit(1)
+                                    .truncationMode(.tail)
                                 Spacer(minLength: 0)
                             }
                             .contentShape(Rectangle())
@@ -286,8 +259,8 @@ struct OverviewDashboard: View {
                         .buttonStyle(.plain)
                         .help(alert.message)
                     }
+                    Spacer(minLength: 0)
                 }
-                Spacer(minLength: 0)
             }
             .frame(height: 124)
         }
@@ -336,16 +309,10 @@ private struct FleetTrendChart: View {
                 ForEach(samples) { sample in
                     AreaMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(
-                            LinearGradient(
-                                colors: [DesignTokens.interaction.opacity(0.18), DesignTokens.interaction.opacity(0.02)],
-                                startPoint: .top,
-                                endPoint: .bottom
-                            )
-                        )
+                        .foregroundStyle(DesignTokens.loadBlue.opacity(DesignTokens.Alpha.fill))
                     LineMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(DesignTokens.interaction)
+                        .foregroundStyle(DesignTokens.loadBlue)
                         .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
                 }
                 ForEach(gaps, id: \.beforeIndex) { gap in
@@ -360,21 +327,10 @@ private struct FleetTrendChart: View {
             .chartXAxis(.hidden)
             .chartXScale(domain: 0...max((series?.points.count ?? 1) - 1, 1))
             .chartYScale(domain: 0...100)
-            .chartYAxis {
-                AxisMarks(position: .trailing, values: [0, 50, 100]) { value in
-                    AxisGridLine().foregroundStyle(DesignTokens.surfaceStroke)
-                    AxisValueLabel {
-                        if let percent = value.as(Int.self) {
-                            Text("\(percent)%")
-                                .font(Typography.annotation)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                        }
-                    }
-                }
-            }
+            .chartYAxis(.hidden)
             .accessibilityLabel("近 24 小时全部 GPU 的平均利用率")
 #else
-            Sparkline(points: series?.points ?? [], color: DesignTokens.interaction, lineWidth: 2)
+            Sparkline(points: series?.points ?? [], color: DesignTokens.loadBlue, lineWidth: 2)
 #endif
         } else {
             Text("暂无历史数据")
@@ -412,71 +368,62 @@ private struct ServerTile: View {
         return store.snapshot.leases.filter { !ids.isDisjoint(with: $0.gpuIDs) }
     }
 
-    /// What the machine is doing, in the words of whoever is doing it.
-    private var note: String {
-        if let lease = leases.first(where: { $0.runtimeState == "RUNNING" }) ?? leases.first {
-            let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
-            return "\(task) · \(lease.holderLabel)"
-        }
-        if let capacity = endpoint.schedulerCapacity { return "\(capacity.freeGPUCount) 张空闲" }
-        if store.freshness != .fresh || endpoint.monitorStatus != "ONLINE" {
-            return endpoint.monitorStatus == "ONLINE" ? "显示上次数据" : endpointFooterMessage(endpoint)
-        }
-        if gpus.contains(where: { $0.state == "BUSY_UNMANAGED" }) { return "不归 ServerPilot 管理的进程" }
-        return endpointGPUModelSummary(gpus)
-    }
-
-    private var background: Color {
-        switch status.tone {
-        case .fault: DesignTokens.dangerWash
-        case .attention: DesignTokens.warningWash
-        default: DesignTokens.surface
-        }
+    private var activity: ServerActivity {
+        ServerActivity(
+            endpoint: endpoint,
+            gpus: gpus,
+            leases: leases,
+            status: status,
+            isSnapshotFresh: store.freshness == .fresh
+        )
     }
 
     var body: some View {
         Button(action: open) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(endpoint.connectionAddress)
-                    .font(Typography.rowPrimary.weight(.semibold))
-                    .foregroundStyle(DesignTokens.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                Text(status.word)
-                    .font(Typography.annotation)
-                    .foregroundStyle(status.color)
-                    .lineLimit(1)
-                Text(note)
-                    .font(Typography.annotation)
-                    .foregroundStyle(DesignTokens.mutedInk)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                Spacer(minLength: 0)
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(spacing: 9) {
+                    Circle()
+                        .fill(endpointConnectionColor(endpoint, isSnapshotFresh: store.freshness == .fresh))
+                        .frame(width: 8, height: 8)
+                        .accessibilityHidden(true)
+                    Text(endpoint.connectionAddress)
+                        .font(Typography.rowPrimary)
+                        .foregroundStyle(DesignTokens.ink)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .layoutPriority(1)
+                    Spacer(minLength: 8)
+                    Text(activity.primary)
+                        .font(Typography.annotation)
+                        .foregroundStyle(activity.color)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
+                }
                 HStack(spacing: 10) {
                     if gpus.isEmpty, let capacity = endpoint.schedulerCapacity {
                         ProgressView(value: Double(capacity.freeGPUCount), total: Double(max(endpoint.nodes.reduce(0) { $0 + $1.totalGPUs }, capacity.freeGPUCount, 1)))
-                            .tint(DesignTokens.success)
+                            .tint(DesignTokens.quietBar)
                             .accessibilityHidden(true)
                     } else {
                         CardSquares(gpus: gpus, size: 13)
                             .fixedSize()
                     }
                     if let line = store.utilizationTrends.servers[endpoint.id], line.hasData {
-                        Sparkline(points: line.points, color: status.tone == .working ? DesignTokens.interaction : DesignTokens.quietBar)
+                        Sparkline(points: line.points, color: DesignTokens.quietBar)
                             .frame(minWidth: 20, maxWidth: .infinity)
-                            .frame(height: 20)
+                            .frame(height: 16)
                     } else {
                         Spacer(minLength: 0)
                     }
                 }
+                .frame(height: 16)
             }
-            .padding(.horizontal, 13)
-            .padding(.vertical, 11)
-            .frame(height: 104)
+            .padding(.horizontal, 16)
+            .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(background, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel + 4, style: .continuous))
+            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Radius.panel + 4, style: .continuous)
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
                     .strokeBorder(hovering ? DesignTokens.surfaceStroke : DesignTokens.tileStroke, lineWidth: 1)
             )
             .contentShape(Rectangle())
@@ -490,7 +437,7 @@ private struct ServerTile: View {
         .accessibilityAction { open() }
         .accessibilityIdentifier("overview-server-\(endpoint.id)")
         .accessibilityLabel("服务器 \(endpoint.connectionAddress)")
-        .accessibilityValue("\(status.word)，\(note)，\(gpus.filter(\.isPubliclyAvailable).count) 张空闲，共 \(gpus.count) 张")
+        .accessibilityValue("\(status.word)，\(activity.primary)，\(gpus.filter(\.isPubliclyAvailable).count) 张空闲，共 \(gpus.count) 张")
     }
 }
 
@@ -511,7 +458,7 @@ struct CardPip: View {
                 shape.fill(DesignTokens.nearFullCard)
                     .overlay(shape.strokeBorder(DesignTokens.nearFullCardEdge, lineWidth: 1))
             case .low:
-                shape.fill(DesignTokens.interaction)
+                shape.fill(DesignTokens.loadBlue)
             case .unmeasured:
                 shape.fill(DesignTokens.unmeasuredCard)
             case .fault:

@@ -125,7 +125,7 @@ private struct TaskCard: View {
                                     .help(title)
                                 Text(stateWord)
                                     .font(Typography.annotation)
-                                    .foregroundStyle(isRunning ? DesignTokens.interaction : DesignTokens.warning)
+                                    .foregroundStyle(isRunning ? DesignTokens.loadBlue : DesignTokens.warning)
                                     .fixedSize()
                             }
                             Text("\(lease.holderLabel) · \(lease.projectID)")
@@ -174,7 +174,7 @@ private struct TaskCard: View {
                             }
                             Sparkline(
                                 points: serverTrend.points,
-                                color: isRunning ? DesignTokens.interaction : DesignTokens.quietBar,
+                                color: isRunning ? DesignTokens.loadBlue : DesignTokens.quietBar,
                                 lineWidth: 2
                             )
                             .frame(height: 52)
@@ -214,13 +214,5 @@ private struct TaskCard: View {
     private func release() {
         guard confirmLeaseRelease(lease) else { return }
         store.releaseLease(lease) { _, _ in }
-    }
-
-    private func secondsSince(_ timestamp: String?) -> Int? {
-        guard let timestamp else { return nil }
-        let parser = ISO8601DateFormatter()
-        parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        guard let date = parser.date(from: timestamp) ?? ISO8601DateFormatter().date(from: timestamp) else { return nil }
-        return max(0, Int(Date().timeIntervalSince(date)))
     }
 }

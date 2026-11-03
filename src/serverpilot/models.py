@@ -472,6 +472,7 @@ class ResourceAllocation(Base):
     confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     workload_observed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    idle_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     last_error: Mapped[str | None] = mapped_column(String(1500))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
@@ -515,6 +516,8 @@ class LeaseResource(Base):
     #: When a fresh observation first showed no compute process on this GPU.
     #: Tracked per GPU so a claim that uses one card does not keep the rest.
     idle_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    #: The last time this GPU was seen idle, which is how a gap in looking shows.
+    idle_checked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     added_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
     release_reason: Mapped[str | None] = mapped_column(String(500))
     released_by: Mapped[str | None] = mapped_column(String(128))

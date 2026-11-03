@@ -883,17 +883,17 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
         "enum EndpointTableLayout", maxsplit=1
     )[1].split("struct EndpointTableDivider", maxsplit=1)[0]
     assert "static let addressLane: CGFloat = 200" in table_layout
-    assert "static func tier(width: CGFloat) -> Tier" in table_layout
+    assert "static func tier(width: CGFloat, columns: Set<EndpointColumn>) -> Tier" in table_layout
     for tier in ("case wide", "case medium", "case compact"):
         assert tier in table_layout, tier
     # Folding is allowed only for the two columns whose facts are also in the
-    # tooltip and the detail sheet; the pressure columns are never optional.
+    # tooltip and the detail sheet.  A metric column goes only if a person hides it.
     assert "var showsGPUModel: Bool" in table_layout
     assert "var showsAssignment: Bool" in table_layout
     assert "showsPressure" not in table_layout
-    assert "pressureWidth * 4" in table_layout
+    assert "widths.append(pressureWidth)" in table_layout
 
-    assert "EndpointTableLayout.tier(width:" in dashboard_source
+    assert "EndpointTableLayout.tier(" in dashboard_source
     assert "LazyVStack(spacing: EndpointTableLayout.groupSpacing)" in dashboard_source
     # One scroller for the fleet: a group is as long as it is, and the table
     # fills the window.  A cap per group left half a window empty beside a list
@@ -956,7 +956,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     )[1].split("struct GPUDetailSheet", maxsplit=1)[0]
     assert "memoryLabel" in gpu_grid_body
     assert "显存合计" not in dashboard_source
-    # A 44 pt row prints no second line, so everything it drops stays reachable
+    # A row prints no second line, so everything it drops stays reachable
     # through the hover tooltip.  Bulk removal borrows the hover text to say
     # what a click does there; outside that mode the row tooltip is the help.
     assert "private var tooltip: String" in row_body

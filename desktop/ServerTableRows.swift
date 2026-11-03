@@ -8,10 +8,14 @@ struct SchedulerNodeTableRow: View {
     let node: SchedulerNodeRecord
     let gpuName: String
     let tier: EndpointTableLayout.Tier
+    let columns: Set<EndpointColumn>
+    /// Set when this row's group mixes models, so the title cannot name one.
+    let modelTag: String?
     let isSnapshotFresh: Bool
     let leases: [LeaseRecord]
     @ObservedObject var store: BrokerStore
     @State private var showDetails = false
+    @State private var hovering = false
 
     private var assignment: String? {
         let tasks = leases.filter { $0.allocations.contains { $0.locations.contains { $0.node == node.name } } }
@@ -36,6 +40,17 @@ struct SchedulerNodeTableRow: View {
         )
     }
 
+    /// What the row can still show once the node stops answering, greyed.
+    private var lastUsage: ResourceNodeUsage? {
+        guard usage?.fresh != true else { return nil }
+        return endpoint.resourceNodes.first(where: { $0.id == node.name })?.lastUsage
+    }
+
+    private var peakTemperature: Int? {
+        guard let usage, usage.fresh else { return nil }
+        return usage.gpuIDs.compactMap { store.snapshot.gpu(id: $0)?.temperature }.max()
+    }
+
     private var statusColor: Color {
         if !isSnapshotFresh || !node.schedulable { return DesignTokens.warning }
         return node.freeGPUs > 0 ? DesignTokens.success : DesignTokens.mutedInk
@@ -56,6 +71,7 @@ struct SchedulerNodeTableRow: View {
         case .gpuMemory: return usage?.gpuMemoryFraction.map(ResourceTableSortValue.number)
         case .cpuLoad: return usage?.cpuUtilizationFraction.map(ResourceTableSortValue.number)
         case .memory: return usage?.memoryFraction.map(ResourceTableSortValue.number)
+        case .temperature: return peakTemperature.map { .number(Double($0)) }
         }
     }
 
@@ -64,60 +80,81 @@ struct SchedulerNodeTableRow: View {
     }
 
     var body: some View {
+        Button { showDetails = true } label: {
         HStack(spacing: tier.columnSpacing) {
-            VStack(alignment: .leading, spacing: 2) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(isSnapshotFresh ? DesignTokens.success : DesignTokens.warning)
+                    .frame(width: 8, height: 8)
+                    .accessibilityHidden(true)
                 Text(address)
                     .font(Typography.rowPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
-                HStack(spacing: 5) {
-                    Circle().fill(statusColor).frame(width: 7, height: 7)
-                    Text(stateWord)
-                        .font(Typography.annotation)
-                        .foregroundStyle(statusColor)
-                        .lineLimit(1)
-                }
-            }
-            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
-            if tier.showsAssignment {
-                Text(assignment ?? "—")
-                    .font(Typography.identity)
-                    .lineLimit(1)
-                    .foregroundStyle(DesignTokens.mutedInk)
-                    .frame(width: tier.assignmentWidth, alignment: .leading)
-            }
-            if tier.showsGPUModel {
-                VStack(alignment: .leading, spacing: 4) {
-                    HStack(spacing: 3) {
-                        ForEach(0..<node.totalGPUs, id: \.self) { index in
-                            CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
-                        }
-                    }
-                    .fixedSize()
-                    .accessibilityHidden(true)
-                    Text(modelLabel)
+                if let modelTag {
+                    Text(modelTag)
                         .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
+                        .truncationMode(.tail)
+                        .layoutPriority(-1)
                 }
+            }
+            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
+            if tier.showsAssignment, columns.contains(.assignment) {
+                Text(assignment ?? stateWord)
+                    .font(.body)
+                    .lineLimit(1)
+                    .foregroundStyle(assignment == nil ? (isSnapshotFresh ? DesignTokens.mutedInk : DesignTokens.warning) : DesignTokens.ink)
+                    .frame(width: tier.assignmentWidth, alignment: .leading)
+            }
+            if tier.showsGPUModel, columns.contains(.cards) {
+                HStack(spacing: 3) {
+                    ForEach(0..<node.totalGPUs, id: \.self) { index in
+                        CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
+                    }
+                }
+                .fixedSize()
+                .accessibilityHidden(true)
                 .frame(width: tier.gpuModelWidth, alignment: .leading)
             }
-            Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)/\(node.totalGPUs)" : "—/\(node.totalGPUs)")
-                .font(Typography.rowValue).monospacedDigit()
-                .frame(width: tier.availabilityWidth, alignment: .trailing)
-            TablePressureCell(label: "GPU 利用率", fraction: usage?.gpuUtilizationFraction, width: tier.pressureWidth)
-            TablePressureCell(label: "显存占用率", fraction: usage?.gpuMemoryFraction, width: tier.pressureWidth)
-            TablePressureCell(label: "CPU 负载", fraction: usage?.cpuUtilizationFraction, width: tier.pressureWidth)
-            TablePressureCell(label: "内存占用率", fraction: usage?.memoryFraction, width: tier.pressureWidth)
+            HStack(alignment: .firstTextBaseline, spacing: 1) {
+                Spacer(minLength: 0)
+                Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)" : "—")
+                    .font(Font.title3.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(node.freeGPUs > 0 ? DesignTokens.ink : DesignTokens.mutedInk)
+                Text("/\(node.totalGPUs)")
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+            }
+            .frame(width: tier.availabilityWidth, alignment: .trailing)
+            if columns.contains(.gpuUtilization) {
+                TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: usage?.gpuUtilizationFraction ?? lastUsage?.gpuUtilization, muted: usage?.gpuUtilizationFraction == nil, width: tier.pressureWidth)
+            }
+            if columns.contains(.gpuMemory) {
+                TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: usage?.gpuMemoryFraction ?? lastUsage?.gpuMemory, muted: usage?.gpuMemoryFraction == nil, width: tier.pressureWidth)
+            }
+            if columns.contains(.cpu) {
+                TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: usage?.cpuUtilizationFraction ?? lastUsage?.cpu, muted: usage?.cpuUtilizationFraction == nil, width: tier.pressureWidth)
+            }
+            if columns.contains(.memory) {
+                TablePressureCell(label: "内存占用率", metric: .memory, fraction: usage?.memoryFraction ?? lastUsage?.memory, muted: usage?.memoryFraction == nil, width: tier.pressureWidth)
+            }
+            if columns.contains(.temperature) {
+                TableTemperatureCell(celsius: peakTemperature, width: tier.temperatureWidth)
+            }
         }
         .foregroundStyle(DesignTokens.ink)
         .padding(.horizontal, EndpointTableLayout.cardPadding)
         .frame(height: EndpointTableLayout.rowHeight)
-        .help("\(node.name) · \(stateWord) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
+        .background(DesignTokens.ink.opacity(hovering ? DesignTokens.Alpha.hairline : 0))
         .contentShape(Rectangle())
-        .onTapGesture { showDetails = true }
-        .accessibilityAction { showDetails = true }
+        }
+        .buttonStyle(.plain)
+        .focusable()
+        .onHover { hovering = $0 }
+        .help("\(node.name) · \(stateWord) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
         .sheet(isPresented: $showDetails) { NodeAllocationSheet(store: store, endpoint: endpoint, node: node) { openEndpoint(endpoint) } }
         .accessibilityElement(children: .combine)
         .accessibilityIdentifier("scheduler-node-\(node.name)")

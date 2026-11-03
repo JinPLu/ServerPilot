@@ -4,9 +4,27 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.0.0 - 2026-11-04
 
-- Add a complete local macOS update command that replaces the App and backend together, restarts and verifies both, and removes duplicate App copies.
+- **The server page is calmer and easier to read.**
+  - Each server takes one line. The GPU model moves to the group title, and appears after the address only when a group mixes models.
+  - Figures sit beside thicker bars, and status joins the task column, so you can see at a glance what each machine is doing.
+- **Colours now depend on the metric.**
+  - A busy GPU no longer changes colour, since full is what it is for. Memory, host memory and CPU turn yellow or red only near their limits.
+  - The main button is dark, and the blue for low utilization is fixed rather than following the system accent colour.
+- **Held and offline machines stop demanding attention.** An idle keepalive's readings are pale grey. A server that cannot be reached no longer turns its tile red, and keeps its last readings with how old they are.
+- **A new View panel.** Columns, sorting, grouping and bulk removal live here. You can hide columns you do not need and turn on a new GPU temperature column.
+- **A simpler overview.** Server tiles keep only the address, the task, each card and a grey trend line. Needs Attention lists only what needs acting on; cards coming free are told by notification and on the alerts page.
+- **Waking the Mac no longer reclaims a task.** A card idle when the lid closed could cost its task on the first look after waking, and a cluster allocation could be released the same way. The idle clock now starts over after sleep or a long outage, and only pauses for a brief blip.
+- **Reminders are more trustworthy and quieter.**
+  - Not knowing no longer counts as recovery.
+  - A long-offline server no longer silences its group when other servers free up cards.
+  - Offline notices that never fired leave no record.
+  - The same reminder notifies at most once in 30 minutes.
+- **The App stops claiming what it cannot know.** A failed action no longer reads as a lost connection. When the connection really is down, the overview shows "—" for free cards and utilization, and no longer says there is nothing to handle.
+- **The App refreshes less.** Full state is fetched at most every 12 seconds while visible and once a minute while minimized or covered, with an immediate update on return.
+- **Standard Mac shortcuts.** Adds ⌘W, ⌘M, ⌘H and ⌘,, and cluster node rows now work from the keyboard.
+- **A complete local update command.** It replaces the App and the backend together, restarts both, confirms the new code is running and removes duplicate Apps. Building or installing alone no longer counts as updating.
 
 ## 4.2.0 - 2026-11-02
 

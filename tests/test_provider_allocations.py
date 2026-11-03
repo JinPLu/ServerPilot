@@ -12,7 +12,7 @@ from serverpilot import mcp_server
 from serverpilot.models import Endpoint, GPUDevice, Lease, ResourceAllocation
 from serverpilot.plugins import PluginError, PluginInfo
 from serverpilot.schemas import RequestCreate
-from serverpilot.service import BrokerError
+from serverpilot.service import BrokerError, _as_utc
 from serverpilot.timeutil import utcnow
 
 
@@ -215,6 +215,26 @@ def test_whole_allocation_is_not_reclaimed_without_full_evidence(service, admin,
     assert not releases
     assert record(service).state == "active"
     assert service._read(lambda session: session.get(Lease, lease["id"]).state) == "HELD"
+
+
+def test_whole_allocation_survives_a_sleeping_mac(service, admin, provider, monkeypatch):
+    """Releasing a real allocation on the first look after waking would end a job."""
+
+    lease = claim(service, admin)["lease"]
+    backdate_idle(service, lease["id"])
+
+    def last_looked_before_sleep(session):
+        saved = session.scalar(select(ResourceAllocation).where(ResourceAllocation.lease_id == lease["id"]))
+        saved.idle_checked_at = saved.idle_since
+    service._write(last_looked_before_sleep)
+    releases = []
+    monkeypatch.setattr("serverpilot.plugins.release_plugin", lambda *args, **kwargs: releases.append(kwargs))
+
+    ingest(service, [allocation_fact(record(service).id)])
+
+    assert not releases
+    assert record(service).state == "active"
+    assert (utcnow() - _as_utc(record(service).idle_since)).total_seconds() < 60
 
 
 def test_whole_allocation_reclaims_only_after_lost_heartbeat_and_confirmed_idle(service, admin, provider, monkeypatch):

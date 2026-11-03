@@ -113,27 +113,19 @@ func scopedFact(_ text: String, note: String?) -> String {
 }
 
 
+/// "RTX 3090": what tells two rows of a group apart, without the vendor's preamble.
+func shortGPUModel(_ name: String) -> String {
+    ["NVIDIA ", "GeForce "].reduce(name) { partial, prefix in
+        partial.hasPrefix(prefix) ? String(partial.dropFirst(prefix.count)) : partial
+    }
+}
+
+
 func endpointGPUModelSummary(_ gpus: [GPURecord]) -> String {
     guard !gpus.isEmpty else { return "无 GPU" }
     let names = Array(Set(gpus.map(\.name))).sorted()
     guard let first = names.first else { return "无 GPU" }
     return names.count == 1 ? first : "\(first) +\(names.count - 1) 类"
-}
-
-
-func endpointOverviewGPUMemoryFraction(endpoint: EndpointRecord, gpus: [GPURecord]) -> Double? {
-    guard endpoint.monitorStatus == "ONLINE" else { return nil }
-    let values = gpus.compactMap { $0.recentTelemetryAverage?.memoryFraction }
-    guard !values.isEmpty else { return nil }
-    return min(max(values.reduce(0, +) / Double(values.count), 0), 1)
-}
-
-
-func endpointOverviewGPUUtilizationFraction(endpoint: EndpointRecord, gpus: [GPURecord]) -> Double? {
-    guard endpoint.monitorStatus == "ONLINE" else { return nil }
-    let values = gpus.compactMap { $0.recentTelemetryAverage?.utilizationFraction }
-    guard !values.isEmpty else { return nil }
-    return min(max(values.reduce(0, +) / Double(values.count), 0), 1)
 }
 
 
@@ -153,23 +145,15 @@ func percentageLabel(_ value: Double?) -> String {
     value.map { "\(Int(($0 * 100).rounded()))%" } ?? "—"
 }
 
-private let endpointHighPressureThreshold = 0.85
-
-
-private func endpointPressureFraction(endpoint: EndpointRecord, gpus: [GPURecord]) -> Double? {
-    [
-        endpointOverviewCPULoadFraction(endpoint: endpoint),
-        endpointOverviewMemoryFraction(endpoint: endpoint),
-        endpointOverviewGPUUtilizationFraction(endpoint: endpoint, gpus: gpus)
-    ]
-    .compactMap { $0 }
-    .max()
-}
-
-
+/// A busy GPU is not pressure; running out of CPU or memory is.
 func endpointHighPressure(endpoint: EndpointRecord, gpus: [GPURecord]) -> Bool {
-    guard let pressure = endpointPressureFraction(endpoint: endpoint, gpus: gpus) else { return false }
-    return pressure >= endpointHighPressureThreshold
+    let readings: [(ResourceMetric, Double?)] = [
+        (.cpu, endpointOverviewCPULoadFraction(endpoint: endpoint)),
+        (.memory, endpointOverviewMemoryFraction(endpoint: endpoint)),
+    ]
+    return readings.contains { metric, fraction in
+        fraction.map { metric.pressure($0) != .normal } ?? false
+    }
 }
 
 
@@ -182,19 +166,23 @@ func endpointRequiresAttention(endpoint: EndpointRecord, gpus: [GPURecord]) -> B
 
 /// Colour is for pressure that needs a look.  Below the threshold a bar is
 /// neutral, so a row of healthy machines reads as calm rather than as green.
-func pressureColor(_ fraction: Double?) -> Color {
+func metricColor(_ metric: ResourceMetric, _ fraction: Double?) -> Color {
     guard let fraction else { return DesignTokens.mutedInk }
-    switch fraction {
-    case ..<0.70: return DesignTokens.quietBar
-    case ..<0.90: return DesignTokens.warning
-    default: return DesignTokens.danger
+    switch metric.pressure(fraction) {
+    case .normal: return DesignTokens.meterFill
+    case .warning: return DesignTokens.nearFullCard
+    case .critical: return DesignTokens.danger
     }
 }
 
-/// The same thresholds for the figure beside a bar, which stays ink until then.
-func pressureTextColor(_ fraction: Double?) -> Color {
+/// The same answer for the figure beside a bar: yellow is too light to read as text.
+func metricTextColor(_ metric: ResourceMetric, _ fraction: Double?) -> Color {
     guard let fraction else { return DesignTokens.mutedInk }
-    return fraction < 0.70 ? DesignTokens.ink : pressureColor(fraction)
+    switch metric.pressure(fraction) {
+    case .normal: return DesignTokens.ink
+    case .warning: return DesignTokens.warning
+    case .critical: return DesignTokens.danger
+    }
 }
 
 
@@ -252,7 +240,7 @@ private func gpuStateColor(_ state: String) -> Color {
     // Held is real state but not a warning, and a user-chosen accent could sit
     // anywhere on the luminance scale — a neutral keeps the graphical floor.
     case "HELD", "LEASED_IDLE", "KEEPALIVE": return DesignTokens.hold
-    case "RUNNING_MANAGED": return DesignTokens.interaction
+    case "RUNNING_MANAGED": return DesignTokens.loadBlue
     case "BUSY_UNMANAGED", "ORPHANED_BUSY", "RESERVED", "MAINTENANCE": return DesignTokens.warning
     default: return DesignTokens.danger
     }
@@ -290,11 +278,6 @@ func gpuPresentationLabel(_ gpu: GPURecord) -> String {
         return task
     }
     return gpuStateLabel(gpu.state)
-}
-
-
-private func gpuVisualStateColor(_ gpu: GPURecord) -> Color {
-    gpuHasLegacyWorkloadProcessReview(gpu) ? DesignTokens.warning : gpuStateColor(gpu.state)
 }
 
 
@@ -375,23 +358,12 @@ func formattedTimestamp(_ value: String?) -> String {
 }
 
 
-private func historyTimestamp(_ value: String) -> String {
-    let parser = ISO8601DateFormatter()
-    parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-    let date = parser.date(from: value) ?? ISO8601DateFormatter().date(from: value)
-    guard let date else { return value }
-    let formatter = DateFormatter()
-    formatter.locale = Locale(identifier: "zh_CN")
-    formatter.dateFormat = "HH:mm"
-    return formatter.string(from: date)
-}
-
-
 // ---- shared across the overview, the server table and the menu bar ----
 
 extension Notification.Name {
     /// The menu bar asks the window to open its claim sheet.
     static let serverPilotRequestClaim = Notification.Name("serverPilotRequestClaim")
+    static let serverPilotOpenSettings = Notification.Name("serverPilotOpenSettings")
 }
 
 /// A server group as the overview and the sidebar show it: the groups in name
@@ -490,13 +462,73 @@ struct ServerStatus {
     var color: Color {
         switch tone {
         case .free: DesignTokens.success
-        case .working: DesignTokens.interaction
+        case .working: DesignTokens.loadBlue
         case .held: DesignTokens.hold
         case .attention: DesignTokens.warning
         case .fault: DesignTokens.danger
         case .quiet: DesignTokens.mutedInk
         }
     }
+}
+
+/// What a machine is doing, in one line: the table's task cell and the tile's
+/// corner say the same thing.
+struct ServerActivity {
+    let primary: String
+    let secondary: String?
+    let color: Color
+
+    init(
+        endpoint: EndpointRecord,
+        gpus: [GPURecord],
+        leases: [LeaseRecord],
+        status: ServerStatus,
+        isSnapshotFresh: Bool
+    ) {
+        if !isSnapshotFresh || status.tone == .fault {
+            primary = status.word
+            secondary = isSnapshotFresh ? Self.readingAge(endpoint) : nil
+            color = DesignTokens.danger
+        } else if let lease = leases.first(where: { $0.runtimeState == "RUNNING" }) ?? leases.first {
+            let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
+            primary = leases.count > 1 ? "\(task) · 另 \(leases.count - 1) 项" : task
+            secondary = lease.runtimeState == "RUNNING" ? lease.holderLabel : "未运行"
+            color = DesignTokens.ink
+        } else if status.tone == .attention {
+            primary = status.word
+            secondary = nil
+            // Someone else's job is a fact to read; a conflict is one to act on.
+            color = gpus.contains { ["CONFLICT", "ORPHANED_BUSY"].contains($0.state) }
+                ? status.color
+                : DesignTokens.ink
+        } else if endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning {
+            primary = "空闲"
+            secondary = "占卡中"
+            color = DesignTokens.mutedInk
+        } else if let capacity = endpoint.schedulerCapacity {
+            primary = "\(capacity.freeGPUCount) 张空闲"
+            secondary = nil
+            color = DesignTokens.mutedInk
+        } else {
+            primary = status.word
+            secondary = nil
+            color = DesignTokens.mutedInk
+        }
+    }
+
+    private static func readingAge(_ endpoint: EndpointRecord) -> String? {
+        let node = endpoint.resourceNodes.first { $0.id == "self" }
+        guard let seconds = secondsSince(node?.observedAt) else { return nil }
+        if seconds < 3600 { return "\(max(seconds / 60, 1)) 分钟前" }
+        return seconds < 172_800 ? "\(seconds / 3600) 小时前" : "\(seconds / 86400) 天前"
+    }
+}
+
+/// Whether the host answers, which is all a row's dot says.
+func endpointConnectionColor(_ endpoint: EndpointRecord, isSnapshotFresh: Bool) -> Color {
+    guard isSnapshotFresh else { return DesignTokens.mutedInk }
+    if endpoint.monitorStatus == "ONLINE" { return DesignTokens.success }
+    return endpointNeedsAttention(endpoint) ? DesignTokens.danger : DesignTokens.mutedInk
 }
 
 /// Slurm's node words in the vocabulary the rest of the App uses.
@@ -511,6 +543,14 @@ func schedulerNodeStateLabel(_ state: String) -> String {
     case "down", "fail", "failing", "maint", "reserved", "resv": return "不可用"
     default: return state
     }
+}
+
+func secondsSince(_ timestamp: String?) -> Int? {
+    guard let timestamp else { return nil }
+    let parser = ISO8601DateFormatter()
+    parser.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+    guard let date = parser.date(from: timestamp) ?? ISO8601DateFormatter().date(from: timestamp) else { return nil }
+    return max(0, Int(Date().timeIntervalSince(date)))
 }
 
 /// "3 小时 5 分": how long something has been going, to the minute.

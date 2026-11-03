@@ -60,8 +60,8 @@ _RETIRED_COLUMNS = (("endpoints", "enabled"), ("gpu_devices", "enabled"))
 _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_seconds")
 
 
-# 20261030_0041 adds these. Its indexes go first: one of them names task_ref,
-# which _create_retired_request_tables removes.
+# 20261030_0041 adds these, and 20261104_0042 adds idle_checked_at. The indexes
+# go first: one of them names task_ref, which _create_retired_request_tables removes.
 _LATER_INDEXES = (
     ("leases", "uq_active_owned_task"),
     ("audit_events", "ix_audit_resource"),
@@ -70,7 +70,7 @@ _LATER_INDEXES = (
 )
 _LATER_COLUMNS = {
     "leases": ("owner_session_id", "resource_epoch", "agent_seen_audit_id"),
-    "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows"),
+    "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows", "idle_checked_at"),
     "alerts": ("category", "dedupe_key", "state", "pending_since", "notified_at", "lease_id",
                "project_id", "task_ref", "payload_json"),
 }

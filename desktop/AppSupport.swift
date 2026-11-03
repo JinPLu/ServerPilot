@@ -71,7 +71,7 @@ struct CardSectionLabel: View {
 enum Typography {
     /// 42 · The capacity figure the overview exists to answer.  One per screen,
     /// and only there: everywhere else a number sits in its row.
-    static let display = Font.system(size: 42, weight: .bold, design: .rounded).monospacedDigit()
+    static let display = Font.system(size: 34, weight: .semibold, design: .rounded).monospacedDigit()
     /// 26 · The page title, set directly on the page plane.
     static let screenTitle = Font.largeTitle.weight(.bold)
     /// 26 · The second-largest number a screen may show.
@@ -84,8 +84,6 @@ enum Typography {
     /// `annotation`: they sit above 11 pt rows, and at 13 pt they outweighed
     /// the values underneath them.
     static let label = Font.headline
-    /// 13 · The one explanatory sentence in an error or empty state.
-    static let prose = Font.body
     /// 13 · Percentages, counts, ratios inside a row.
     static let rowValue = Font.body.weight(.medium).monospacedDigit()
     /// 13 · The first line of a two-line row: an address, a task.
@@ -101,7 +99,6 @@ enum Typography {
     // the migration; both resolved to 10pt, which was the duplicate pair.
     static let metricLabel = annotation
     static let secondary = annotation
-    static let metricValue = rowValue
     static let sectionTitle = label
 }
 
@@ -194,17 +191,27 @@ enum DesignTokens {
         })
     }
 
-    // Luminous tier: area only.  Apple's system colours composited at 12% over
-    // white, shipped opaque so they do not drift with the plane beneath.  The
-    // screen reads luminous because these cover roughly twenty times the area
-    // of the marks above.
-    static let successWash = Color(red: 231.0 / 255.0, green: 248.0 / 255.0, blue: 235.0 / 255.0)
-    static let warningWash = Color(red: 1.0, green: 241.0 / 255.0, blue: 229.0 / 255.0)
-    static let dangerWash = Color(red: 1.0, green: 231.0 / 255.0, blue: 232.0 / 255.0)
 
     /// Held or keepalive-owned: real state, but not a warning.  Neutral so a
     /// user-chosen accent can never drop it below the graphical floor.
     static let hold = Color(red: 91.0 / 255.0, green: 97.0 / 255.0, blue: 107.0 / 255.0)
+    /// A card with room to spare, and the lines that plot how busy cards are.  Fixed
+    /// rather than the system accent: this colour means something, and a person
+    /// changing their accent must not change what it says.
+    static let loadBlue = statusColor(
+        normal: (0.0, 112.0, 240.0),
+        increased: (0.0, 88.0, 208.0)
+    )
+    /// A bar nothing is wrong with.
+    static let meterFill = statusColor(
+        normal: (180.0, 180.0, 186.0),
+        increased: (99.0, 99.0, 102.0)
+    )
+    /// A bar that is not a load: a keepalive's own hold, or a reading gone stale.
+    static let meterMuted = statusColor(
+        normal: (217.0, 217.0, 222.0),
+        increased: (174.0, 174.0, 178.0)
+    )
     /// A card in use whose load nothing measured, as a filled square.
     static let unmeasuredCard = statusColor(
         normal: (142.0, 142.0, 147.0),
@@ -275,14 +282,14 @@ enum DesignTokens {
     /// the step Apple's grouped backgrounds use.  Increase Contrast darkens it
     /// and draws `tileStroke` around every tile.
     static let ambientSmoke = statusColor(
-        normal: (242.0, 242.0, 245.0),
+        normal: (245.0, 245.0, 247.0),
         increased: (229.0, 229.0, 234.0)
     )
     /// Tile edge.  Home tiles carry no outline normally — the elevation step
     /// does that work — but Increase Contrast asks for a drawn boundary.
     static let tileStroke = Color(nsColor: NSColor(name: nil) { appearance in
         _ = appearance
-        return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.34 : 0)
+        return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.34 : 0.06)
     })
     /// The retired middle plane.  Kept as an alias so existing call sites do
     /// not gain a third elevation back; it now resolves to the content plane.
@@ -371,21 +378,6 @@ struct SoftButtonStyle: ButtonStyle {
     }
 }
 
-struct SoftIconButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
-    func makeBody(configuration: Configuration) -> some View {
-        configuration.label
-            .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
-            .background(
-                DesignTokens.surface.opacity(isEnabled ? (configuration.isPressed ? 0.74 : 1) : 0.46),
-                in: Circle()
-            )
-            .overlay(Circle().stroke(DesignTokens.surfaceStroke, lineWidth: 1))
-            .scaleEffect(configuration.isPressed ? 0.94 : 1)
-    }
-}
-
 struct PrimaryActionButtonStyle: ButtonStyle {
     @Environment(\.isEnabled) private var isEnabled
 
@@ -396,7 +388,7 @@ struct PrimaryActionButtonStyle: ButtonStyle {
             .padding(.horizontal, 14)
             .frame(height: 30)
             .background(
-                DesignTokens.interaction.opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.26),
+                DesignTokens.ink.opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.26),
                 in: Capsule()
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
@@ -459,13 +451,4 @@ extension View {
             .foregroundStyle(DesignTokens.ink)
     }
 
-    @ViewBuilder
-    func spatialGlass<S: Shape>(in shape: S) -> some View {
-        background(DesignTokens.surface, in: shape)
-            .overlay(shape.stroke(DesignTokens.surfaceStroke, lineWidth: 1))
-    }
-
-    func spatialContentSurface() -> some View {
-        background(DesignTokens.glassSmoke)
-    }
 }

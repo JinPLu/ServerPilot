@@ -211,8 +211,8 @@ struct ServerDetailSheet: View {
                                         : DesignTokens.interaction,
                                     message: conflict
                                         ? (legacyWorkloadReview
-                                            ? "有 \(gpuCount) 张 GPU 仍指派给 \(lease.projectID) · \(task)。当前观测到计算进程变更；worker 重启或替换不会被当作硬件故障，也不会自动归还或停止任务。它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。如需更正实际任务-GPU 指派，请在“使用情况”中选择任务后调整 GPU 分配。"
-                                            : "有 \(gpuCount) 张 GPU 的归属状态需要处理；它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。请在“使用情况”中核对任务-GPU 指派，并根据实际任务决定改派或在任务结束后归还。")
+                                            ? "有 \(gpuCount) 张 GPU 仍指派给 \(lease.projectID) · \(task)。当前观测到计算进程变更；worker 重启或替换不会被当作硬件故障，也不会自动归还或停止任务。它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。如需更正实际任务-GPU 指派，请在“任务”页中选择任务后调整 GPU 分配。"
+                                            : "有 \(gpuCount) 张 GPU 的归属状态需要处理；它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。请在“任务”页中核对任务-GPU 指派，并根据实际任务决定改派或在任务结束后归还。")
                                         : (unreachable
                                             ? "这台服务器已停止应答，无法证明这 \(gpuCount) 张 GPU 上是否还有进程；确认任务确实结束后可结清这条记录。"
                                             : "有 \(gpuCount) 张 GPU 仍被租约占用，但当前采集没有观察到进程；可确认后归还。"),
@@ -235,8 +235,8 @@ struct ServerDetailSheet: View {
                                     ? DesignTokens.warning
                                     : DesignTokens.danger,
                                 message: legacyWorkloadReviewGPUCount == conflictedGPUCount
-                                    ? "有 \(conflictedGPUCount) 张 GPU 仍有任务归属待核对。任务运行中的 worker 可正常更换；请根据当前任务与显存、利用率观测判断。它们暂不能申请，其余 \(availableGPUCount) 张仍可申请；如需更正任务-GPU 指派，请在“使用情况”中调整分配。"
-                                    : "有 \(conflictedGPUCount) 张 GPU 的状态需要人工处理；它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。请在“使用情况”中核对任务-GPU 指派。"
+                                    ? "有 \(conflictedGPUCount) 张 GPU 仍有任务归属待核对。任务运行中的 worker 可正常更换；请根据当前任务与显存、利用率观测判断。它们暂不能申请，其余 \(availableGPUCount) 张仍可申请；如需更正任务-GPU 指派，请在“任务”页中调整分配。"
+                                    : "有 \(conflictedGPUCount) 张 GPU 的状态需要人工处理；它们暂不能申请，其余 \(availableGPUCount) 张仍可申请。请在“任务”页中核对任务-GPU 指派。"
                             )
                         }
 
@@ -630,7 +630,7 @@ struct GPUMemoryGlyph: View {
     }
 
     private var memoryColor: Color {
-        pressureColor(memoryFraction)
+        metricColor(.gpuMemory, memoryFraction)
     }
 
     var body: some View {

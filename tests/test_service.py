@@ -2440,6 +2440,8 @@ def test_stale_telemetry_resets_the_idle_clock_instead_of_reclaiming(service, ad
     def age_telemetry(session):  # type: ignore[no-untyped-def]
         for row in session.scalars(select(TelemetryCurrent)).all():
             row.observed_at = stale_cutoff
+        for row in session.scalars(select(LeaseResource)).all():
+            row.idle_checked_at = stale_cutoff
 
     service._write(age_telemetry)
     # endpoint-a has gone quiet; the round that still reports is endpoint-b's,

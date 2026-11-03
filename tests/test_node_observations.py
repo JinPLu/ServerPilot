@@ -3,6 +3,7 @@ from copy import deepcopy
 from datetime import timedelta
 
 from serverpilot.collector import parse_raw_node_probe, parse_server_script_snapshot
+from serverpilot.mcp_server import _node_view
 from serverpilot.schemas import EndpointObservation
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation, probe_bundle, process_for_gpu
@@ -55,6 +56,10 @@ def test_nodes_with_same_gpu_index_and_pid_are_isolated(service, admin):
     assert nodes["n1"]["fresh"]
     assert not nodes["n2"]["fresh"]
     assert nodes["n2"]["usage"]["gpu_utilization_pct"] is None
+    assert nodes["n2"]["usage"]["memory_used_pct"] is None
+    # Only a person reads the last reading, greyed; agents get the empty one.
+    assert nodes["n2"]["last_usage"]["memory_used_pct"] is not None
+    assert "last_usage" not in _node_view(nodes["n2"])
 
 
 def test_shared_summary_and_cpu_reset(service, admin):

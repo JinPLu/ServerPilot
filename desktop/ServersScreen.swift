@@ -36,6 +36,7 @@ enum EndpointSort: String, CaseIterable, Identifiable {
     case gpuMemory
     case cpuLoad
     case memory
+    case temperature
 
     var id: String { rawValue }
 
@@ -50,6 +51,7 @@ enum EndpointSort: String, CaseIterable, Identifiable {
         case .gpuMemory: return "显存"
         case .cpuLoad: return "CPU"
         case .memory: return "内存"
+        case .temperature: return "温度"
         }
     }
 
@@ -57,6 +59,33 @@ enum EndpointSort: String, CaseIterable, Identifiable {
         switch self {
         case .id, .assignment, .gpuModel: return .ascending
         default: return .descending
+        }
+    }
+}
+
+
+/// A column a person can hide.  The server, its count of free cards and the row
+/// itself always stay, because those are what the table is for.
+enum EndpointColumn: String, CaseIterable, Identifiable {
+    case assignment
+    case cards
+    case gpuUtilization
+    case gpuMemory
+    case cpu
+    case memory
+    case temperature
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .assignment: "任务"
+        case .cards: "每张卡"
+        case .gpuUtilization: "GPU"
+        case .gpuMemory: "显存"
+        case .cpu: "CPU"
+        case .memory: "内存"
+        case .temperature: "GPU 温度"
         }
     }
 }
@@ -79,12 +108,35 @@ struct ResourcesDashboard: View {
     @State private var isSelectingForRemoval = false
     @State private var selectedEndpointIDs: Set<String> = []
     @State private var isRemovingEndpoints = false
-    let claimEndpoint: (String) -> Void
+    @State private var showsViewPanel = false
+    @AppStorage("serverTableHiddenColumns") private var hiddenColumnsRaw = EndpointColumn.temperature.rawValue
+    @AppStorage("serverTableGrouped") private var groupsTable = true
     let manageGroups: () -> Void
     let openEndpoint: (EndpointRecord) -> Void
-    let selectGPU: (GPURecord) -> Void
 
     private var endpoints: [EndpointRecord] { store.snapshot.operationalEndpoints }
+
+    private var visibleColumns: Set<EndpointColumn> {
+        let hidden = Set(hiddenColumnsRaw.split(separator: ",").map(String.init))
+        return Set(EndpointColumn.allCases.filter { !hidden.contains($0.rawValue) })
+    }
+
+    private func setColumn(_ column: EndpointColumn, visible: Bool) {
+        var columns = visibleColumns
+        if visible { columns.insert(column) } else { columns.remove(column) }
+        hiddenColumnsRaw = EndpointColumn.allCases
+            .filter { !columns.contains($0) }
+            .map(\.rawValue)
+            .joined(separator: ",")
+    }
+
+    private func gpuModels(_ endpoints: [EndpointRecord]) -> Set<String> {
+        Set(endpoints.flatMap { endpoint in
+            store.snapshot.gpus(for: endpoint).map(\.name)
+                + endpoint.nodes.compactMap(\.gpuName)
+                + [endpoint.schedulerCapacity?.gpuName].compactMap { $0 }
+        })
+    }
 
     private var allocatableGPUCount: Int {
         guard store.freshness == .fresh else { return 0 }
@@ -169,7 +221,7 @@ struct ResourcesDashboard: View {
     private var tableSections: [EndpointOverviewSection] {
         let sorted = filteredEndpoints
         let groups = store.snapshot.serverGroups
-        guard !groups.isEmpty else {
+        guard groupsTable, !groups.isEmpty else {
             return [EndpointOverviewSection(kind: .flat, endpoints: sorted)]
         }
         var sections: [EndpointOverviewSection] = []
@@ -234,46 +286,95 @@ struct ResourcesDashboard: View {
                 .frame(minWidth: 120, idealWidth: 230, maxWidth: 230, minHeight: 28, maxHeight: 28)
                 .background(DesignTokens.ink.opacity(DesignTokens.Alpha.edge), in: Capsule())
                 .accessibilityLabel("搜索服务器")
-            Menu {
+            Button { showsViewPanel.toggle() } label: {
+                Label("视图", systemImage: "slider.horizontal.3")
+            }
+            .buttonStyle(SecondaryActionButtonStyle())
+            .help("显示列、排序和分组")
+            .accessibilityIdentifier("server-table-view")
+            .popover(isPresented: $showsViewPanel, arrowEdge: .bottom) { viewPanel }
+        }
+    }
+
+    /// Everything that changes how the table reads, out of the way until asked for.
+    private var viewPanel: some View {
+        HStack(alignment: .top, spacing: 0) {
+            viewPanelSection("显示列") {
+                ForEach(EndpointColumn.allCases) { column in
+                    Toggle(column.label, isOn: Binding(
+                        get: { visibleColumns.contains(column) },
+                        set: { setColumn(column, visible: $0) }
+                    ))
+                    .toggleStyle(.checkbox)
+                }
+            }
+            Divider()
+            viewPanelSection("排序") {
                 Picker("排序", selection: $sort) {
                     ForEach(EndpointSort.allCases) { item in
                         Text(item.label).tag(item)
                     }
                 }
-            } label: {
-                Image(systemName: "arrow.up.arrow.down")
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
             }
-            .menuStyle(.borderlessButton)
-            .fixedSize()
-            .help("资源排序")
-            .accessibilityLabel("资源排序")
-            if store.supportsEndpointDelete {
-                Button(action: toggleRemovalSelection) {
-                    Image(systemName: isSelectingForRemoval ? "checkmark.circle.fill" : "checklist")
+            Divider()
+            viewPanelSection("分组") {
+                Picker("分组", selection: $groupsTable) {
+                    Text("按服务器组").tag(true)
+                    Text("不分组").tag(false)
                 }
-                .buttonStyle(.borderless)
-                .help(isSelectingForRemoval ? "退出批量移除" : "批量移除：勾选多台服务器，一次从 ServerPilot 移除")
-                .accessibilityLabel(isSelectingForRemoval ? "完成批量移除" : "批量移除")
-                .accessibilityIdentifier("endpoint-bulk-remove-mode")
+                .pickerStyle(.radioGroup)
+                .labelsHidden()
+                Divider().padding(.vertical, 6)
+                Button("管理服务器组…") {
+                    showsViewPanel = false
+                    manageGroups()
+                }
+                .buttonStyle(.link)
+                .accessibilityIdentifier("manage-server-groups")
+                if store.supportsEndpointDelete {
+                    Button("批量移除服务器…") {
+                        showsViewPanel = false
+                        toggleRemovalSelection()
+                    }
+                    .buttonStyle(.link)
+                    .help("勾选多台服务器，一次从 ServerPilot 移除")
+                    .accessibilityIdentifier("endpoint-bulk-remove-mode")
+                }
             }
-            Button(action: manageGroups) {
-                Image(systemName: "rectangle.3.group")
-            }
-            .buttonStyle(.borderless)
-            .help("管理服务器组")
-            .accessibilityLabel("管理服务器组")
-            .accessibilityIdentifier("manage-server-groups")
         }
+        .font(.body)
+        .fixedSize()
+    }
+
+    private func viewPanelSection<Content: View>(
+        _ title: String,
+        @ViewBuilder content: () -> Content
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title)
+                .font(Typography.annotation.weight(.semibold))
+                .foregroundStyle(DesignTokens.mutedInk)
+                .accessibilityAddTraits(.isHeader)
+            content()
+        }
+        .padding(14)
     }
 
     private var endpointTable: some View {
         GeometryReader { proxy in
-            // Columns fold from the right as the window narrows; the address
-            // lane and all four pressure cells survive every tier.
-            let tier = EndpointTableLayout.tier(width: proxy.size.width - EndpointTableLayout.scrollbarWidth)
+            // Columns fold from the right as the window narrows, counting only
+            // the ones a person chose to show.
+            let columns = visibleColumns
+            let tier = EndpointTableLayout.tier(
+                width: proxy.size.width - EndpointTableLayout.scrollbarWidth,
+                columns: columns
+            )
             VStack(alignment: .leading, spacing: 0) {
                 EndpointTableHeader(
                     tier: tier,
+                    columns: columns,
                     sort: sort,
                     direction: sortDirection,
                     selectSort: selectSort
@@ -284,7 +385,7 @@ struct ResourcesDashboard: View {
                         Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
                             .font(.title2)
                             .foregroundStyle(DesignTokens.mutedInk)
-                        Text(endpoints.isEmpty ? "暂无端点" : "没有匹配端点")
+                        Text(endpoints.isEmpty ? "暂无服务器" : "没有匹配的服务器")
                             .font(Typography.sectionTitle)
                         Text(endpoints.isEmpty ? "添加服务器后会显示资源。" : "调整搜索或过滤条件。")
                             .font(Typography.secondary)
@@ -298,7 +399,7 @@ struct ResourcesDashboard: View {
                         // as it is, and the table fills the window.
                         LazyVStack(spacing: EndpointTableLayout.groupSpacing) {
                             ForEach(tableSections) { section in
-                                groupCard(section, tier: tier)
+                                groupCard(section, tier: tier, columns: columns)
                             }
                         }
                         // The same width the header reserves, with or without a
@@ -309,7 +410,7 @@ struct ResourcesDashboard: View {
                         .background(TableScrollStyle(hideWhenUnused: true))
                     }
                 }
-                tableFooter(tier: tier)
+                tableFooter(showsLegend: tier.showsGPUModel && columns.contains(.cards))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
@@ -321,8 +422,15 @@ struct ResourcesDashboard: View {
 
     /// A group is its own card, so the page plane between two cards is the
     /// boundary; the columns above still line up with every row in every card.
-    private func groupCard(_ section: EndpointOverviewSection, tier: EndpointTableLayout.Tier) -> some View {
+    private func groupCard(
+        _ section: EndpointOverviewSection,
+        tier: EndpointTableLayout.Tier,
+        columns: Set<EndpointColumn>
+    ) -> some View {
         let rows = sectionRows(section)
+        // One model belongs in the group's title; several have to be told apart
+        // row by row.
+        let showsModel = gpuModels(section.endpoints).count > 1
         let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
         return VStack(spacing: 0) {
             if section.showsHeader {
@@ -332,9 +440,9 @@ struct ResourcesDashboard: View {
             ForEach(rows) { row in
                 switch row {
                 case .endpoint(let endpoint):
-                    endpointRow(endpoint, tier: tier)
+                    endpointRow(endpoint, tier: tier, columns: columns, showsModel: showsModel)
                 case .node(let endpoint, let node):
-                    nodeRow(endpoint, node: node, tier: tier)
+                    nodeRow(endpoint, node: node, tier: tier, columns: columns, showsModel: showsModel)
                 }
                 if row.id != rows.last?.id {
                     EndpointTableDivider()
@@ -350,7 +458,7 @@ struct ResourcesDashboard: View {
 
     /// The totals sit where a Mac app keeps them, at the foot of the window's
     /// content, rather than taking a band above the table.
-    private func tableFooter(tier: EndpointTableLayout.Tier) -> some View {
+    private func tableFooter(showsLegend: Bool) -> some View {
         HStack(spacing: 14) {
             Text("\(scopedEndpoints.count) 台服务器")
             Text("\(scopedGPUCount) 张 GPU")
@@ -360,7 +468,7 @@ struct ResourcesDashboard: View {
                 .truncationMode(.tail)
                 .help(fleetGPUModelSummary)
             Spacer(minLength: 8)
-            if tier.showsGPUModel {
+            if showsLegend {
                 CardLegend()
             }
             if store.freshness != .fresh {
@@ -405,6 +513,9 @@ struct ResourcesDashboard: View {
                     ? "从本机控制面移除所选服务器；不会停止远端进程"
                     : store.endpointLifecycleMutationUnavailableReason)
                 .accessibilityIdentifier("endpoint-bulk-remove-action")
+            Button("完成", action: toggleRemovalSelection)
+                .buttonStyle(.borderless)
+                .accessibilityLabel("完成批量移除")
         }
     }
 
@@ -462,12 +573,18 @@ struct ResourcesDashboard: View {
         }
     }
 
-    private func endpointRow(_ endpoint: EndpointRecord, tier: EndpointTableLayout.Tier) -> EndpointTableRow {
-        EndpointTableRow(
-            endpoint: endpoint, gpus: store.snapshot.gpus(for: endpoint),
+    private func endpointRow(
+        _ endpoint: EndpointRecord,
+        tier: EndpointTableLayout.Tier,
+        columns: Set<EndpointColumn>,
+        showsModel: Bool
+    ) -> EndpointTableRow {
+        let gpus = store.snapshot.gpus(for: endpoint)
+        return EndpointTableRow(
+            endpoint: endpoint, gpus: gpus,
             leases: leases(for: endpoint), group: store.snapshot.serverGroup(for: endpoint),
-            isSnapshotFresh: store.freshness == .fresh, tier: tier,
-            trend: store.utilizationTrends.servers[endpoint.id],
+            isSnapshotFresh: store.freshness == .fresh, tier: tier, columns: columns,
+            modelTag: showsModel && !gpus.isEmpty ? shortGPUModel(endpointGPUModelSummary(gpus)) : nil,
             removalMark: isSelectingForRemoval ? selectedEndpointIDs.contains(endpoint.id) : nil
         ) {
             if isSelectingForRemoval {
@@ -478,19 +595,29 @@ struct ResourcesDashboard: View {
         }
     }
 
-    private func nodeRow(_ endpoint: EndpointRecord, node: SchedulerNodeRecord, tier: EndpointTableLayout.Tier) -> SchedulerNodeTableRow {
+    private func nodeRow(
+        _ endpoint: EndpointRecord,
+        node: SchedulerNodeRecord,
+        tier: EndpointTableLayout.Tier,
+        columns: Set<EndpointColumn>,
+        showsModel: Bool
+    ) -> SchedulerNodeTableRow {
         SchedulerNodeTableRow(
             openEndpoint: openEndpoint,
             endpoint: endpoint, node: node, gpuName: node.gpuName ?? "—",
-            tier: tier, isSnapshotFresh: store.freshness == .fresh && endpoint.monitorStatus == "ONLINE" && endpoint.schedulerCapacity != nil,
+            tier: tier, columns: columns,
+            modelTag: showsModel ? node.gpuName.map(shortGPUModel) : nil,
+            isSnapshotFresh: store.freshness == .fresh && endpoint.monitorStatus == "ONLINE" && endpoint.schedulerCapacity != nil,
             leases: leases(for: endpoint), store: store
         )
     }
 
     private func sortValue(_ row: EndpointOverviewRow) -> ResourceTableSortValue? {
         switch row {
-        case .endpoint(let endpoint): return endpointRow(endpoint, tier: .compact).sortValue(for: sort)
-        case .node(let endpoint, let node): return nodeRow(endpoint, node: node, tier: .compact).sortValue(for: sort)
+        case .endpoint(let endpoint):
+            return endpointRow(endpoint, tier: .compact, columns: [], showsModel: false).sortValue(for: sort)
+        case .node(let endpoint, let node):
+            return nodeRow(endpoint, node: node, tier: .compact, columns: [], showsModel: false).sortValue(for: sort)
         }
     }
 
@@ -503,12 +630,21 @@ struct ResourcesDashboard: View {
         }
     }
 
+    /// The one model every machine here shares, and how many of it.
+    private func sectionModelLine(_ endpoints: [EndpointRecord]) -> String? {
+        let models = gpuModels(endpoints)
+        guard models.count == 1, let model = models.first else { return nil }
+        let count = endpoints.reduce(0) { $0 + store.snapshot.gpus(for: $1).count }
+        return count > 0 ? "\(model) × \(count)" : model
+    }
+
     @ViewBuilder
     private func groupSectionHeader(_ section: EndpointOverviewSection) -> some View {
         switch section.kind {
         case .group(let group):
             EndpointGroupSectionHeader(
                 title: group.displayName,
+                model: sectionModelLine(section.endpoints),
                 summary: endpointGroupCapacitySummary(section.endpoints, group: group, store: store),
                 connections: section.endpoints.filter { $0.connection.supported },
                 setConnection: { store.setConnection($0, enabled: $1) }
@@ -516,6 +652,7 @@ struct ResourcesDashboard: View {
         case .ungrouped:
             EndpointGroupSectionHeader(
                 title: "未分组的服务器",
+                model: sectionModelLine(section.endpoints),
                 summary: endpointGroupCapacitySummary(section.endpoints, group: nil, store: store),
                 actionTitle: "管理服务器组",
                 action: manageGroups,
@@ -606,21 +743,23 @@ private struct FilterChip: View {
 /// Column geometry for the server table, in three folding tiers.
 ///
 /// A grid would buy width by giving up the one thing this page is for, comparing
-/// four pressures down a column, so width is solved here instead: the address
-/// lane keeps a hard floor at every viewport, and the two columns whose facts are
-/// also in the row tooltip and the detail sheet fold away beneath it.  No tier
-/// drops a pressure cell.
+/// machines down a column, so width is solved here instead: the address lane keeps
+/// a hard floor at every viewport, and the two columns whose facts are also in the
+/// row tooltip and the detail sheet fold away beneath it.  No tier drops a metric;
+/// only a person does, from the view panel.
 
 enum EndpointTableLayout {
     static let scrollbarWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-    /// host:port at 13 pt.  The status word now has its own line beneath, so
-    /// this no longer has to fit a whole SSH command.
+    /// The dot, host:port at 13 pt, and a model tag when a group mixes models.
     static let addressLane: CGFloat = 200
     static let cardPadding: CGFloat = 16
-    /// Two lines: what it is, then what it is doing.
-    static let rowHeight: CGFloat = 50
+    /// One line of 13 pt text; the room around it is the point.
+    static let rowHeight: CGFloat = 56
     static let headerHeight: CGFloat = 32
     static let groupSpacing: CGFloat = 12
+    /// The figure beside a bar, wide enough for "100%".
+    static let meterFigureWidth: CGFloat = 34
+    static let meterHeight: CGFloat = 8
 
     enum Tier {
         /// Every column.
@@ -634,42 +773,40 @@ enum EndpointTableLayout {
         var showsAssignment: Bool { self != .compact }
 
         var columnSpacing: CGFloat { self == .wide ? 12 : 10 }
-        var assignmentWidth: CGFloat { self == .wide ? 160 : 150 }
-        /// Eight squares at 12 pt, and a vendor-qualified model name beneath.
-        var gpuModelWidth: CGFloat { 170 }
+        var assignmentWidth: CGFloat { self == .wide ? 170 : 150 }
+        /// Eight squares of 11 pt and their gaps, with a little room to spare.
+        var gpuModelWidth: CGFloat { 120 }
         var availabilityWidth: CGFloat { 48 }
+        var temperatureWidth: CGFloat { 52 }
 
-        /// A percentage above its bar.  The bar never disappears: a number that
+        /// A percentage beside its bar.  The bar never disappears: a number that
         /// cannot be compared down a column is the defect this table exists to
-        /// fix, and four metrics drawn two ways read as two classes of fact.
+        /// fix, and metrics drawn two ways read as two classes of fact.
         var pressureWidth: CGFloat {
             switch self {
-            case .wide: 72
-            case .medium: 68
-            case .compact: 64
+            case .wide: 84
+            case .medium: 80
+            case .compact: 76
             }
         }
 
         /// Content width this tier needs before the address lane would be squeezed.
-        var minimumWidth: CGFloat {
-            var total = EndpointTableLayout.addressLane + availabilityWidth + pressureWidth * 4
-            var columns = 5
-            if showsAssignment {
-                total += assignmentWidth
-                columns += 1
+        func minimumWidth(columns: Set<EndpointColumn>) -> CGFloat {
+            var widths = [EndpointTableLayout.addressLane, availabilityWidth]
+            if showsAssignment, columns.contains(.assignment) { widths.append(assignmentWidth) }
+            if showsGPUModel, columns.contains(.cards) { widths.append(gpuModelWidth) }
+            for metric in [EndpointColumn.gpuUtilization, .gpuMemory, .cpu, .memory] where columns.contains(metric) {
+                widths.append(pressureWidth)
             }
-            if showsGPUModel {
-                total += gpuModelWidth
-                columns += 1
-            }
-            return total + columnSpacing * CGFloat(columns - 1)
+            if columns.contains(.temperature) { widths.append(temperatureWidth) }
+            return widths.reduce(0, +) + columnSpacing * CGFloat(widths.count - 1)
         }
     }
 
-    static func tier(width: CGFloat) -> Tier {
+    static func tier(width: CGFloat, columns: Set<EndpointColumn>) -> Tier {
         let content = width - cardPadding * 2
-        if content >= Tier.wide.minimumWidth { return .wide }
-        if content >= Tier.medium.minimumWidth { return .medium }
+        if content >= Tier.wide.minimumWidth(columns: columns) { return .wide }
+        if content >= Tier.medium.minimumWidth(columns: columns) { return .medium }
         return .compact
     }
 }
@@ -734,6 +871,7 @@ private struct EndpointOverviewSection: Identifiable {
 
 private struct EndpointGroupSectionHeader: View {
     let title: String
+    let model: String?
     let summary: String
     var actionTitle: String? = nil
     var action: (() -> Void)? = nil
@@ -747,11 +885,20 @@ private struct EndpointGroupSectionHeader: View {
                 .font(Typography.label)
                 .foregroundStyle(DesignTokens.ink)
                 .lineLimit(1)
+            if let model {
+                Text(model)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
+            Spacer(minLength: 8)
             Text(summary)
                 .font(Typography.annotation)
                 .monospacedDigit()
                 .foregroundStyle(DesignTokens.mutedInk)
-            Spacer(minLength: 8)
+                .lineLimit(1)
+                .fixedSize()
             ForEach(connections) { endpoint in
                 Menu(endpoint.connection.label) {
                     if let message = endpoint.connection.message { Text(message) }
@@ -780,7 +927,7 @@ private struct EndpointGroupSectionHeader: View {
         .accessibilityAddTraits(.isHeader)
         .modifier(EndpointGroupSectionHeaderAccessibility(
             title: title,
-            summary: summary,
+            summary: [model, summary].compactMap { $0 }.joined(separator: "，"),
             combined: action == nil && connections.isEmpty
         ))
         .accessibilityIdentifier(action == nil ? "server-group-header" : "ungrouped-server-header")
@@ -809,6 +956,7 @@ private struct EndpointGroupSectionHeaderAccessibility: ViewModifier {
 
 private struct EndpointTableHeader: View {
     let tier: EndpointTableLayout.Tier
+    let columns: Set<EndpointColumn>
     let sort: EndpointSort
     let direction: EndpointSortDirection
     let selectSort: (EndpointSort) -> Void
@@ -817,24 +965,36 @@ private struct EndpointTableHeader: View {
         HStack(spacing: tier.columnSpacing) {
             header(.id, trailing: false)
                 .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
-            if tier.showsAssignment {
+            if tier.showsAssignment, columns.contains(.assignment) {
                 header(.assignment, trailing: false)
                     .frame(width: tier.assignmentWidth, alignment: .leading)
             }
-            if tier.showsGPUModel {
+            if tier.showsGPUModel, columns.contains(.cards) {
                 header(.gpuModel, trailing: false)
                     .frame(width: tier.gpuModelWidth, alignment: .leading)
             }
             header(.availableGPU, trailing: true)
                 .frame(width: tier.availabilityWidth, alignment: .trailing)
-            header(.gpuUtilization, trailing: false)
-                .frame(width: tier.pressureWidth, alignment: .leading)
-            header(.gpuMemory, trailing: false)
-                .frame(width: tier.pressureWidth, alignment: .leading)
-            header(.cpuLoad, trailing: false)
-                .frame(width: tier.pressureWidth, alignment: .leading)
-            header(.memory, trailing: false)
-                .frame(width: tier.pressureWidth, alignment: .leading)
+            if columns.contains(.gpuUtilization) {
+                header(.gpuUtilization, trailing: false)
+                    .frame(width: tier.pressureWidth, alignment: .leading)
+            }
+            if columns.contains(.gpuMemory) {
+                header(.gpuMemory, trailing: false)
+                    .frame(width: tier.pressureWidth, alignment: .leading)
+            }
+            if columns.contains(.cpu) {
+                header(.cpuLoad, trailing: false)
+                    .frame(width: tier.pressureWidth, alignment: .leading)
+            }
+            if columns.contains(.memory) {
+                header(.memory, trailing: false)
+                    .frame(width: tier.pressureWidth, alignment: .leading)
+            }
+            if columns.contains(.temperature) {
+                header(.temperature, trailing: false)
+                    .frame(width: tier.temperatureWidth, alignment: .leading)
+            }
         }
         .padding(.horizontal, EndpointTableLayout.cardPadding)
         .frame(height: EndpointTableLayout.headerHeight)
@@ -872,33 +1032,54 @@ private struct EndpointTableHeader: View {
     }
 }
 
-/// One pressure column: the percentage above its bar.  Where a recent line
-/// exists it stands in for the bar, since it says the same thing and more.
+/// One metric column: the percentage beside its bar.
 
 struct TablePressureCell: View {
     let label: String
+    let metric: ResourceMetric
     let fraction: Double?
+    /// The reading is not this machine's load right now: a keepalive's own hold,
+    /// or the last thing seen before the machine went quiet.
+    let muted: Bool
     let width: CGFloat
-    var trend: UtilizationSeries? = nil
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 3) {
+        HStack(spacing: 6) {
             Text(percentageLabel(fraction))
-                .font(Typography.identity)
+                .font(Typography.rowValue)
                 .monospacedDigit()
-                .foregroundStyle(pressureTextColor(fraction))
+                .foregroundStyle(muted ? DesignTokens.mutedInk : metricTextColor(metric, fraction))
                 .lineLimit(1)
-            if let trend, trend.hasData {
-                Sparkline(points: trend.points, color: pressureColor(fraction))
-                    .frame(height: 14)
-            } else {
-                PressureMeter(fraction: fraction, color: pressureColor(fraction), height: 4)
+                .frame(width: EndpointTableLayout.meterFigureWidth, alignment: .leading)
+            if fraction != nil {
+                PressureMeter(
+                    fraction: fraction,
+                    color: muted ? DesignTokens.meterMuted : metricColor(metric, fraction),
+                    height: EndpointTableLayout.meterHeight
+                )
             }
         }
         .frame(width: width, alignment: .leading)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
-        .accessibilityValue(percentageLabel(fraction))
+        .accessibilityValue(muted ? "\(percentageLabel(fraction))，不代表当前负载" : percentageLabel(fraction))
+    }
+}
+
+/// The hottest card on a machine, for whoever asked to see it.
+
+struct TableTemperatureCell: View {
+    let celsius: Int?
+    let width: CGFloat
+
+    var body: some View {
+        Text(celsius.map { "\($0) °C" } ?? "—")
+            .font(Typography.rowValue)
+            .monospacedDigit()
+            .foregroundStyle(celsius == nil ? DesignTokens.mutedInk : DesignTokens.ink)
+            .lineLimit(1)
+            .frame(width: width, alignment: .leading)
+            .accessibilityLabel("GPU 最高温度")
     }
 }
 
@@ -912,7 +1093,9 @@ private struct EndpointTableRow: View {
     let group: ServerGroupRecord?
     let isSnapshotFresh: Bool
     let tier: EndpointTableLayout.Tier
-    let trend: UtilizationSeries?
+    let columns: Set<EndpointColumn>
+    /// Set when this row's group mixes models, so the title cannot name one.
+    let modelTag: String?
     /// nil outside bulk removal; otherwise whether this row is checked.
     let removalMark: Bool?
     let select: () -> Void
@@ -927,6 +1110,7 @@ private struct EndpointTableRow: View {
         case .gpuMemory: return gpuMemoryPressure.map(ResourceTableSortValue.number)
         case .cpuLoad: return cpuLoadPressure.map(ResourceTableSortValue.number)
         case .memory: return memoryPressure.map(ResourceTableSortValue.number)
+        case .temperature: return peakTemperature.map { .number(Double($0)) }
         case .attention:
             let rank = (endpointNeedsAttention(endpoint) ? 3 : 0)
                 + (gpus.contains { gpuNeedsAttention($0) } ? 2 : 0)
@@ -945,17 +1129,28 @@ private struct EndpointTableRow: View {
                 }
                 serverCell
                     .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
-                if tier.showsAssignment {
+                if tier.showsAssignment, columns.contains(.assignment) {
                     assignmentCell.frame(width: tier.assignmentWidth, alignment: .leading)
                 }
-                if tier.showsGPUModel {
+                if tier.showsGPUModel, columns.contains(.cards) {
                     gpuModelCell.frame(width: tier.gpuModelWidth, alignment: .leading)
                 }
                 availabilityCell.frame(width: tier.availabilityWidth, alignment: .trailing)
-                TablePressureCell(label: "GPU 利用率", fraction: gpuPressure, width: tier.pressureWidth, trend: trend)
-                TablePressureCell(label: "显存占用率", fraction: gpuMemoryPressure, width: tier.pressureWidth)
-                TablePressureCell(label: "CPU 负载", fraction: cpuLoadPressure, width: tier.pressureWidth)
-                TablePressureCell(label: "内存占用率", fraction: memoryPressure, width: tier.pressureWidth)
+                if columns.contains(.gpuUtilization) {
+                    TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: gpuPressure ?? lastUsage?.gpuUtilization, muted: gpuReadingsAreQuiet || gpuPressure == nil, width: tier.pressureWidth)
+                }
+                if columns.contains(.gpuMemory) {
+                    TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: gpuMemoryPressure ?? lastUsage?.gpuMemory, muted: gpuReadingsAreQuiet || gpuMemoryPressure == nil, width: tier.pressureWidth)
+                }
+                if columns.contains(.cpu) {
+                    TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: cpuLoadPressure ?? lastUsage?.cpu, muted: cpuLoadPressure == nil, width: tier.pressureWidth)
+                }
+                if columns.contains(.memory) {
+                    TablePressureCell(label: "内存占用率", metric: .memory, fraction: memoryPressure ?? lastUsage?.memory, muted: memoryPressure == nil, width: tier.pressureWidth)
+                }
+                if columns.contains(.temperature) {
+                    TableTemperatureCell(celsius: peakTemperature, width: tier.temperatureWidth)
+                }
             }
             .padding(.horizontal, EndpointTableLayout.cardPadding)
             .frame(height: EndpointTableLayout.rowHeight)
@@ -966,7 +1161,7 @@ private struct EndpointTableRow: View {
         .focusable()
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
-        // Everything a two-line row cannot print — the workspace path, per-card
+        // Everything a one-line row cannot print — the workspace path, per-card
         // VRAM, the full lease list — is one hover away, and all of it is in
         // the detail sheet a click away.
         .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
@@ -981,67 +1176,69 @@ private struct EndpointTableRow: View {
         .accessibilityValue(accessibilityValue)
     }
 
-    /// The row's identity: host:port, then the one word that answers "can I ask
-    /// this machine for a GPU".
+    /// The row's identity: whether the host answers, and which host it is.
     private var serverCell: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            HStack(spacing: 6) {
-                Text(endpoint.connectionAddress)
-                    .font(Typography.rowPrimary)
-                    .foregroundStyle(DesignTokens.ink)
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-                    .textSelection(.enabled)
-                if endpoint.workspacePath == nil {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(Typography.annotation)
-                        .foregroundStyle(DesignTokens.warning)
-                        .help("工作区未设置")
-                }
-            }
-            HStack(spacing: 5) {
-                Circle()
-                    .fill(status.color)
-                    .frame(width: 7, height: 7)
-                Text(status.word)
+        HStack(spacing: 8) {
+            Circle()
+                .fill(endpointConnectionColor(endpoint, isSnapshotFresh: isSnapshotFresh))
+                .frame(width: 8, height: 8)
+                .accessibilityHidden(true)
+            Text(endpoint.connectionAddress)
+                .font(Typography.rowPrimary)
+                .foregroundStyle(DesignTokens.ink)
+                .lineLimit(1)
+                .truncationMode(.middle)
+                .textSelection(.enabled)
+            if endpoint.workspacePath == nil {
+                Image(systemName: "exclamationmark.triangle.fill")
                     .font(Typography.annotation)
-                    .foregroundStyle(status.color)
+                    .foregroundStyle(DesignTokens.warning)
+                    .help("工作区未设置")
+            }
+            if let modelTag {
+                Text(modelTag)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
                     .lineLimit(1)
                     .truncationMode(.tail)
+                    .layoutPriority(-1)
             }
         }
     }
 
     private var assignmentCell: some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(assignmentPrimary)
-                .font(Typography.identity)
-                .foregroundStyle(assignmentIsUnassigned ? DesignTokens.mutedInk : DesignTokens.ink)
-                .lineLimit(1)
+        let activity = ServerActivity(
+            endpoint: endpoint, gpus: gpus, leases: leases, status: status, isSnapshotFresh: isSnapshotFresh
+        )
+        return HStack(spacing: 0) {
+            Text(activity.primary)
+                .foregroundStyle(activity.color)
                 .truncationMode(.tail)
-            if let assignmentSecondary {
-                Text(assignmentSecondary)
-                    .font(Typography.annotation)
+                .layoutPriority(1)
+            if let secondary = activity.secondary {
+                Text(" · \(secondary)")
                     .foregroundStyle(DesignTokens.mutedInk)
-                    .lineLimit(1)
                     .truncationMode(.tail)
             }
         }
+        .font(.body)
+        .lineLimit(1)
         .frame(maxWidth: .infinity, alignment: .leading)
         .help(assignmentHelp)
     }
 
     private var gpuModelCell: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            if !gpus.isEmpty {
+        Group {
+            if gpus.isEmpty {
+                Text(gpuModelLine)
+                    .font(Typography.annotation)
+                    .foregroundStyle(DesignTokens.mutedInk)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            } else {
                 CardSquares(gpus: gpus.sorted { $0.index < $1.index }, size: 11)
                     .fixedSize()
             }
-            Text(gpuModelLine)
-                .font(Typography.annotation)
-                .foregroundStyle(DesignTokens.mutedInk)
-                .lineLimit(1)
-                .truncationMode(.tail)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .help(gpuModelDetail)
@@ -1081,8 +1278,7 @@ private struct EndpointTableRow: View {
         return "\(availableGPUCount)"
     }
 
-    /// A conflicted GPU used to earn a second line under the count; a 44 pt row
-    /// has no second line, so the count itself carries the warning.
+    /// A row has no second line, so the count itself carries the warning.
     private var availabilityTint: Color {
         if conflictedGPUCount > 0 { return DesignTokens.warning }
         return availableGPUCount > 0 ? DesignTokens.ink : DesignTokens.mutedInk
@@ -1100,18 +1296,6 @@ private struct EndpointTableRow: View {
 
     private var assignmentLine: String {
         assignmentTitle == "—" ? "—" : "\(assignmentTitle) · \(assignmentDetail)"
-    }
-
-    /// The task first: it is what a person looks for, and it is usually the
-    /// only part of a long lease name that tells two rows apart.
-    private var assignmentPrimary: String {
-        primaryLease == nil ? assignmentTitle : assignmentDetail
-    }
-
-    private var assignmentSecondary: String? {
-        if let primaryLease { return "\(primaryLease.holderLabel) · \(primaryLease.projectID)" }
-        if assignmentTitle == "—" { return nil }
-        return assignmentDetail
     }
 
     /// A GPU host names its hardware.  A scheduler endpoint names the pool
@@ -1137,10 +1321,6 @@ private struct EndpointTableRow: View {
 
     private var hasUnattributedWorkload: Bool {
         gpus.contains { ["BUSY_UNMANAGED", "CONFLICT", "ORPHANED_BUSY"].contains($0.state) }
-    }
-
-    private var assignmentIsUnassigned: Bool {
-        primaryLease == nil && !endpoint.keepalive.isActive && !endpoint.keepalive.isTransitioning
     }
 
     private var assignmentTitle: String {
@@ -1181,20 +1361,32 @@ private struct EndpointTableRow: View {
         return gpus.filter(\.isPubliclyAvailable).count
     }
 
-    private var gpuPressure: Double? {
-        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.gpuUtilizationFraction : nil
+    private var selfNode: ResourceNodeRecord? {
+        endpoint.resourceNodes.first(where: { $0.id == "self" })
     }
 
-    private var gpuMemoryPressure: Double? {
-        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.gpuMemoryFraction : nil
+    private var gpuPressure: Double? { isSnapshotFresh ? selfNode?.gpuUtilizationFraction : nil }
+
+    private var gpuMemoryPressure: Double? { isSnapshotFresh ? selfNode?.gpuMemoryFraction : nil }
+
+    private var cpuLoadPressure: Double? { isSnapshotFresh ? selfNode?.cpuUtilizationFraction : nil }
+
+    private var memoryPressure: Double? { isSnapshotFresh ? selfNode?.memoryFraction : nil }
+
+    /// What the row can still show once a host stops answering, greyed.  Sorting and
+    /// every count ignore it.
+    private var lastUsage: ResourceNodeUsage? {
+        isSnapshotFresh && selfNode?.fresh == true ? nil : selfNode?.lastUsage
     }
 
-    private var cpuLoadPressure: Double? {
-        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.cpuUtilizationFraction : nil
+    /// Nothing but ServerPilot's own hold on these cards, so their load says nothing.
+    private var gpuReadingsAreQuiet: Bool {
+        gpus.contains { $0.state == "KEEPALIVE" }
+            && gpus.allSatisfy { ["KEEPALIVE", "AVAILABLE"].contains($0.state) }
     }
 
-    private var memoryPressure: Double? {
-        isSnapshotFresh ? endpoint.resourceNodes.first(where: { $0.id == "self" })?.memoryFraction : nil
+    private var peakTemperature: Int? {
+        isSnapshotFresh && selfNode?.fresh == true ? gpus.compactMap(\.temperature).max() : nil
     }
 
     private var gpuCaption: String {

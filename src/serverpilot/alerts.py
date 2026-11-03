@@ -32,7 +32,8 @@ EXPIRY_LEAD_SECONDS = 1800
 OVERRUN_FACTOR = 2
 
 CAPACITY_STABLE_SECONDS = 120
-CAPACITY_REPEAT_SECONDS = 1800
+#: How long after telling a person something the same thing stays quiet.
+NOTIFY_REPEAT_SECONDS = 1800
 COALESCE_SECONDS = 60
 #: Older than this and a missed alert is history, not news.
 NOTIFY_WITHIN_SECONDS = 86_400
@@ -89,6 +90,10 @@ def step_absent(state: str, pending_since: datetime | None, *, clear_streak: int
     return Step(state, pending_since, streak)
 
 
+def rested(last_notified_at: datetime | None, now: datetime) -> bool:
+    return last_notified_at is None or now - last_notified_at >= timedelta(seconds=NOTIFY_REPEAT_SECONDS)
+
+
 def step_capacity(
     state: str | None,
     pending_since: datetime | None,
@@ -108,10 +113,7 @@ def step_capacity(
         return Step(state or "resolved", pending_since)
     since = pending_since or now
     settled = now - since >= timedelta(seconds=CAPACITY_STABLE_SECONDS)
-    rested = last_notified_at is None or now - last_notified_at >= timedelta(
-        seconds=CAPACITY_REPEAT_SECONDS
-    )
-    return Step("active" if settled and rested else "pending", since)
+    return Step("active" if settled and rested(last_notified_at, now) else "pending", since)
 
 
 def coalesce(alerts: list[dict[str, Any]]) -> list[dict[str, Any]]:

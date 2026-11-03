@@ -14,8 +14,6 @@ public enum CardLoad: String, CaseIterable, Sendable {
     case fault
     case stale
 
-    public static let nearFullFraction = 0.80
-
     public var label: String {
         switch self {
         case .free: "空闲"
@@ -37,7 +35,7 @@ public enum CardLoad: String, CaseIterable, Sendable {
                 self = .unmeasured
                 return
             }
-            self = peak >= Self.nearFullFraction ? .nearFull : .low
+            self = peak >= ResourceMetric.nearlyFull ? .nearFull : .low
         case "CONFLICT", "ORPHANED_BUSY", "UNHEALTHY", "ERROR", "MAINTENANCE":
             self = .fault
         default:

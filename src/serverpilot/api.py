@@ -991,12 +991,15 @@ def create_app(
             return
         revision = result.get("snapshot_revision")
         key_suffix = revision if isinstance(revision, int) else int(time.time())
-        with contextlib.suppress(Exception):
+        try:
             await reconcile_endpoint_keepalive(
                 collector_system_actor,
                 endpoint.id,
                 idempotency_key=f"keepalive-reconcile:{endpoint.id}:{key_suffix}",
             )
+        except Exception:
+            # The next collection tries again; say so rather than fail in silence.
+            logger.exception("keepalive reconcile failed for %s", endpoint.id)
 
     async def observe_endpoint_forever(endpoint: Any) -> None:
         """One endpoint's own probe loop. Nothing here is shared with another.
@@ -1056,8 +1059,10 @@ def create_app(
                 for endpoint_id in [key for key in tasks if key not in current]:
                     tasks.pop(endpoint_id).cancel()
                 if time.monotonic() >= collector_state["next_prune_at"]:
-                    with contextlib.suppress(Exception):
+                    try:
                         await service.in_domain(service.prune_expired)
+                    except Exception:
+                        logger.exception("pruning expired records failed")
                     collector_state["next_prune_at"] = time.monotonic() + 3600
                 await asyncio.sleep(COLLECTOR_SUPERVISOR_INTERVAL_SECONDS)
         finally:

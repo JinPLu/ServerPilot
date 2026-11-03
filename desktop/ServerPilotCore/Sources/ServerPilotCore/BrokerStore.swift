@@ -163,8 +163,12 @@ public final class BrokerStore: ObservableObject {
     @Published public private(set) var openAlertCount = 0
     @Published public private(set) var utilizationTrends = UtilizationTrends.empty
     /// How often to ask whether anything changed: quickly while someone is
-    /// looking, slowly from the menu bar.
-    @Published public var windowVisible = true
+    /// looking, slowly from the menu bar.  Coming back into view catches up at once.
+    @Published public var windowVisible = true {
+        didSet {
+            if windowVisible, !oldValue { requestRefresh() }
+        }
+    }
 
     private var baseURL: URL?
     private var snapshotClient: BrokerSnapshotClient?
@@ -180,6 +184,7 @@ public final class BrokerStore: ObservableObject {
     private var pulseTask: Task<Void, Never>?
     private var lastPulse: PulseRecord?
     private var lastTrendsFetch: Date?
+    private var lastRefreshStartedAt: Date?
     private var consecutiveRefreshFailures = 0
     /// True while `errorMessage` describes a refresh, the one kind of error a
     /// later successful refresh may clear.
@@ -195,6 +200,7 @@ public final class BrokerStore: ObservableObject {
     private static let failuresBeforeStale = 2
     private static let pulseIntervalVisibleSeconds: TimeInterval = 3
     private static let pulseIntervalHiddenSeconds: TimeInterval = 15
+    private static let refreshSpacingHiddenSeconds: TimeInterval = 60
     /// The lines move a bucket at a time, every few minutes at the finest.
     private static let trendsIntervalSeconds: TimeInterval = 60
     private static let endpointTelemetryHistoryCacheMaximumAge: TimeInterval = 30
@@ -1273,8 +1279,22 @@ public final class BrokerStore: ObservableObject {
         startRefresh()
     }
 
+    /// Every probe of every server moves the revision, so a new one is not by itself
+    /// a reason to fetch the whole state again.  A person's own actions do not come
+    /// through here: they refresh at once.
+    @discardableResult
+    func requestRefreshIfDue() -> Bool {
+        let spacing = windowVisible ? refreshIntervalSeconds : Self.refreshSpacingHiddenSeconds
+        if let last = lastRefreshStartedAt, dateProvider().timeIntervalSince(last) < spacing {
+            return false
+        }
+        requestRefresh()
+        return true
+    }
+
     private func startRefresh() {
         guard let snapshotClient else { return }
+        lastRefreshStartedAt = dateProvider()
         refreshGeneration &+= 1
         let generation = refreshGeneration
         let actorID = self.actorID
@@ -1447,10 +1467,10 @@ public final class BrokerStore: ObservableObject {
             openAlertCount = pulse.openAlerts
         }
         guard pulse != previous else { return }
-        if previous?.revision != pulse.revision {
-            requestRefresh()
+        let refreshed = previous?.revision != pulse.revision && requestRefreshIfDue()
+        if refreshed || previous?.openAlerts != pulse.openAlerts {
+            await reloadAlerts()
         }
-        await reloadAlerts()
     }
 
     private func reloadUtilizationTrendsIfDue() async {
@@ -1519,7 +1539,7 @@ public final class BrokerStore: ObservableObject {
                 } catch {
                     break
                 }
-                self?.requestRefresh()
+                self?.requestRefreshIfDue()
             }
         }
     }

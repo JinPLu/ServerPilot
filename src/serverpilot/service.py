@@ -112,6 +112,10 @@ SERVER_TREND_BUCKET_SECONDS = 3 * 60
 # Preserve the already-observed identity across that small movement; otherwise a
 # healthy long-running process can look new and lose its workload attribution.
 PROCESS_START_TIME_JITTER_SECONDS = 2
+# Below this an outage is a blip, the same line beyond which a person is told a
+# server is offline, and an idle streak waits it out. Beyond it a whole job could
+# have come and gone unseen, so the streak starts over.
+IDLE_OUTAGE_RESET_SECONDS = alert_rules.OFFLINE_HOLD_SECONDS
 MUTATING_ROLES = {"allocator", "operator", "admin"}
 COLLECTOR_INTERVAL_PRESETS = {5, 10, 30}
 logger = logging.getLogger(__name__)
@@ -3992,20 +3996,23 @@ class BrokerService:
                          and state.error_code is None)
             cards = [gpu for gpu in gpus if gpu["node_id"] == node_id and gpu["present"]]
             sampled = [gpu for gpu in cards if gpu["telemetry"] is not None]
-            gpu_complete = fresh and len(sampled) == len(cards) and bool(cards)
+            gpu_complete = len(sampled) == len(cards) and bool(cards)
             utils = [gpu["telemetry"]["gpu_utilization_pct"] for gpu in sampled]
             total_vram = sum(gpu["total_vram_mib"] for gpu in sampled)
-            usage = {
+            last_usage = {
                 "gpu_utilization_pct": sum(utils) / len(utils) if gpu_complete and all(x is not None for x in utils) else None,
                 "gpu_memory_used_pct": 100 * sum(gpu["telemetry"]["memory_used_mib"] for gpu in sampled) / total_vram if gpu_complete and total_vram else None,
-                "cpu_utilization_pct": host.cpu_utilization_pct if fresh and host else None,
-                "memory_used_pct": self._host_memory_used_pct(host) if fresh and host else None,
+                "cpu_utilization_pct": host.cpu_utilization_pct if host else None,
+                "memory_used_pct": self._host_memory_used_pct(host) if host else None,
             }
+            # `usage` is what anything may decide from, so a quiet node has none.
+            # `last_usage` is only for a person to read, greyed, beside its age.
+            usage = last_usage if fresh else dict.fromkeys(last_usage)
             result.append({"node_id": node_id, "observed_at": _iso(at), "fresh": fresh,
                 "last_attempt_at": _iso(_as_utc(state.last_attempt_at)) if state else None,
                 "error_code": state.error_code if state else None, "message": state.message if state else None,
                 "host_telemetry": self._host_telemetry_dict(host),
-                "gpu_ids": [gpu["id"] for gpu in cards], "usage": usage})
+                "gpu_ids": [gpu["id"] for gpu in cards], "usage": usage, "last_usage": last_usage})
         return result
 
     def snapshot(
@@ -6621,7 +6628,7 @@ class BrokerService:
             at_risk = []
             working_endpoints = self._working_endpoints(session, cards, now)
             for card in cards:
-                idle_since = _as_utc(card.idle_since)
+                idle_since = self._idle_anchor(card, now)
                 if idle_since is None:
                     continue
                 reclaim_at = idle_since + timedelta(seconds=self._card_reclaim_after_seconds(
@@ -6867,6 +6874,9 @@ class BrokerService:
         last = getattr(self, "_alerts_evaluated_at", None)
         if last is not None and (now - last).total_seconds() < alert_rules.EVALUATE_EVERY_SECONDS:
             return
+        resuming = last is None or (now - last).total_seconds() > self.collector.stale_after_seconds
+        if resuming:
+            self._alerts_resumed_at = now
         self._alerts_evaluated_at = now
         signals = {signal.key: signal for signal in self._alert_signals(session, now)}
         rows = {
@@ -6881,9 +6891,10 @@ class BrokerService:
         }
         for key, signal in signals.items():
             row = rows.get(key)
+            # Nobody was watching across a gap, so a hold cannot have run through it.
             step = alert_rules.step_present(
                 row.state if row else "pending",
-                _as_utc(row.pending_since) if row else None,
+                _as_utc(row.pending_since) if row and not resuming else None,
                 hold_seconds=signal.hold_seconds,
                 now=now,
             )
@@ -6894,10 +6905,18 @@ class BrokerService:
             row.message = signal.message[:1000]
             row.last_seen_at = now
             row.payload_json = json_dump({**signal.payload, "clear_streak": 0})
-            if signal.silent and row.notified_at is None:
+            if row.notified_at is None and (
+                signal.silent or (step.state == "active" and self._told_recently(session, row, now))
+            ):
                 row.notified_at = now
         for key, row in rows.items():
             if key in signals:
+                continue
+            if row.state == "pending":
+                # It never reached anyone, so there is nothing to say it is over.
+                session.delete(row)
+                continue
+            if row.lease_id and self._lease_has_unseen_cards(session, row.lease_id, now):
                 continue
             payload = json_load(row.payload_json or "{}")
             step = alert_rules.step_absent(
@@ -6910,6 +6929,27 @@ class BrokerService:
             row.payload_json = json_dump({**payload, "clear_streak": step.clear_streak})
             row.last_seen_at = now
         self._evaluate_capacity_alerts(session, now)
+
+    @staticmethod
+    def _told_recently(session: Session, row: Alert, now: datetime) -> bool:
+        """A server going up and down is one story, not a banner per outage."""
+
+        told = _as_utc(session.scalar(
+            select(func.max(Alert.notified_at)).where(
+                Alert.dedupe_key == row.dedupe_key, Alert.id != row.id
+            )
+        ))
+        return not alert_rules.rested(told, now)
+
+    def _lease_has_unseen_cards(self, session: Session, lease_id: str, now: datetime) -> bool:
+        """A reminder about cards nobody can see has not been answered, so it stands."""
+
+        cards = session.scalars(
+            select(LeaseResource).where(
+                LeaseResource.lease_id == lease_id, LeaseResource.active.is_(True)
+            )
+        ).all()
+        return bool(cards) and not self._resources_have_fresh_telemetry(session, cards, now)
 
     @staticmethod
     def _new_reminder(session: Session, signal: alert_rules.Signal, now: datetime) -> Alert:
@@ -6959,7 +6999,7 @@ class BrokerService:
             at_risk = 0
             idle = 0
             for card in cards:
-                idle_since = _as_utc(card.idle_since)
+                idle_since = self._idle_anchor(card, now)
                 if idle_since is None:
                     continue
                 idle_seconds = (now - idle_since).total_seconds()
@@ -7068,13 +7108,23 @@ class BrokerService:
             key = f"group:{endpoint.server_group_id}" if endpoint.server_group_id else f"server:{endpoint.id}"
             groups[key].append(gpu)
             names[key] = endpoint.server_group_id or endpoint.id
+        resumed = getattr(self, "_alerts_resumed_at", None)
+        settling = resumed is not None and (
+            (now - resumed).total_seconds() < alert_rules.OFFLINE_HOLD_SECONDS
+        )
         for key, gpus in groups.items():
-            states = [self._gpu_state(session, gpu, now)[0] for gpu in gpus]
-            if any(state.startswith("UNKNOWN") for state in states):
-                # Stale data says nothing about whether the group emptied or
-                # refilled, and a recovery must not read as cards appearing.
+            states = {gpu.id: self._gpu_state(session, gpu, now)[0] for gpu in gpus}
+            unseen = [gpu_id for gpu_id, state in states.items() if state.startswith("UNKNOWN")]
+            # A card gone quiet moments ago, or while collection is only now
+            # resuming, might be anything, and its return must not read as cards
+            # appearing. One quiet for longer is offline: the rest of the group
+            # still has an answer, and that server must not silence it.
+            if unseen and (settling or self._seen_within_offline_hold(session, unseen, now)):
                 continue
-            free = sum(state in {"AVAILABLE", "KEEPALIVE"} for state in states)
+            known = [state for gpu_id, state in states.items() if gpu_id not in unseen]
+            if not known:
+                continue
+            free = sum(state in {"AVAILABLE", "KEEPALIVE"} for state in known)
             dedupe_key = f"capacity:{key}"
             row = session.scalar(select(Alert).where(
                 Alert.dedupe_key == dedupe_key, Alert.state.in_(alert_rules.OPEN_STATES)
@@ -7111,6 +7161,15 @@ class BrokerService:
             row.last_seen_at = now
             if step.state == "active":
                 row.message = f"{names[key]} 有 {free} 张空闲 GPU"[:1000]
+
+    @staticmethod
+    def _seen_within_offline_hold(session: Session, gpu_ids: list[str], now: datetime) -> bool:
+        cutoff = now - timedelta(seconds=alert_rules.OFFLINE_HOLD_SECONDS)
+        return bool(session.scalar(
+            select(func.count()).select_from(TelemetryCurrent).where(
+                TelemetryCurrent.gpu_id.in_(gpu_ids), TelemetryCurrent.observed_at >= cutoff
+            )
+        ))
 
     def _raise_lease_reclaimed(self, session: Session, lease: Lease, count: int, now: datetime) -> None:
         """A reclaim happens once, so its reminder stands until someone reads it."""
@@ -8919,17 +8978,47 @@ class BrokerService:
                 last_seen = observed
         return (now - last_seen).total_seconds()
 
-    def _gpu_is_observably_idle(
+    def _card_idleness(
         self,
         session: Session,
         resource: LeaseResource,
         now: datetime,
-    ) -> bool:
-        """Return whether this one GPU is currently observed to run nothing."""
+    ) -> bool | None:
+        """Whether this one GPU is observed to run nothing; None when nobody can see it."""
 
         if self._current_processes(session, resource.gpu_id, now):
             return False
-        return self._resources_have_fresh_telemetry(session, [resource], now)
+        return True if self._resources_have_fresh_telemetry(session, [resource], now) else None
+
+    def _idle_anchor(self, row: LeaseResource | ResourceAllocation, now: datetime) -> datetime | None:
+        """When a streak effectively began, leaving out a stretch nobody could see."""
+
+        since = _as_utc(row.idle_since)
+        if since is None:
+            return None
+        gap = now - (_as_utc(row.idle_checked_at) or now)
+        return since + gap if gap.total_seconds() > self.collector.stale_after_seconds else since
+
+    def _advance_idle_clock(
+        self, row: LeaseResource | ResourceAllocation, idle: bool | None, now: datetime
+    ) -> None:
+        """Move a streak on from one look at the card.
+
+        The clock is wall time, but only observed time may count. Nothing runs
+        while the Mac sleeps, not even a failure to record, so the gap has to be
+        noticed here, on the next look.
+        """
+
+        checked = _as_utc(row.idle_checked_at)
+        long_outage = (
+            checked is not None and (now - checked).total_seconds() >= IDLE_OUTAGE_RESET_SECONDS
+        )
+        if idle is False or (idle is None and long_outage):
+            row.idle_since = None
+            row.idle_checked_at = None
+        elif idle:
+            row.idle_since = now if long_outage else self._idle_anchor(row, now) or now
+            row.idle_checked_at = now
 
     @staticmethod
     def _gpu_uuid(session: Session, gpu_id: str) -> str:
@@ -8953,7 +9042,7 @@ class BrokerService:
         kept: list[dict[str, Any]] = []
         changed: list[str] = []
         for card in cards:
-            idle_since = _as_utc(card.idle_since) or now
+            idle_since = self._idle_anchor(card, now) or now
             elapsed = int((now - idle_since).total_seconds())
             windows = min(MAX_KEEP_IDLE_WINDOWS, elapsed // window + 2)
             if windows > card.keep_idle_windows:
@@ -9045,9 +9134,11 @@ class BrokerService:
 
         Idleness is tracked per GPU, so a claim that keeps eight cards and uses
         one returns the other seven instead of counting as busy as a whole.  The
-        clock of a GPU is reset whenever a process appears on it or its
-        telemetry goes stale, so each streak is a continuously observed window
-        and a collector outage can never accumulate into a reclaim.
+        clock of a GPU is reset whenever a process appears on it or it goes
+        unseen for ``IDLE_OUTAGE_RESET_SECONDS``, so each streak is an observed
+        window and an outage can never accumulate into a reclaim.  A shorter
+        blip only pauses the clock: it could not have hidden a job, and on a
+        flaky link a reset would mean a forgotten claim is never returned.
 
         A claim running nothing *anywhere* is a different case from a claim
         running something on one card and nothing on another.  The second is a
@@ -9104,15 +9195,18 @@ class BrokerService:
         reclaimed: list[LeaseResource] = []
         alerting = 0
         for resource in resources:
-            if not self._gpu_is_observably_idle(session, resource, now):
-                resource.idle_since = None
+            idle = self._card_idleness(session, resource, now)
+            self._advance_idle_clock(resource, idle, now)
+            anchor = self._idle_anchor(resource, now)
+            if anchor is None:
                 resource.keep_idle_windows = 0
                 continue
-            if resource.idle_since is None:
-                resource.idle_since = now
-                continue
-            idle_seconds = (now - (_as_utc(resource.idle_since) or now)).total_seconds()
+            idle_seconds = (now - anchor).total_seconds()
             if idle_seconds < alert_after:
+                continue
+            if idle is None:
+                # Nothing is known right now: not a recovery, and not grounds to act.
+                alerting += 1
                 continue
             working = endpoint_of[resource.id] in working_endpoints
             if (
@@ -9219,11 +9313,9 @@ class BrokerService:
                 if allocation.state == "release_pending":
                     continue
                 idle = self._allocation_idle(allocation, now)
+                self._advance_idle_clock(allocation, idle, now)
                 if not idle:
-                    allocation.idle_since = None
                     continue
-                if allocation.idle_since is None:
-                    allocation.idle_since = now
                 duration = (now - (_as_utc(allocation.idle_since) or now)).total_seconds()
                 alive = (now - (_as_utc(lease.last_heartbeat_at) or now)).total_seconds()
                 if (duration >= self.inventory.idle_lease_reclaim_seconds

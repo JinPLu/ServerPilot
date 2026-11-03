@@ -24,6 +24,31 @@ import Testing
         #expect(store.freshness == .fresh)
     }
 
+    @Test func testANewRevisionDoesNotFetchEverythingAgainUntilItIsDue() async throws {
+        let snapshot = try Self.snapshot(named: "1")
+        let client = DelayedSequenceClient(snapshots: [snapshot, snapshot, snapshot], delayNanoseconds: 0)
+        var now = Date(timeIntervalSince1970: 1_000)
+        let store = BrokerStore(
+            actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 12, dateProvider: { now }
+        )
+        store.connectForTesting(snapshotClient: client)
+        try await waitUntilAsync { await client.metrics().callCount == 1 }
+        try await waitUntil { !store.isRefreshing }
+
+        now += 5
+        #expect(!store.requestRefreshIfDue())
+        now += 7
+        #expect(store.requestRefreshIfDue())
+        try await waitUntil { !store.isRefreshing }
+
+        // Nobody looking: a minute apart, until they look again.
+        store.windowVisible = false
+        now += 30
+        #expect(!store.requestRefreshIfDue())
+        store.windowVisible = true
+        try await waitUntilAsync { await client.metrics().callCount == 3 }
+    }
+
     @Test func testEquivalentRefreshDoesNotRepublishSnapshotOrLastGoodSnapshot() async throws {
         let initial = try Self.snapshot(named: "1")
         var equivalent = initial

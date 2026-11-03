@@ -17,7 +17,6 @@ struct NativeBrokerRoot: View {
     @State private var showClaim = false
     @State private var showGroupManagement = false
     @State private var claimInitialEndpointID = ""
-    @State private var selectedGPUID: String?
     @State private var selectedEndpointDetailID: String?
     @State private var editingEndpointID: String?
     @State private var selectedDashboardSection: DashboardSection
@@ -41,13 +40,6 @@ struct NativeBrokerRoot: View {
 #else
         _selectedDashboardSection = State(initialValue: .overview)
 #endif
-    }
-
-    private var selectedGPUSelection: Binding<StableRecordSelection?> {
-        Binding(
-            get: { selectedGPUID.map(StableRecordSelection.init(id:)) },
-            set: { selectedGPUID = $0?.id }
-        )
     }
 
     private var selectedEndpointSelection: Binding<StableRecordSelection?> {
@@ -128,20 +120,13 @@ struct NativeBrokerRoot: View {
                             claimInitialEndpointID = ""
                             showClaim = true
                         },
-                        claimEndpoint: { endpointID in
-                            claimInitialEndpointID = endpointID
-                            showClaim = true
-                        },
                         manageGroups: { showGroupManagement = true },
                         openEndpoint: { endpoint in
                             selectedEndpointDetailID = endpoint.id
                         },
                         selectedSection: $selectedDashboardSection,
                         selectedGroupID: selectedGroupID,
-                        resourceFilter: $resourceFilter,
-                        selectGPU: { gpu in
-                            selectedGPUID = gpu.id
-                        }
+                        resourceFilter: $resourceFilter
                     )
                 }
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -186,13 +171,12 @@ struct NativeBrokerRoot: View {
                 }
             }
         }
-        .sheet(item: selectedGPUSelection) { selection in
-            if let gpu = store.snapshot.gpu(id: selection.id) {
-                GPUDetailSheet(gpu: gpu)
-            }
-        }
         .onAppear {
             openFixtureDetailIfRequested(endpointIDs: store.snapshot.endpoints.map(\.id))
+        }
+        .onReceive(NotificationCenter.default.publisher(for: .serverPilotOpenSettings)) { _ in
+            selectedGroupID = nil
+            selectedDashboardSection = .settings
         }
         .onReceive(NotificationCenter.default.publisher(for: .serverPilotRequestClaim)) { _ in
             claimInitialEndpointID = ""
@@ -205,11 +189,6 @@ struct NativeBrokerRoot: View {
             }
             if let editingEndpointID, !endpointIDs.contains(editingEndpointID) {
                 self.editingEndpointID = nil
-            }
-        }
-        .onChange(of: store.snapshot.gpus.map(\.id)) { _, gpuIDs in
-            if let selectedGPUID, !gpuIDs.contains(selectedGPUID) {
-                self.selectedGPUID = nil
             }
         }
     }
@@ -301,7 +280,7 @@ private struct SidebarSelection: View {
                 if let systemImage {
                     Image(systemName: systemImage)
                         .font(.body)
-                        .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
+                        .foregroundStyle(selected ? DesignTokens.ink : DesignTokens.mutedInk)
                         .frame(width: 18)
                 }
                 if !compact {
@@ -413,7 +392,8 @@ private struct AppToolbar: View {
     }
 
     private var statusText: String {
-        if store.errorMessage != nil, store.lastGoodSnapshot != nil {
+        // A refused edit also sets errorMessage, and says nothing about the connection.
+        if store.freshness == .stale {
             return "连接已中断 · 显示上次数据"
         }
         if store.snapshot.snapshotRevision != nil {
