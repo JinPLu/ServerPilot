@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.1.0 - 2026-11-04
 
 - **Status and GPU model are back where they were in the server table.**
   - The server column has two lines again: the address, then a coloured dot and a status word, which also says how old the readings are when a host stops answering.
