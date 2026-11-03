@@ -8,6 +8,7 @@
 
 ## Project current state
 
+- **5.0.0 之后的界面调整（11 月 4 日，未提交）**：用户看过效果后，服务器列和每张卡列恢复两行，表头改成带图标的横条，总览、服务器页和任务页收成四档字号，见[讨论](discussions/beszel-reference.md)。
 - **5.0.0（11 月 4 日）**：参考 Beszel 放松界面，修复合盖唤醒回收、提醒和轮询问题，见[讨论](discussions/beszel-reference.md)。磁盘采集和探针分段超时尚未开始，等用户确认只看本地盘是否够用。
 - **App 界面重新整理（11 月 2 日，4.1.0；4.1.1 改用系统侧栏并标出趋势线的采集中断；4.2.0 方块改说负载、服务器组各成一张卡片）**：原生 macOS 骨架，总览吸收数据仪表与分组方块，中性底，暂不做深色。契约见 [DESIGN_SYSTEM](../DESIGN_SYSTEM.md)，未验证项见 `docs/IMPLEMENTATION_STATUS_zh.md` 顶部条目。
 - **4.0.0 已发布（10 月 31 日）**：见[计划](plans/v4-agent-and-app-redesign.md)。

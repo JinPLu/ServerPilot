@@ -1,9 +1,19 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-11-02（Asia/Taipei）
+更新时间：2026-11-04（Asia/Taipei）
 
 当前包装版本为 `5.0.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 服务器表恢复两行，表头横条，字号四档（2026-11-04，未发布）
+
+用户看过 5.0.0 的实际效果后提出四点：服务器列保持原来的设计，卡型放回每张卡列，表头学 Beszel，首页和任务页的字号规整。
+
+改动：`EndpointTableRow` 和 `SchedulerNodeTableRow` 的服务器、任务、每张卡三格恢复两行，删掉 `modelTag` 和组标题上的型号，只留一处。连不上时状态行写明读数多久前，这个事实原来在任务列，由 `lastReadingAge` 提供。`ServerActivity` 只剩总览磁贴在用，删掉 `secondary`。`EndpointTableHeader` 改成 40 pt 白色横条，每列用 `EndpointColumnHeader` 画图标、列名和箭头，图标写在 `EndpointSort.systemImage`。列宽调成每张卡 128、空闲 60、指标 80，保住 1280 窗口下的每张卡列。`Typography` 删掉 `hero`、`pageTitle`，`display` 从 34 改成 26，新增 15 pt 的 `sectionTitle`；原来指向 13 pt 的三处 `sectionTitle` 改用 `label`。主、次按钮文字从 12 改成 13，影响全 App。
+
+验证：用桌面夹具看了服务器页（1024、1280、1440 宽，以及 Slurm 节点）、总览和任务页的截图。列标题没有被截断，1280 宽每张卡列和完整型号都显示，1024 宽每张卡列按设计折叠。Swift 92 项和 `test_macos_daemon.py`、`test_release_metadata.py` 通过。
+
+未验证：真实数据下的观感；表头悬停和键盘操作只读了代码，没有手动点过；长型号（如带 `+1 类` 的混合机器）的截断效果。提醒、表单、弹窗和设置页的字号没有动，仍有 12、10 和 17。
 
 ## 5.0.0 为什么是主版本（2026-11-04）
 

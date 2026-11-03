@@ -268,7 +268,7 @@ private struct MenuBarPopover: View {
             VStack(alignment: .leading, spacing: 3) {
                 HStack(alignment: .firstTextBaseline, spacing: 5) {
                     Text("\(summary.availableGPUs)")
-                        .font(Typography.hero)
+                        .font(Typography.display)
                         .foregroundStyle(DesignTokens.ink)
                     Text("/ \(summary.totalGPUs) 空闲")
                         .font(.body)

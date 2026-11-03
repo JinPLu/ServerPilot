@@ -30,7 +30,7 @@ struct ResourceUsageDashboard: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("\(ordered.count) 个任务 · 占用 \(ordered.reduce(0) { $0 + $1.gpuCount }) 张卡")
-                        .font(Typography.identity)
+                        .font(.body)
                         .monospacedDigit()
                         .foregroundStyle(DesignTokens.mutedInk)
                     section("需要留意", leases: quiet)
@@ -52,7 +52,7 @@ struct ResourceUsageDashboard: View {
         if !leases.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text(title)
-                    .font(.title3.weight(.semibold))
+                    .font(Typography.sectionTitle)
                     .foregroundStyle(DesignTokens.ink)
                     .accessibilityAddTraits(.isHeader)
                 ForEach(leases) { lease in
@@ -119,7 +119,7 @@ private struct TaskCard: View {
                         VStack(alignment: .leading, spacing: 3) {
                             HStack(alignment: .firstTextBaseline, spacing: 10) {
                                 Text(title)
-                                    .font(.title3.weight(.semibold))
+                                    .font(Typography.sectionTitle)
                                     .foregroundStyle(DesignTokens.ink)
                                     .lineLimit(2)
                                     .help(title)
@@ -137,7 +137,7 @@ private struct TaskCard: View {
                             ForEach(stats, id: \.label) { stat in
                                 VStack(alignment: .leading, spacing: 1) {
                                     Text(stat.value)
-                                        .font(Typography.pageTitle)
+                                        .font(Typography.sectionTitle)
                                         .monospacedDigit()
                                         .foregroundStyle(DesignTokens.ink)
                                     Text(stat.label)
@@ -150,8 +150,7 @@ private struct TaskCard: View {
                         ForEach(servers, id: \.id) { server in
                             HStack(spacing: 10) {
                                 Text(server.address)
-                                    .font(Typography.annotation)
-                                    .monospacedDigit()
+                                    .font(Typography.rowPrimary)
                                     .foregroundStyle(DesignTokens.ink)
                                     .lineLimit(1)
                                 CardSquares(gpus: server.gpus, size: 11)
@@ -168,8 +167,7 @@ private struct TaskCard: View {
                                     .foregroundStyle(DesignTokens.mutedInk)
                                 Spacer(minLength: 6)
                                 Text(percentageLabel(serverTrend.latest))
-                                    .font(Typography.identity)
-                                    .monospacedDigit()
+                                    .font(Typography.rowValue)
                                     .foregroundStyle(DesignTokens.ink)
                             }
                             Sparkline(

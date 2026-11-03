@@ -447,7 +447,7 @@ struct ManageServerGroupsSheet: View {
         if groups.isEmpty {
             VStack(alignment: .leading, spacing: 8) {
                 Text("还没有服务器组。")
-                    .font(Typography.sectionTitle)
+                    .font(Typography.label)
                 Text("创建后即可把共享路径和环境的机器放在一起申请。")
                     .font(Typography.secondary)
                     .foregroundStyle(DesignTokens.mutedInk)

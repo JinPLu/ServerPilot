@@ -9,8 +9,6 @@ struct SchedulerNodeTableRow: View {
     let gpuName: String
     let tier: EndpointTableLayout.Tier
     let columns: Set<EndpointColumn>
-    /// Set when this row's group mixes models, so the title cannot name one.
-    let modelTag: String?
     let isSnapshotFresh: Bool
     let leases: [LeaseRecord]
     @ObservedObject var store: BrokerStore
@@ -82,47 +80,52 @@ struct SchedulerNodeTableRow: View {
     var body: some View {
         Button { showDetails = true } label: {
         HStack(spacing: tier.columnSpacing) {
-            HStack(spacing: 8) {
-                Circle()
-                    .fill(isSnapshotFresh ? DesignTokens.success : DesignTokens.warning)
-                    .frame(width: 8, height: 8)
-                    .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: 2) {
                 Text(address)
                     .font(Typography.rowPrimary)
                     .lineLimit(1)
                     .truncationMode(.middle)
                     .textSelection(.enabled)
-                if let modelTag {
-                    Text(modelTag)
+                HStack(spacing: 5) {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 7, height: 7)
+                        .accessibilityHidden(true)
+                    Text(stateWord)
                         .font(Typography.annotation)
-                        .foregroundStyle(DesignTokens.mutedInk)
+                        .foregroundStyle(statusColor)
                         .lineLimit(1)
-                        .truncationMode(.tail)
-                        .layoutPriority(-1)
                 }
             }
             .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
             if tier.showsAssignment, columns.contains(.assignment) {
-                Text(assignment ?? stateWord)
-                    .font(.body)
+                Text(assignment ?? "—")
+                    .font(Typography.rowPrimary)
                     .lineLimit(1)
-                    .foregroundStyle(assignment == nil ? (isSnapshotFresh ? DesignTokens.mutedInk : DesignTokens.warning) : DesignTokens.ink)
+                    .foregroundStyle(assignment == nil ? DesignTokens.mutedInk : DesignTokens.ink)
                     .frame(width: tier.assignmentWidth, alignment: .leading)
             }
             if tier.showsGPUModel, columns.contains(.cards) {
-                HStack(spacing: 3) {
-                    ForEach(0..<node.totalGPUs, id: \.self) { index in
-                        CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 3) {
+                        ForEach(0..<node.totalGPUs, id: \.self) { index in
+                            CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
+                        }
                     }
+                    .fixedSize()
+                    .accessibilityHidden(true)
+                    Text(modelLabel)
+                        .font(Typography.annotation)
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .lineLimit(1)
+                        .truncationMode(.tail)
                 }
-                .fixedSize()
-                .accessibilityHidden(true)
                 .frame(width: tier.gpuModelWidth, alignment: .leading)
             }
             HStack(alignment: .firstTextBaseline, spacing: 1) {
                 Spacer(minLength: 0)
                 Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)" : "—")
-                    .font(Font.title3.weight(.semibold).monospacedDigit())
+                    .font(Typography.rowValue.weight(.semibold))
                     .foregroundStyle(node.freeGPUs > 0 ? DesignTokens.ink : DesignTokens.mutedInk)
                 Text("/\(node.totalGPUs)")
                     .font(Typography.annotation)

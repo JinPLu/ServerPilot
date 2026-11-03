@@ -4,6 +4,15 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Status and GPU model are back where they were in the server table.**
+  - The server column has two lines again: the address, then a coloured dot and a status word, which also says how old the readings are when a host stops answering.
+  - The card column names the model under the squares, without the NVIDIA or GeForce prefix; the full name is in the tooltip, and group titles no longer carry it.
+  - The task column is back to two lines: the task, then its holder and project.
+- **The table header is now a white band.** Every column has an icon and a sort arrow, and the sorted column is tinted and shows its direction.
+- **The overview, server and task pages use four type sizes:** 26, 15, 13 and 11. The overview's large figures shrink from 34 to 26 to match the page title, and button text grows from 12 to 13 across the App.
+
 ## 5.0.0 - 2026-11-04
 
 - **The server page is calmer and easier to read.**

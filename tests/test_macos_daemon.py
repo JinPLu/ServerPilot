@@ -956,7 +956,7 @@ def test_macos_resource_split_preserves_readable_endpoint_rows_when_narrow() -> 
     )[1].split("struct GPUDetailSheet", maxsplit=1)[0]
     assert "memoryLabel" in gpu_grid_body
     assert "显存合计" not in dashboard_source
-    # A row prints no second line, so everything it drops stays reachable
+    # A row prints two lines, so everything it drops stays reachable
     # through the hover tooltip.  Bulk removal borrows the hover text to say
     # what a click does there; outside that mode the row tooltip is the help.
     assert "private var tooltip: String" in row_body

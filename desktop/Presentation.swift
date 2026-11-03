@@ -471,11 +471,9 @@ struct ServerStatus {
     }
 }
 
-/// What a machine is doing, in one line: the table's task cell and the tile's
-/// corner say the same thing.
+/// What a machine is doing, in one line, for the corner of its overview tile.
 struct ServerActivity {
     let primary: String
-    let secondary: String?
     let color: Color
 
     init(
@@ -487,41 +485,36 @@ struct ServerActivity {
     ) {
         if !isSnapshotFresh || status.tone == .fault {
             primary = status.word
-            secondary = isSnapshotFresh ? Self.readingAge(endpoint) : nil
             color = DesignTokens.danger
         } else if let lease = leases.first(where: { $0.runtimeState == "RUNNING" }) ?? leases.first {
             let task = lease.taskReference ?? lease.purpose ?? "未命名任务"
             primary = leases.count > 1 ? "\(task) · 另 \(leases.count - 1) 项" : task
-            secondary = lease.runtimeState == "RUNNING" ? lease.holderLabel : "未运行"
             color = DesignTokens.ink
         } else if status.tone == .attention {
             primary = status.word
-            secondary = nil
             // Someone else's job is a fact to read; a conflict is one to act on.
             color = gpus.contains { ["CONFLICT", "ORPHANED_BUSY"].contains($0.state) }
                 ? status.color
                 : DesignTokens.ink
         } else if endpoint.keepalive.isActive || endpoint.keepalive.isTransitioning {
             primary = "空闲"
-            secondary = "占卡中"
             color = DesignTokens.mutedInk
         } else if let capacity = endpoint.schedulerCapacity {
             primary = "\(capacity.freeGPUCount) 张空闲"
-            secondary = nil
             color = DesignTokens.mutedInk
         } else {
             primary = status.word
-            secondary = nil
             color = DesignTokens.mutedInk
         }
     }
+}
 
-    private static func readingAge(_ endpoint: EndpointRecord) -> String? {
-        let node = endpoint.resourceNodes.first { $0.id == "self" }
-        guard let seconds = secondsSince(node?.observedAt) else { return nil }
-        if seconds < 3600 { return "\(max(seconds / 60, 1)) 分钟前" }
-        return seconds < 172_800 ? "\(seconds / 3600) 小时前" : "\(seconds / 86400) 天前"
-    }
+/// How long ago this host last reported, nil when it never has.
+func lastReadingAge(_ endpoint: EndpointRecord) -> String? {
+    let node = endpoint.resourceNodes.first { $0.id == "self" }
+    guard let seconds = secondsSince(node?.observedAt) else { return nil }
+    if seconds < 3600 { return "\(max(seconds / 60, 1)) 分钟前" }
+    return seconds < 172_800 ? "\(seconds / 3600) 小时前" : "\(seconds / 86400) 天前"
 }
 
 /// Whether the host answers, which is all a row's dot says.

@@ -3,11 +3,11 @@ import SwiftUI
 
 /// The app's complete type ramp.
 ///
-/// Eight roles over seven Apple semantic steps (10 / 11 / 12 / 13 / 15 / 17 /
-/// 26).  The previous ramp spanned only 17/10 = 1.70x and, because macOS
-/// resolves `footnote` and `caption2` to the same 10pt, two of its steps were
-/// a duplicate pair — so nothing on a screen could read as primary.  This one
-/// spans 2.60x, which is the band Apple Home works in.
+/// The overview, server and task pages use four sizes: 26 for the title and the
+/// figures a page exists to answer, 15 for a section or a task's name, 13 for
+/// what a row says first, 11 for what explains it.  Sizes a point apart read as
+/// a mistake rather than as hierarchy.  Alerts, forms, sheets and settings still
+/// reach for 12 and 10.
 ///
 /// Add a role rather than a size: a new `.system(size:)` in interface code is
 /// a regression, not a tweak.  Numerals carry `.monospacedDigit()` because the
@@ -69,20 +69,16 @@ struct CardSectionLabel: View {
 }
 
 enum Typography {
-    /// 42 · The capacity figure the overview exists to answer.  One per screen,
-    /// and only there: everywhere else a number sits in its row.
-    static let display = Font.system(size: 34, weight: .semibold, design: .rounded).monospacedDigit()
     /// 26 · The page title, set directly on the page plane.
     static let screenTitle = Font.largeTitle.weight(.bold)
-    /// 26 · The second-largest number a screen may show.
-    static let hero = Font.system(.largeTitle, design: .rounded).weight(.semibold).monospacedDigit()
-    /// 17 · Sheet titles, and the figures on a task card.
-    static let pageTitle = Font.title2.weight(.semibold)
+    /// 26 · The figures a page exists to answer: everywhere else a number sits in its row.
+    static let display = Font.system(.largeTitle, design: .rounded).weight(.semibold).monospacedDigit()
+    /// 15 · A section on a page, a task's name, and the figures on a task card.
+    static let sectionTitle = Font.title3.weight(.semibold)
     /// 15 · The primary value on a card or ring.
     static let cardValue = Font.system(.title3, design: .rounded).weight(.semibold).monospacedDigit()
-    /// 13 · Section titles and field labels.  Table column headers use
-    /// `annotation`: they sit above 11 pt rows, and at 13 pt they outweighed
-    /// the values underneath them.
+    /// 13 · A card's heading and field labels.  Table column headers use
+    /// `annotation`: at 13 pt they outweighed the values underneath them.
     static let label = Font.headline
     /// 13 · Percentages, counts, ratios inside a row.
     static let rowValue = Font.body.weight(.medium).monospacedDigit()
@@ -99,7 +95,6 @@ enum Typography {
     // the migration; both resolved to 10pt, which was the duplicate pair.
     static let metricLabel = annotation
     static let secondary = annotation
-    static let sectionTitle = label
 }
 
 /// Republishes when the system accessibility display options change.
@@ -383,7 +378,7 @@ struct PrimaryActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(.body.weight(.semibold))
             .foregroundStyle(DesignTokens.onInteraction.opacity(isEnabled ? 1 : 0.58))
             .padding(.horizontal, 14)
             .frame(height: 30)
@@ -400,7 +395,7 @@ struct SecondaryActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.callout.weight(.semibold))
+            .font(.body.weight(.semibold))
             .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
             .padding(.horizontal, 12)
             .frame(height: 30)

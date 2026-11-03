@@ -44,11 +44,11 @@ struct OverviewDashboard: View {
                             .accessibilityHidden(true)
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(fleet.name)
-                                .font(.title3.weight(.semibold))
+                                .font(Typography.sectionTitle)
                                 .foregroundStyle(DesignTokens.ink)
                                 .accessibilityAddTraits(.isHeader)
                             Text(fleetHeadline(fleet))
-                                .font(Typography.identity)
+                                .font(Typography.annotation)
                                 .monospacedDigit()
                                 .foregroundStyle(DesignTokens.mutedInk)
                         }
@@ -71,7 +71,7 @@ struct OverviewDashboard: View {
                                 .foregroundStyle(DesignTokens.mutedInk)
                             Text("还没有服务器").font(Typography.label)
                             Text("添加服务器后，这里会显示每张卡的状态。")
-                                .font(Typography.identity)
+                                .font(Typography.annotation)
                                 .foregroundStyle(DesignTokens.mutedInk)
                         }
                         .frame(maxWidth: .infinity)
@@ -116,7 +116,7 @@ struct OverviewDashboard: View {
             HomeCard(padding: 16) {
                 VStack(alignment: .leading, spacing: 0) {
                     Text("空闲 GPU")
-                        .font(Typography.identity)
+                        .font(Typography.label)
                         .foregroundStyle(DesignTokens.mutedInk)
                     HStack(alignment: .firstTextBaseline, spacing: 6) {
                         Text(isCurrent ? "\(summary.availableGPUs)" : "—")
@@ -169,7 +169,7 @@ struct OverviewDashboard: View {
             VStack(alignment: .leading, spacing: 0) {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Text("GPU 利用率")
-                        .font(Typography.identity)
+                        .font(Typography.label)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .fixedSize()
                     Spacer(minLength: 8)
@@ -220,7 +220,7 @@ struct OverviewDashboard: View {
             VStack(alignment: .leading, spacing: 10) {
                 HStack {
                     Text("需要处理")
-                        .font(Typography.identity)
+                        .font(Typography.label)
                         .foregroundStyle(DesignTokens.mutedInk)
                     Spacer()
                     if problems.count > Self.shownAlerts {

@@ -84,7 +84,7 @@ struct ServerGPUMemoryStatusGrid: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 8) {
                 Label("GPU 状态", systemImage: "memorychip")
-                    .font(Typography.sectionTitle)
+                    .font(Typography.label)
                     .foregroundStyle(DesignTokens.ink)
                 Spacer(minLength: 0)
                 Text("当前显存 · \(gpus.count) 张 GPU")
