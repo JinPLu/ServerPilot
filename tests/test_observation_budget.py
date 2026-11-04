@@ -22,8 +22,8 @@ from serverpilot.config import SSH_BUDGETS, EndpointConfig, default_control_dir,
 def _endpoint(**overrides: object) -> EndpointConfig:
     values: dict[str, object] = {
         "id": "server-a",
-        "host": "10.40.0.199",
-        "port": 4580,
+        "host": "lab-01.example.test",
+        "port": 2201,
         "ssh_user": "root",
         "workspace_path": "/workspace",
     }
@@ -87,9 +87,9 @@ def test_one_socket_per_connection_triple() -> None:
     control_dir = Path("/tmp/serverpilot-test-ssh")
     same = control_socket_path(_endpoint(), control_dir)
     assert control_socket_path(_endpoint(), control_dir) == same
-    assert control_socket_path(_endpoint(port=6103), control_dir) != same
-    assert control_socket_path(_endpoint(ssh_user="jinplu"), control_dir) != same
-    assert control_socket_path(_endpoint(host="10.40.1.76"), control_dir) != same
+    assert control_socket_path(_endpoint(port=2202), control_dir) != same
+    assert control_socket_path(_endpoint(ssh_user="alice"), control_dir) != same
+    assert control_socket_path(_endpoint(host="lab-02.example.test"), control_dir) != same
 
 
 def test_probe_argv_is_the_single_sealed_option_list() -> None:
@@ -103,7 +103,7 @@ def test_probe_argv_is_the_single_sealed_option_list() -> None:
 
     assert argv[0] == "ssh"
     assert argv[-1] == RAW_SSH_COMBINED_QUERY
-    assert argv[-2] == "root@10.40.0.199"
+    assert argv[-2] == "root@lab-01.example.test"
     assert "BatchMode=yes" in options
     assert "StrictHostKeyChecking=yes" in options
     assert f"ConnectTimeout={SSH_BUDGETS.connect_seconds}" in options

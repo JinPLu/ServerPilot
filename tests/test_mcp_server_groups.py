@@ -235,9 +235,9 @@ def _direct_group(
     largest_allocatable_block: int,
 ) -> dict[str, object]:
     return {
-        "id": "baidu-baige",
-        "display_name": "百度百舸",
-        "workspace_path": "/data/baige",
+        "id": "lab-group",
+        "display_name": "Lab Group",
+        "workspace_path": "/data/lab",
         "allocation": "direct",
         "limits": {
             "lease_ends": "on_release",
@@ -321,7 +321,7 @@ def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
                     _delegated_group(largest_allocatable_block=None),
                 ],
                 "endpoints": [
-                    _endpoint("baige-a", group_id="baidu-baige"),
+                    _endpoint("lab-a", group_id="lab-group"),
                     _delegated_endpoint(),
                     {
                         "id": "server-cpu",
@@ -342,7 +342,7 @@ def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
                     _endpoint("legacy-a"),
                 ],
                 "gpus": [
-                    *[_gpu("baige-a", f"GPU-b-{index}", index) for index in range(8)],
+                    *[_gpu("lab-a", f"GPU-b-{index}", index) for index in range(8)],
                     _gpu("legacy-a", "GPU-legacy", 0),
                 ],
             }
@@ -350,7 +350,7 @@ def test_unfiltered_status_still_emits_delegated_group_beside_direct() -> None:
         lease_id=None,
     )
 
-    assert [group["id"] for group in status["server_groups"]] == ["baidu-baige", "hanhai22"]
+    assert [group["id"] for group in status["server_groups"]] == ["lab-group", "hanhai22"]
     assert status["server_groups"][0]["largest_allocatable_block"] == 8
     assert status["server_groups"][1]["allocation"] == "delegated"
     assert status["ungrouped_servers"][0]["server_id"] == "legacy-a"
@@ -377,11 +377,11 @@ def test_direct_group_with_members_but_no_free_card_keeps_zero_block() -> None:
                     _delegated_group(largest_allocatable_block=None),
                 ],
                 "endpoints": [
-                    _endpoint("baige-a", group_id="baidu-baige"),
+                    _endpoint("lab-a", group_id="lab-group"),
                     _delegated_endpoint(),
                 ],
                 "gpus": [
-                    _gpu("baige-a", f"GPU-b-{index}", index, available=False)
+                    _gpu("lab-a", f"GPU-b-{index}", index, available=False)
                     for index in range(8)
                 ],
             }
@@ -389,9 +389,9 @@ def test_direct_group_with_members_but_no_free_card_keeps_zero_block() -> None:
         lease_id=None,
     )
 
-    assert [group["id"] for group in status["server_groups"]] == ["baidu-baige", "hanhai22"]
+    assert [group["id"] for group in status["server_groups"]] == ["lab-group", "hanhai22"]
     direct = status["server_groups"][0]
-    assert direct["servers"][0]["server_id"] == "baige-a"
+    assert direct["servers"][0]["server_id"] == "lab-a"
     assert direct["largest_allocatable_block"] == 0
     assert direct["limits"]["max_gpus_per_lease"] == 8
     assert direct["servers"][0]["gpus"][0]["available_count"] == 0

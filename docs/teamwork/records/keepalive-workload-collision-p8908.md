@@ -33,7 +33,7 @@ updated: 2026-08-31
    `TARGET_MEMORY_FRACTION = 0.80`（`src/serverpilot/server_keepalive.py:51`）＝ 80 GB 卡上约 65456 MiB。
    本次是释放后 **8 秒** 就起了 8 个 worker。
 
-## 观察到的时间线（UTC，2026-08-30，endpoint `server-10-40-1-76-p8908`）
+## 观察到的时间线（UTC，2026-08-30，endpoint `server-lab-03-example-test-p8908`）
 
 来源：控制面 `audit_events` / `leases` / `lease_resources` / `process_observations`
 （`~/Library/Application Support/ServerPilot/state/serverpilot.sqlite3`，只读查询）。

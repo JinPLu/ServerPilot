@@ -62,7 +62,7 @@ def test_cli_doctor_prints_version_table(monkeypatch) -> None:
                 "mcp": {"available": True, "command": "/tmp/serverpilot-mcp", "version": "1.9.0"},
                 "collectors": [
                     {
-                        "endpoint_id": "server-10-40-0-199-p4580",
+                        "endpoint_id": "server-lab-01-p2201",
                         "observation_profile": "server-script-v1",
                         "implementation_version": None,
                         "reported": False,
@@ -79,7 +79,7 @@ def test_cli_doctor_prints_version_table(monkeypatch) -> None:
                     "plugin_id": "legacy-plug",
                 }
             ],
-            "next_steps": ["在 server-10-40-0-199-p4580 上重装与控制面同版本的 collector"],
+            "next_steps": ["在 server-lab-01-p2201 上重装与控制面同版本的 collector"],
         },
     }
 
@@ -95,7 +95,7 @@ def test_cli_doctor_prints_version_table(monkeypatch) -> None:
     assert "控制面 daemon" in result.stdout
     assert "本机 CLI" in result.stdout
     assert "MCP 入口" in result.stdout
-    assert "collector server-10-40-0-199-p4580" in result.stdout
+    assert "collector server-lab-01-p2201" in result.stdout
     assert "未报告" in result.stdout
     assert "legacy-plug" in result.stdout
     assert "plugin info schema_version must be 3" in result.stdout

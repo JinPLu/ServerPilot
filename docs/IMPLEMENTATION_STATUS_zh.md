@@ -19,7 +19,9 @@
 
 验证：全量 Python 795 项、Swift 91 项、Ruff 和规则检查通过，App 构建与包校验报告 5.2.1；夹具截图看了服务器页。夹具里本来没有 95% 以上的读数，临时调高一行截图确认橙色和黄色分得开，之后已还原。
 
-未验证：真实数据和 Retina 屏上的观感；增强对比度下的橙色，换成橙色后没有再截；日常环境里的提醒文字，要更新后才能确认。
+发布后在日常环境确认：`update-macos-app.sh` 一次跑通，共 97 秒；开着的 4 条服务器提醒都写地址，已结束的 126 条旧记录不再被重写，仍是内部编号。
+
+未验证：真实数据下的服务器页和 Retina 屏上的观感；增强对比度下的橙色，换成橙色后没有再截。
 
 ## 界面第一轮：白底细描边、页头、容量卡、字号收口（2026-11-04，5.2.0）
 
@@ -223,7 +225,7 @@ daemon 重启要几秒，下一个连接又把启动中的进程杀掉，排队�
 再次打开恢复单窗口。真实 stdio 下 `serverpilot-mcp` 握手、工具清单、项目解析、`gpu_status` 和
 `if_changed` 通过。备份在 `~/Library/Application Support/ServerPilot/backups/`。
 
-真实 MCP 客户端（Claude Code）在 `baige-hyshi` 空闲卡上跑通申请、加卡、读遥测、还卡、归还，
+真实 MCP 客户端（Claude Code）在 `lab-04` 空闲卡上跑通申请、加卡、读遥测、还卡、归还，
 无工作负载；归还的卡按 600 秒冷却恢复占卡。服务器表行可打开详情。
 
 未验证：系统通知横幅是否真的弹出（投递已执行，授权结果未确认）；菜单栏的外观；Slurm 节点详情
@@ -492,8 +494,8 @@ Agent 合同现已明确限定作用域：ServerPilot 只协调 GPU，禁止绕�
 | `GET /api/v1/gpus` | 1.70s | 0.05s |
 | `GET /api/v1/endpoints` | 1.52s | 0.05s |
 | 活跃告警 | 23 条（21 条指向已不存在的资源） | 2 条，均为真实失联 endpoint |
-| 失联主机 `server-10-40-1-28-p4725` 的占卡投影 | `actual=ON`，8 张卡进入 reclaim 候选 | `actual=ERROR`，`available_count=0`，在 `busy_gpus` 中标为 `unreachable` |
-| `gpu_apply(server_group_id="baidu-baige", gpu_count=8)` | 挑中失联主机后 503 | 约 17 秒成功，落在仍在应答的 `server-10-40-0-199-p4580`，随后正常释放 |
+| 失联主机 `server-lab-01-example-test-p4725` 的占卡投影 | `actual=ON`，8 张卡进入 reclaim 候选 | `actual=ERROR`，`available_count=0`，在 `busy_gpus` 中标为 `unreachable` |
+| `gpu_apply(server_group_id="lab-group", gpu_count=8)` | 挑中失联主机后 503 | 约 17 秒成功，落在仍在应答的 `server-lab-02-example-test-p4580`，随后正常释放 |
 
 Python 全量测试 `616 passed`，Ruff 通过。未改数据库 schema，无新迁移：所有判定都从既有列（`GPUDevice.present/last_seen_at`、`ProviderState.last_success_at/last_attempt_at`、`TelemetryCurrent.observed_at`）派生。
 
@@ -532,7 +534,7 @@ Python 全量测试 `616 passed`，Ruff 通过。未改数据库 schema，无新
 
 第四轮（登记一台服务器为什么造不出能用的机器）：
 
-起因是一条现网记录：另一个 Agent 线程登记的 `server-10-40-1-28-p7770` 在 App 里是红的，`observation_profile=server-script-v1`、`server_group_id=null`、`keepalive_policy=disabled`，`ProviderState.last_success_at` 为 `null`（`Host key verification failed`，`known_hosts` 里没有 `[10.40.1.28]:7770`）。对照 `EndpointCreate` 与 MCP 工具签名后确认：**四个字段里有三个不是调用方选的。**
+起因是一条现网记录：另一个 Agent 线程登记的 `server-lab-01-example-test-p7770` 在 App 里是红的，`observation_profile=server-script-v1`、`server_group_id=null`、`keepalive_policy=disabled`，`ProviderState.last_success_at` 为 `null`（`Host key verification failed`，`known_hosts` 里没有 `[lab-01.example.test]:7770`）。对照 `EndpointCreate` 与 MCP 工具签名后确认：**四个字段里有三个不是调用方选的。**
 
 - **`server_group_id` 在 MCP 上根本不存在。** `EndpointCreate` 与 `EndpointUpdate` 一直带这个字段，`gpu_add_server` / `gpu_update_server` 两个工具都不暴露它。分组决定这台机器能否被 `gpu_apply(server_group_id=...)` 选中，所以经 MCP 登记的服务器**必然**是不可分配的；补齐前 Agent 无论怎么调都造不出一台能用的机器。两个工具现在都接受它。
 - **`observation_profile` 的默认值本身是错的，而且有两个。** `config.py:EndpointConfig` 默认 `linux-nvidia`，`schemas.py:EndpointCreate` 默认 `server-script-v1` —— 同一字段两个默认值，取决于从 YAML 还是 REST/MCP 进来。后者指向「远端自带采集脚本」这个最特殊的契约，用在裸机上连得上却读不到卡。统一为 `linux-nvidia`；profile 的选择说明从平铺枚举改为「哪种机器选哪个」，放在参数 `Field(description=...)` 上而不是全局 instructions（后者每轮都要付费，且 2400 字符上限未动）。
@@ -546,7 +548,7 @@ Python 全量测试 `616 passed`，Ruff 通过。未改数据库 schema，无新
 
 **桌面端把这个结果说出来。** `addEndpoint` 改走 `performMutationWithPayload`，`registrationOutcome` 把 `observation` 变成三句人话：已连上并发现 N 张卡 / 已连上但没有发现 GPU（提示确认观测方式）/ 还没有连上（带原因）。未连上时同时写入 `errorMessage`，不再是「正在确认状态」加一分钟后一行红字。
 
-第四轮验证：Python `622 passed`（新增 4 条：登记失败带原因并保留记录、登记成功报告卡数、登记即可归组、登记超时高于它等待的采集预算），Ruff 通过；`zsh desktop/build-macos-app.sh test` 报告 `66 tests in 3 suites passed`（新增 4 条 Swift 用例）；`build-macos-app.sh` 与 `verify-macos-app.sh` 通过。现网 `p7770` 在本轮期间已被外部修好（host key 补齐、profile 改为 `linux-nvidia`、归入 `baidu-baige`），现为 ONLINE / 4 卡，可作为该诊断的事后印证，但不是本轮改动的产物。
+第四轮验证：Python `622 passed`（新增 4 条：登记失败带原因并保留记录、登记成功报告卡数、登记即可归组、登记超时高于它等待的采集预算），Ruff 通过；`zsh desktop/build-macos-app.sh test` 报告 `66 tests in 3 suites passed`（新增 4 条 Swift 用例）；`build-macos-app.sh` 与 `verify-macos-app.sh` 通过。现网 `p7770` 在本轮期间已被外部修好（host key 补齐、profile 改为 `linux-nvidia`、归入 `lab-group`），现为 ONLINE / 4 卡，可作为该诊断的事后印证，但不是本轮改动的产物。
 
 仍未做：`api.py` 里 32 个同步 `def` 路由未改为 `async def` + `in_domain`。它们由 FastAPI 自动丢线程池，本来就不在事件循环上，观测到的卡顿不由它们造成；改动会覆盖每个路由体，且把读也串行到单 worker，收益需要先有实测支撑。`hanhai22` 插件依赖一个 12 小时有效期的外部 ControlMaster（由 Storyboard 项目的 `tools/run/hanhai_session.py up --auto` 建立并复用同一个 `~/.ssh/cm/` socket）。socket 过期后该组静默退回上一次成功观测的数字，`largest_allocatable_block` 变 `null`；实测重开 master 后 151 秒内自行恢复（`largest_allocatable_block: 5`，40 张空闲卡分散在多节点）。MCP 目前不投影 `monitor.last_error`，所以 agent 拿到 `null` 时没有可执行的下一步。
 

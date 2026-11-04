@@ -21,7 +21,7 @@ updated: 2026-09-03
 `TimeoutError: SSH observation timed out after 8 seconds`。
 
 六台机器每 5 秒各新开一次完整 SSH 握手（全树没有 ControlMaster），经 VPN
-（utun7，MTU 1400）到 `10.40.x.x`；`collect_once` 用一个 `asyncio.gather` 且
+（utun7，MTU 1400）到内网服务器；`collect_once` 用一个 `asyncio.gather` 且
 `stagger_seconds=0.0` 同时发出，于是它们共享同一个起点和同一条 8 秒线。任何整体抖动
 ——VPN 抖动、Mac DarkWake、事件循环被插件 fork 卡住——都让**所有**机器在同一轮越线。
 数据库里「同一 10 秒窗口内 5–6 台一起失败」的事件每小时十几次。

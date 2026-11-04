@@ -1034,14 +1034,14 @@ def test_a_registered_host_can_join_a_group_without_the_desktop_app(build_app, i
     client.post(
         "/api/v2/server-groups",
         json={
-            "id": "baidu-baige",
-            "display_name": "Baidu Baige",
-            "workspace_path": "/srv/baige",
+            "id": "lab-group",
+            "display_name": "Lab Group",
+            "workspace_path": "/srv/lab",
         },
         headers={**actor, "Idempotency-Key": "group-create"},
     )
 
-    created = _register(client, "server-grouped", server_group_id="baidu-baige")
+    created = _register(client, "server-grouped", server_group_id="lab-group")
 
     assert created.status_code == 200
-    assert created.json()["endpoint"]["server_group_id"] == "baidu-baige"
+    assert created.json()["endpoint"]["server_group_id"] == "lab-group"
