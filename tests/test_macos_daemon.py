@@ -117,6 +117,7 @@ def test_launch_agent_owns_one_loopback_server_and_preserves_paths(tmp_path: Pat
     assert payload["WorkingDirectory"] == str(config.data_dir)
     assert payload["RunAtLoad"] is True
     assert payload["KeepAlive"] == {"SuccessfulExit": False}
+    assert payload["ProcessType"] == "Standard"
     arguments = payload["ProgramArguments"]
     assert arguments[0] == str(config.executable)
     assert arguments[1:] == [

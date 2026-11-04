@@ -236,7 +236,10 @@ def render_launch_agent(config: DaemonConfig) -> bytes:
         "WorkingDirectory": str(config.data_dir),
         "RunAtLoad": True,
         "KeepAlive": {"SuccessfulExit": False},
-        "ProcessType": "Background",
+        # The App and every MCP client wait for this process as they start. As a
+        # Background job on a busy Mac, it took 17 s to answer after an install,
+        # against 2 s here, and they wait 15.
+        "ProcessType": "Standard",
         "StandardOutPath": str(stdout_path),
         "StandardErrorPath": str(stderr_path),
     }

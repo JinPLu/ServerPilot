@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Updates no longer falsely report that the daemon did not become ready.** The daemon ran at the lowest priority, so on a busy Mac its first start after an install took 17 seconds, past the 15 seconds the updater waits, even though it came up moments later. App launch and MCP connection use the same wait. It now runs at normal priority and is ready in about 2 seconds in the same test.
+
 ## 5.1.0 - 2026-11-04
 
 - **Status and GPU model are back where they were in the server table.**
