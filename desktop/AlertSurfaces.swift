@@ -44,7 +44,7 @@ struct FeedbackBanner: View {
                 .accessibilityLabel("关闭这条提示")
             }
             .padding(.horizontal, 24)
-            .padding(.bottom, 10)
+            .padding(.top, 12)
         }
     }
 }
@@ -64,7 +64,7 @@ struct AlertsDashboard: View {
                     HomeCard {
                         VStack(spacing: 10) {
                             Image(systemName: "bell.badge")
-                                .font(.largeTitle)
+                                .font(Typography.icon)
                                 .foregroundStyle(DesignTokens.mutedInk)
                             Text("没有提醒").font(Typography.label)
                             Text("任务受影响、服务器异常、资源闲置或有卡可用时，会出现在这里。")
@@ -107,8 +107,8 @@ struct AlertsDashboard: View {
                     }
                 }
             }
-            .padding(.horizontal, 28)
-            .padding(.vertical, 16)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 20)
         }
     }
 }
@@ -121,7 +121,7 @@ private struct AlertRow: View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(alert.category.title)
-                    .font(.caption.weight(.semibold))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.mutedInk)
                 Text(alert.message)
                     .foregroundStyle(DesignTokens.ink)
@@ -250,7 +250,7 @@ private struct MenuBarPopover: View {
         }
         .padding(12)
         .frame(width: 340)
-        .background(DesignTokens.ambientSmoke)
+        .background(DesignTokens.page)
     }
 
     private var capacity: some View {
@@ -271,7 +271,7 @@ private struct MenuBarPopover: View {
                         .font(Typography.display)
                         .foregroundStyle(DesignTokens.ink)
                     Text("/ \(summary.totalGPUs) 空闲")
-                        .font(.body)
+                        .font(Typography.body)
                         .monospacedDigit()
                         .foregroundStyle(DesignTokens.mutedInk)
                 }

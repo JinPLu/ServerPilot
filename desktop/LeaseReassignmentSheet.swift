@@ -39,23 +39,23 @@ struct LeaseReassignmentSheet: View {
         VStack(alignment: .leading, spacing: 18) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "arrow.triangle.swap")
-                    .font(.title2.weight(.semibold))
+                    .font(Typography.screenTitle)
                     .foregroundStyle(DesignTokens.interaction)
                     .frame(width: 42, height: 42)
                     .background(DesignTokens.interaction.opacity(DesignTokens.Alpha.fill), in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
                 VStack(alignment: .leading, spacing: 3) {
                     Text("改派 GPU")
-                        .font(.title2.weight(.semibold))
+                        .font(Typography.screenTitle)
                         .foregroundStyle(DesignTokens.ink)
                     Text("\(lease.projectID) · \(lease.taskReference ?? lease.purpose ?? "未命名任务")")
-                        .font(.subheadline.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(2)
                 }
             }
 
             Text("选择 \(lease.gpuCount) 块目标 GPU。应用后，请让对应 Agent 按新分配的 CVD 重启任务。")
-                .font(.callout.weight(.medium))
+                .font(Typography.identity)
                 .foregroundStyle(DesignTokens.ink)
                 .fixedSize(horizontal: false, vertical: true)
 
@@ -71,7 +71,7 @@ struct LeaseReassignmentSheet: View {
 
             if !selectionIsComplete {
                 Text("还需选择 \(lease.gpuCount - selectedGPUIDs.count) 块 GPU。")
-                    .font(.subheadline.weight(.semibold))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.warning)
             }
 
@@ -84,7 +84,7 @@ struct LeaseReassignmentSheet: View {
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
-                .font(.subheadline.weight(.medium))
+                .font(Typography.annotation)
                 .padding(11)
                 .background(
                     (succeeded ? DesignTokens.success : DesignTokens.danger).opacity(DesignTokens.Alpha.fill),
@@ -136,25 +136,25 @@ struct LeaseReassignmentSheet: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.body.weight(.semibold))
+                    .font(Typography.label)
                     .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 7) {
                         Text("\(endpointName(for: gpu)) · GPU \(gpu.index)")
-                            .font(.system(.callout, design: .monospaced).weight(.semibold))
+                            .font(Typography.command.weight(.semibold))
                             .foregroundStyle(DesignTokens.ink)
                         if current {
                             Text("当前")
-                                .font(.caption2.weight(.semibold))
+                                .font(Typography.annotation.weight(.semibold))
                                 .foregroundStyle(DesignTokens.interaction)
                         }
                     }
                     Text(gpuPresentationLabel(gpu))
-                        .font(.subheadline.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                     Text(workspacePath(for: gpu))
-                        .font(.system(.caption2, design: .monospaced).weight(.medium))
+                        .font(Typography.commandSmall)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)

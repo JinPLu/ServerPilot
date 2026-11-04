@@ -30,14 +30,14 @@ struct ResourceUsageDashboard: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     Text("\(ordered.count) 个任务 · 占用 \(ordered.reduce(0) { $0 + $1.gpuCount }) 张卡")
-                        .font(.body)
+                        .font(Typography.body)
                         .monospacedDigit()
                         .foregroundStyle(DesignTokens.mutedInk)
                     section("需要留意", leases: quiet)
                     section("运行中", leases: running)
                 }
                 .padding(.horizontal, 24)
-                .padding(.top, 2)
+                .padding(.top, 20)
                 .padding(.bottom, 20)
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
@@ -123,10 +123,16 @@ private struct TaskCard: View {
                                     .foregroundStyle(DesignTokens.ink)
                                     .lineLimit(2)
                                     .help(title)
-                                Text(stateWord)
-                                    .font(Typography.annotation)
-                                    .foregroundStyle(isRunning ? DesignTokens.loadBlue : DesignTokens.warning)
-                                    .fixedSize()
+                                HStack(spacing: 5) {
+                                    Circle()
+                                        .fill(isRunning ? DesignTokens.loadBlue : DesignTokens.warning)
+                                        .frame(width: 7, height: 7)
+                                        .accessibilityHidden(true)
+                                    Text(stateWord)
+                                        .font(Typography.annotation)
+                                        .foregroundStyle(DesignTokens.mutedInk)
+                                }
+                                .fixedSize()
                             }
                             Text("\(lease.holderLabel) · \(lease.projectID)")
                                 .font(Typography.annotation)
@@ -172,7 +178,7 @@ private struct TaskCard: View {
                             }
                             Sparkline(
                                 points: serverTrend.points,
-                                color: isRunning ? DesignTokens.loadBlue : DesignTokens.quietBar,
+                                color: isRunning ? DesignTokens.chartLine : DesignTokens.quietBar,
                                 lineWidth: 2
                             )
                             .frame(height: 52)

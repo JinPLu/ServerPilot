@@ -262,16 +262,16 @@ private struct ClaimGroupPicker: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.body.weight(.semibold))
+                    .font(Typography.label)
                     .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.callout.weight(.semibold))
+                        .font(Typography.identity.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(detail)
-                        .font(.subheadline.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)
@@ -337,16 +337,16 @@ private struct ClaimEndpointPicker: View {
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 Image(systemName: selected ? "checkmark.circle.fill" : "circle")
-                    .font(.body.weight(.semibold))
+                    .font(Typography.label)
                     .foregroundStyle(selected ? DesignTokens.interaction : DesignTokens.mutedInk)
                     .padding(.top, 1)
                 VStack(alignment: .leading, spacing: 3) {
                     Text(title)
-                        .font(.system(.callout, design: id.isEmpty ? .default : .monospaced).weight(.semibold))
+                        .font((id.isEmpty ? Typography.identity : Typography.command).weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                         .fixedSize(horizontal: false, vertical: true)
                     Text(detail)
-                        .font(.system(.subheadline, design: id.isEmpty ? .default : .monospaced).weight(.medium))
+                        .font(id.isEmpty ? Typography.annotation : Typography.commandSmall)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .fixedSize(horizontal: false, vertical: true)
                         .textSelection(.enabled)

@@ -25,7 +25,7 @@ struct AddServerSheet: View {
                         .fieldLabel()
                     TextField("ssh -p 22 gpu@node-a.example", text: $sshCommand)
                         .textFieldStyle(.roundedBorder)
-                        .font(.system(.body, design: .monospaced).weight(.medium))
+                        .font(Typography.command)
                         .accessibilityLabel("SSH 指令")
                 }
                 ServerGroupAssignmentFields(
@@ -163,7 +163,7 @@ struct EditServerSheet: View {
                     Text("端点")
                         .fieldLabel()
                     Text(endpoint.sshCommand)
-                        .font(.system(.callout, design: .monospaced).weight(.semibold))
+                        .font(Typography.command.weight(.semibold))
                         .textSelection(.enabled)
                 }
                 LabeledField(label: "SSH 用户", placeholder: "collector", text: $sshUser)
@@ -191,10 +191,10 @@ struct EditServerSheet: View {
                     VStack(alignment: .leading, spacing: 10) {
                         Divider()
                         Text("危险操作")
-                            .font(.callout.weight(.semibold))
+                            .font(Typography.identity.weight(.semibold))
                             .foregroundStyle(DesignTokens.danger)
                         Text("从本机控制面移除这台服务器。会停止监控与协调并删除本机关联记录，不会停止远端进程。")
-                            .font(.subheadline.weight(.medium))
+                            .font(Typography.annotation)
                             .foregroundStyle(DesignTokens.mutedInk)
                             .fixedSize(horizontal: false, vertical: true)
                         Button("从 ServerPilot 移除…") { deleteServer() }
@@ -282,7 +282,7 @@ private struct EndpointObservationProfileField: View {
             .pickerStyle(.menu)
             .frame(maxWidth: .infinity, alignment: .leading)
             Text(profiles.first(where: { $0.id == selection })?.description ?? "")
-                .font(.subheadline.weight(.medium))
+                .font(Typography.annotation)
                 .foregroundStyle(DesignTokens.mutedInk)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -357,7 +357,7 @@ private struct ServerGroupAssignmentFields: View {
                 .accessibilityValue(selectedGroup?.displayName ?? "未分组")
                 if let group = selectedGroup {
                     Text("组默认路径 \(group.workspacePath)")
-                        .font(.subheadline.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .textSelection(.enabled)
                     Toggle("使用本组默认路径", isOn: $inheritGroupPath)
@@ -449,7 +449,7 @@ struct ManageServerGroupsSheet: View {
                 Text("还没有服务器组。")
                     .font(Typography.label)
                 Text("创建后即可把共享路径和环境的机器放在一起申请。")
-                    .font(Typography.secondary)
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)

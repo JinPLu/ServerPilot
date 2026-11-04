@@ -4,6 +4,16 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **The interface is now white with hairline edges.** Pages and cards are both white, separated by thin lines, with smaller corner radii and buttons that are no longer capsules, across the App.
+- **A tidier page header.** Each page has a slim bar running to the top of the window, which gives the content more room. Page titles drop from 26 to 17, so the large figures outrank them.
+- **Free GPUs are now a green ring.** The green arc is what is free, the number sits inside it, and in-use, offline and largest-request counts are written beside it, so no colour needs decoding.
+- **Fixed the overview's three cards stacking.** One long alert used to push them into three rows that took most of the window. They now always sit side by side, and a long alert truncates, with the full text on hover.
+- **More restrained colour.** Trend lines are now teal, so blue only means low utilization or running and no longer competes with the squares. Status words are grey with a coloured dot, and turn red only on an error.
+- **The server page's filter is now a segmented control,** a white block on a grey track that slides when you switch.
+- **Type sizes are consistent across the App.** The 10-point size is gone, so small text in charts and sheets is slightly larger.
+
 ## 5.1.1 - 2026-11-04
 
 - **Updates no longer falsely report that the daemon did not become ready.** The daemon ran at the lowest priority, so on a busy Mac its first start after an install took 17 seconds, past the 15 seconds the updater waits, even though it came up moments later. App launch and MCP connection use the same wait. It now runs at normal priority and is ready in about 2 seconds in the same test.

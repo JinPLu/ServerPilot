@@ -132,6 +132,8 @@ struct NativeBrokerRoot: View {
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .clipped()
                 .background(AmbientBackground())
+                // The header runs to the top of the window, where the title bar would be.
+                .ignoresSafeArea(.container, edges: .top)
             }
             .navigationSplitViewStyle(.balanced)
         }
@@ -279,13 +281,13 @@ private struct SidebarSelection: View {
             HStack(spacing: 9) {
                 if let systemImage {
                     Image(systemName: systemImage)
-                        .font(.body)
+                        .font(Typography.body)
                         .foregroundStyle(selected ? DesignTokens.ink : DesignTokens.mutedInk)
                         .frame(width: 18)
                 }
                 if !compact {
                     Text(title)
-                        .font(Font.body.weight(selected ? .semibold : .regular))
+                        .font(Typography.body.weight(selected ? .semibold : .regular))
                         .foregroundStyle(DesignTokens.ink)
                         .lineLimit(1)
                     Spacer(minLength: 4)
@@ -354,7 +356,7 @@ private struct AppToolbar: View {
                 // Pulse refreshes every few seconds, so this must not react to
                 // a refresh a person did not ask for.
                 Image(systemName: "arrow.clockwise")
-                    .font(.callout.weight(.medium))
+                    .font(Typography.identity)
             }
             .buttonStyle(IconActionButtonStyle())
             .focusable()
@@ -387,8 +389,13 @@ private struct AppToolbar: View {
             }
         }
         .padding(.horizontal, 24)
-        .padding(.top, 14)
-        .padding(.bottom, 10)
+        .frame(minHeight: 52)
+        .overlay(alignment: .bottom) {
+            Rectangle()
+                .fill(DesignTokens.surfaceStroke)
+                .frame(height: 1)
+                .accessibilityHidden(true)
+        }
     }
 
     private var statusText: String {
@@ -442,7 +449,7 @@ struct NoticeBanner: View {
 
     var body: some View {
         Label(message, systemImage: icon)
-            .font(.body.weight(.medium))
+            .font(Typography.rowPrimary)
             .foregroundStyle(DesignTokens.ink)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 14)

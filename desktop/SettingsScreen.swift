@@ -22,7 +22,7 @@ struct DashboardView: View {
             if store.freshness == .stale {
                 NoticeBanner(message: "本机服务响应中断，显示上次数据。", color: DesignTokens.danger, icon: "wifi.exclamationmark")
                     .padding(.horizontal, 24)
-                    .padding(.bottom, 10)
+                    .padding(.top, 12)
             }
 
             Group {
@@ -99,7 +99,7 @@ private struct SettingsDashboard: View {
                                         .font(Typography.identity)
                                         .foregroundStyle(DesignTokens.ink)
                                     Text("每台服务器的只读探针执行频率。")
-                                        .font(Typography.metricLabel)
+                                        .font(Typography.annotation)
                                         .foregroundStyle(DesignTokens.mutedInk)
                                 }
                                 Spacer(minLength: 16)
@@ -134,7 +134,7 @@ private struct SettingsDashboard: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.top, 16)
+            .padding(.top, 20)
             .padding(.bottom, 24)
             .frame(maxWidth: 680, alignment: .leading)
             // Without this the ScrollView centres the capped column, which put
@@ -143,7 +143,7 @@ private struct SettingsDashboard: View {
             .frame(maxWidth: .infinity, alignment: .leading)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-        .background(DesignTokens.ambientSmoke)
+        .background(DesignTokens.page)
     }
 
     private var connectionValue: String {
@@ -181,7 +181,7 @@ private struct SettingsIcon: View {
 
     var body: some View {
         Image(systemName: icon)
-            .font(.callout.weight(.semibold))
+            .font(Typography.identity.weight(.semibold))
             .foregroundStyle(DesignTokens.interaction)
             .frame(width: 30, height: 30)
             .background(

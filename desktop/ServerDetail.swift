@@ -265,7 +265,7 @@ struct ServerDetailSheet: View {
                                 endpointFooterMessage(endpoint),
                                 systemImage: endpoint.monitorStatus == "ONLINE" ? "arrow.clockwise" : "hand.raised.fill"
                             )
-                                .font(.subheadline.weight(.medium))
+                                .font(Typography.annotation)
                                 .foregroundStyle(DesignTokens.mutedInk)
                             Spacer()
                             Button("关闭") { dismiss() }
@@ -284,7 +284,7 @@ struct ServerDetailSheet: View {
         .frame(minWidth: 720, idealWidth: 1_040, maxWidth: 1_260, minHeight: 620, idealHeight: 800, maxHeight: 920)
         // The sheet was the one translucent surface in an app of opaque planes.
         // It now stands on the same page plane the grid does.
-        .background(DesignTokens.ambientSmoke)
+        .background(DesignTokens.page)
         // Labelling this container turned the whole sheet into one leaf, hiding
         // every button and value inside it.  The header states the same thing
         // in visible text.
@@ -586,7 +586,7 @@ struct ServerDetailSheet: View {
                     .disabled(isMutating)
             } label: {
                 Label("服务器操作", systemImage: "ellipsis.circle")
-                    .font(.callout.weight(.semibold))
+                    .font(Typography.identity.weight(.semibold))
             }
             .menuStyle(.borderlessButton)
             .accessibilityLabel("服务器操作")
@@ -682,7 +682,7 @@ struct GPUDetailMetric: View {
                 .foregroundStyle(DesignTokens.ink)
                 .lineLimit(1)
             Text(label)
-                .font(.caption2.weight(.medium))
+                .font(Typography.annotation)
                 .foregroundStyle(DesignTokens.mutedInk)
         }
         .padding(12)
@@ -716,13 +716,13 @@ struct DetailCallout: View {
     var body: some View {
         HStack(spacing: 10) {
             Label(message, systemImage: icon)
-                .font(.callout.weight(.medium))
+                .font(Typography.identity)
                 .foregroundStyle(DesignTokens.ink)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let actionTitle, let action {
                 Button(actionTitle, action: action)
                     .buttonStyle(.borderless)
-                    .font(.subheadline.weight(.semibold))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.ink)
                     .fixedSize()
             }

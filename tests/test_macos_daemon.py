@@ -836,7 +836,7 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
     ].split("struct SoftButtonStyle", maxsplit=1)[0]
     for forbidden in ("Image(", ".blur(", ".blendMode(", ".regularMaterial"):
         assert forbidden not in ambient_body
-    assert "DesignTokens.ambientSmoke" in ambient_body
+    assert "DesignTokens.page" in ambient_body
 
     sidebar_body = window_source.split("struct AppSidebar", maxsplit=1)[
         1
@@ -867,7 +867,7 @@ def test_macos_gui_defaults_to_low_composition_surfaces() -> None:
         "struct ResourcesDashboard", maxsplit=1
     )[1].split("struct FilterChip", maxsplit=1)[0]
     assert ".regularMaterial" not in resources_body
-    # The table is the one white surface on this page, not a stack of white bands.
+    # Each group is its own card, not a stack of white bands.
     assert "background(DesignTokens.surface)" not in resources_body
     assert ".fill(DesignTokens.surface)" in resources_body
 
@@ -1109,3 +1109,30 @@ def test_a_stale_daemon_is_still_replaced(tmp_path: Path, monkeypatch: pytest.Mo
     )
     assert manager.ensure() == {"ready": True}
     assert [args[0] for args in manager.kicks] == ["kickstart"]
+
+
+def test_macos_overview_summary_stays_side_by_side() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+    overview = (project_root / "desktop/OverviewScreen.swift").read_text(encoding="utf-8")
+
+    # Measuring whether the three cards fit read a long alert's full length,
+    # however it truncated, and stacked them into most of the window.
+    body = overview.split("var body: some View", maxsplit=1)[1].split("ForEach(fleets)", maxsplit=1)[0]
+    assert "ViewThatFits" not in body
+    assert "VStack(spacing: 12)" not in body
+
+
+def test_macos_interface_type_goes_through_typography() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+
+    # A size chosen at a call site is how a page ends up with six of them.
+    for path in sorted((project_root / "desktop").glob("*.swift")):
+        source = path.read_text(encoding="utf-8")
+        if path.name == "AppSupport.swift":
+            # The ramp itself, and the comment above it that names what not to do.
+            source = source.split("/// The one card shape in the app.", maxsplit=1)[1]
+            source = source.split("enum Typography", maxsplit=1)[0] + source.split(
+                "/// Republishes when the system accessibility", maxsplit=1
+            )[1]
+        for forbidden in (".font(.", ".font(Font.", "font(.callout", ".system(size:"):
+            assert forbidden not in source, f"{path.name}: {forbidden}"

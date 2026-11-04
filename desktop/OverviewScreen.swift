@@ -23,25 +23,15 @@ struct OverviewDashboard: View {
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: 12) {
-                        capacity.frame(minWidth: 240, maxWidth: .infinity)
-                        trend.frame(minWidth: 240, maxWidth: .infinity)
-                        attention.frame(minWidth: 240, maxWidth: .infinity)
-                    }
-                    VStack(spacing: 12) {
-                        capacity
-                        trend
-                        attention
-                    }
+                // Side by side at every width the window allows.  Measuring whether
+                // they fit read a long alert's full length, however it truncates.
+                HStack(alignment: .top, spacing: 12) {
+                    capacity.frame(maxWidth: .infinity)
+                    trend.frame(maxWidth: .infinity)
+                    attention.frame(maxWidth: .infinity)
                 }
                 ForEach(fleets) { fleet in
                     VStack(alignment: .leading, spacing: 10) {
-                        Rectangle()
-                            .fill(DesignTokens.surfaceStroke)
-                            .frame(height: 1)
-                            .padding(.bottom, 4)
-                            .accessibilityHidden(true)
                         HStack(alignment: .firstTextBaseline, spacing: 8) {
                             Text(fleet.name)
                                 .font(Typography.sectionTitle)
@@ -67,7 +57,7 @@ struct OverviewDashboard: View {
                     HomeCard {
                         VStack(spacing: 8) {
                             Image(systemName: "server.rack")
-                                .font(.title2)
+                                .font(Typography.icon)
                                 .foregroundStyle(DesignTokens.mutedInk)
                             Text("还没有服务器").font(Typography.label)
                             Text("添加服务器后，这里会显示每张卡的状态。")
@@ -87,7 +77,7 @@ struct OverviewDashboard: View {
                 }
             }
             .padding(.horizontal, 24)
-            .padding(.top, 6)
+            .padding(.top, 20)
             .padding(.bottom, 20)
         }
     }
@@ -106,46 +96,63 @@ struct OverviewDashboard: View {
     /// Whether the numbers on this page say anything about now.
     private var isCurrent: Bool { store.freshness == .fresh }
 
-    private var freeFraction: Double {
+    /// The share of cards that are free, from the figures printed inside the ring.
+    private var freeShare: Double {
         guard isCurrent, summary.totalGPUs > 0 else { return 0 }
         return Double(summary.availableGPUs) / Double(summary.totalGPUs)
+    }
+
+    /// The rest of the fleet in words, so nothing has to be read off a colour.
+    private var capacityFacts: [(label: String, value: String)] {
+        guard isCurrent else { return [] }
+        let cards = store.snapshot.operationalGPUs
+        let offline = cards.filter { $0.load == .stale }.count
+        let faulted = cards.filter { $0.load == .fault }.count
+        let inUse = max(0, summary.totalGPUs - summary.availableGPUs - offline - faulted)
+        var facts = [(label: "在用", value: "\(inUse)"), (label: "离线", value: "\(offline)")]
+        if faulted > 0 { facts.append((label: "异常", value: "\(faulted)")) }
+        if let largest = largestSingleApply, largest > 0 {
+            facts.append((label: "单次最多", value: "\(largest)"))
+        }
+        return facts
+    }
+
+    private var capacityDetail: String {
+        isCurrent ? cardSquaresSummary(store.snapshot.operationalGPUs) : "暂时无法确认"
     }
 
     private var capacity: some View {
         Button { navigate(.resources, .available) } label: {
             HomeCard(padding: 16) {
-                VStack(alignment: .leading, spacing: 0) {
-                    Text("空闲 GPU")
-                        .font(Typography.label)
-                        .foregroundStyle(DesignTokens.mutedInk)
-                    HStack(alignment: .firstTextBaseline, spacing: 6) {
-                        Text(isCurrent ? "\(summary.availableGPUs)" : "—")
-                            .font(Typography.display)
-                            .foregroundStyle(DesignTokens.ink)
-                        Text("/ \(summary.totalGPUs) 张")
-                            .font(.body)
-                            .monospacedDigit()
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 0) {
+                        Text("空闲 GPU")
+                            .font(Typography.label)
                             .foregroundStyle(DesignTokens.mutedInk)
-                    }
-                    .lineLimit(1)
-                    .padding(.top, 6)
-                    Spacer(minLength: 8)
-                    Capsule()
-                        .fill(DesignTokens.track)
-                        .frame(height: 8)
-                        .overlay(alignment: .leading) {
-                            GeometryReader { proxy in
-                                Capsule()
-                                    .fill(DesignTokens.ink)
-                                    .frame(width: proxy.size.width * freeFraction)
+                        Spacer(minLength: 6)
+                        VStack(alignment: .leading, spacing: 5) {
+                            ForEach(capacityFacts, id: \.label) { fact in
+                                HStack(spacing: 0) {
+                                    Text(fact.label)
+                                        .font(Typography.body)
+                                        .foregroundStyle(DesignTokens.mutedInk)
+                                        .frame(width: 60, alignment: .leading)
+                                    Text(fact.value)
+                                        .font(Typography.rowValue)
+                                        .foregroundStyle(DesignTokens.ink)
+                                }
+                                .lineLimit(1)
                             }
                         }
-                        .accessibilityHidden(true)
-                    Text(capacityCaption)
-                        .font(Typography.annotation)
-                        .foregroundStyle(DesignTokens.mutedInk)
-                        .lineLimit(1)
-                        .padding(.top, 10)
+                    }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    CapacityRing(
+                        freeShare: freeShare,
+                        figure: isCurrent ? "\(summary.availableGPUs)" : "—",
+                        total: summary.totalGPUs
+                    )
+                    .help(capacityDetail)
+                    .accessibilityHidden(true)
                 }
                 .frame(height: 124)
             }
@@ -154,14 +161,8 @@ struct OverviewDashboard: View {
         .buttonStyle(.plain)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("空闲 GPU")
-        .accessibilityValue(isCurrent ? "\(summary.availableGPUs) 张，共 \(summary.totalGPUs) 张" : "暂时无法确认")
+        .accessibilityValue(isCurrent ? "\(summary.availableGPUs) 张，共 \(summary.totalGPUs) 张：\(capacityDetail)" : capacityDetail)
         .accessibilityAddTraits(.isButton)
-    }
-
-    private var capacityCaption: String {
-        var parts = ["共 \(summary.totalGPUs) 张"]
-        if let largest = largestSingleApply, largest > 0 { parts.append("一次最多 \(largest) 张") }
-        return parts.joined(separator: " · ")
     }
 
     private var trend: some View {
@@ -235,7 +236,7 @@ struct OverviewDashboard: View {
                         isCurrent ? "现在没有要处理的事" : "暂时无法确认",
                         systemImage: isCurrent ? "checkmark.circle" : "questionmark.circle"
                     )
-                        .font(.body)
+                        .font(Typography.body)
                         .foregroundStyle(DesignTokens.mutedInk)
                     Spacer(minLength: 0)
                 } else {
@@ -248,7 +249,7 @@ struct OverviewDashboard: View {
                                     .fill(alert.category == .serverAbnormal ? DesignTokens.danger : DesignTokens.nearFullCard)
                                     .frame(width: 8, height: 8)
                                 Text(alert.message)
-                                    .font(.body)
+                                    .font(Typography.body)
                                     .foregroundStyle(DesignTokens.ink)
                                     .lineLimit(1)
                                     .truncationMode(.tail)
@@ -309,10 +310,10 @@ private struct FleetTrendChart: View {
                 ForEach(samples) { sample in
                     AreaMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(DesignTokens.loadBlue.opacity(DesignTokens.Alpha.fill))
+                        .foregroundStyle(DesignTokens.chartLine.opacity(DesignTokens.Alpha.fill))
                     LineMark(x: .value("时间", sample.id), y: .value("利用率", sample.value), series: .value("段", "\(sample.run)"))
                         .interpolationMethod(.monotone)
-                        .foregroundStyle(DesignTokens.loadBlue)
+                        .foregroundStyle(DesignTokens.chartLine)
                         .lineStyle(StrokeStyle(lineWidth: 1.75, lineCap: .round, lineJoin: .round))
                 }
                 ForEach(gaps, id: \.beforeIndex) { gap in
@@ -330,7 +331,7 @@ private struct FleetTrendChart: View {
             .chartYAxis(.hidden)
             .accessibilityLabel("近 24 小时全部 GPU 的平均利用率")
 #else
-            Sparkline(points: series?.points ?? [], color: DesignTokens.loadBlue, lineWidth: 2)
+            Sparkline(points: series?.points ?? [], color: DesignTokens.chartLine, lineWidth: 2)
 #endif
         } else {
             Text("暂无历史数据")
@@ -421,10 +422,10 @@ private struct ServerTile: View {
             .padding(.horizontal, 16)
             .padding(.vertical, 14)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous))
+            .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
             .overlay(
-                RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
-                    .strokeBorder(hovering ? DesignTokens.surfaceStroke : DesignTokens.tileStroke, lineWidth: 1)
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
+                    .strokeBorder(hovering ? DesignTokens.tileStrokeStrong : DesignTokens.tileStroke, lineWidth: 1)
             )
             .contentShape(Rectangle())
         }
@@ -468,6 +469,43 @@ struct CardPip: View {
             }
         }
         .frame(width: size, height: size)
+    }
+}
+
+/// How much of the fleet is free, read the way a phone shows its battery: the arc
+/// is the free share, and the figure naming it sits inside.  Each card's own state
+/// belongs to the tiles below.
+struct CapacityRing: View {
+    let freeShare: Double
+    let figure: String
+    let total: Int
+
+    private static let diameter: CGFloat = 106
+    private static let lineWidth: CGFloat = 17
+
+    var body: some View {
+        ZStack {
+            Circle()
+                .stroke(DesignTokens.track, lineWidth: Self.lineWidth)
+            if freeShare > 0 {
+                Circle()
+                    .trim(from: 0, to: freeShare)
+                    .stroke(DesignTokens.success, style: StrokeStyle(lineWidth: Self.lineWidth, lineCap: .round))
+                    .rotationEffect(.degrees(-90))
+            }
+            VStack(spacing: -1) {
+                Text(figure)
+                    .font(Typography.display)
+                    .foregroundStyle(DesignTokens.ink)
+                Text("/ \(total) 张")
+                    .font(Typography.annotation)
+                    .monospacedDigit()
+                    .foregroundStyle(DesignTokens.mutedInk)
+            }
+            .lineLimit(1)
+        }
+        .padding(Self.lineWidth / 2)
+        .frame(width: Self.diameter, height: Self.diameter)
     }
 }
 

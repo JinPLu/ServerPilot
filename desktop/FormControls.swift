@@ -13,16 +13,16 @@ struct SheetTitle: View {
     var body: some View {
         HStack(spacing: 12) {
             Image(systemName: icon)
-                .font(.title2.weight(.semibold))
+                .font(Typography.screenTitle)
                 .foregroundStyle(DesignTokens.ink)
                 .frame(width: 42, height: 42)
                 .background(DesignTokens.selection, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
             VStack(alignment: .leading, spacing: 3) {
                 Text(title)
-                    .font(.title2.weight(.semibold))
+                    .font(Typography.screenTitle)
                     .foregroundStyle(DesignTokens.ink)
                 Text(subtitle)
-                    .font(.callout.weight(.medium))
+                    .font(Typography.identity)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
         }
@@ -51,7 +51,7 @@ struct InlineValidation: View {
 
     var body: some View {
         Label(message, systemImage: "exclamationmark.triangle.fill")
-            .font(.callout.weight(.medium))
+            .font(Typography.identity)
             .foregroundStyle(DesignTokens.danger)
     }
 }
@@ -70,7 +70,7 @@ struct InlineResult: View {
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
-        .font(.callout.weight(.medium))
+        .font(Typography.identity)
         .padding(11)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(

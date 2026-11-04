@@ -88,7 +88,7 @@ struct ServerGPUMemoryStatusGrid: View {
                     .foregroundStyle(DesignTokens.ink)
                 Spacer(minLength: 0)
                 Text("当前显存 · \(gpus.count) 张 GPU")
-                    .font(Typography.metricLabel)
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
 
@@ -174,7 +174,7 @@ struct GPUMemoryStatusRow: View {
                         .foregroundStyle(DesignTokens.ink)
                     if status != .available {
                         Label(CardVocabulary.label(forState: gpu.state), systemImage: status.icon)
-                            .font(Typography.metricLabel.weight(.semibold))
+                            .font(Typography.annotation.weight(.semibold))
                             .foregroundStyle(status.tint)
                             .lineLimit(1)
                             .fixedSize()
@@ -190,7 +190,7 @@ struct GPUMemoryStatusRow: View {
                     .truncationMode(.tail)
                 if let observation = gpuTaskObservationLabel(gpu) {
                     Text(observation)
-                        .font(.caption2.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(status == .error ? DesignTokens.danger : DesignTokens.mutedInk)
                         .lineLimit(1)
                         .truncationMode(.tail)
@@ -205,7 +205,7 @@ struct GPUMemoryStatusRow: View {
                     .foregroundStyle(memoryPressureColor(gpu))
                     .lineLimit(1)
                 Text("显存")
-                    .font(Typography.metricLabel)
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .lineLimit(1)
             }
@@ -214,7 +214,7 @@ struct GPUMemoryStatusRow: View {
         .padding(.horizontal, 12)
         .frame(maxWidth: .infinity, minHeight: 74, alignment: .leading)
         .background(
-            DesignTokens.ambientSmoke,
+            DesignTokens.subtle,
             in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
         )
         .accessibilityElement(children: .ignore)
@@ -262,7 +262,7 @@ struct GPUDetailSheet: View {
                     Text("当前任务")
                         .fieldLabel()
                     Text(task)
-                        .font(.system(.body, design: .monospaced).weight(.semibold))
+                        .font(Typography.command.weight(.semibold))
                         .foregroundStyle(DesignTokens.ink)
                         .lineLimit(2)
                 }

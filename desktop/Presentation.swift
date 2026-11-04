@@ -469,6 +469,11 @@ struct ServerStatus {
         case .quiet: DesignTokens.mutedInk
         }
     }
+
+    /// The dot carries the state; the word beside it stays quiet unless something broke.
+    var wordColor: Color {
+        tone == .fault ? DesignTokens.danger : DesignTokens.mutedInk
+    }
 }
 
 /// What a machine is doing, in one line, for the corner of its overview tile.

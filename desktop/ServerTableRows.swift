@@ -93,7 +93,7 @@ struct SchedulerNodeTableRow: View {
                         .accessibilityHidden(true)
                     Text(stateWord)
                         .font(Typography.annotation)
-                        .foregroundStyle(statusColor)
+                        .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
             }

@@ -18,7 +18,7 @@ struct EndpointTelemetryHistoryPanel: View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
                 Text("历史")
-                    .font(.body.weight(.semibold))
+                    .font(Typography.label)
                 Spacer()
                 Picker("时间范围", selection: $range) {
                     Text("1h").tag(EndpointTelemetryRange.oneHour)
@@ -39,7 +39,7 @@ struct EndpointTelemetryHistoryPanel: View {
                 )
             } else if store.endpointTelemetryHistoryLoading.contains(endpoint.id) {
                 Label("正在载入 \(range.rawValue)", systemImage: "arrow.clockwise")
-                    .font(.subheadline.weight(.medium))
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .frame(maxWidth: .infinity, minHeight: 76, alignment: .leading)
                     .padding(.horizontal, 12)
@@ -97,7 +97,7 @@ private struct EndpointTelemetryHistoryChart: View, Equatable {
                     "所选时段暂无数据。",
                     systemImage: "exclamationmark.triangle.fill"
                 )
-                .font(.caption2.weight(.semibold))
+                .font(Typography.annotation.weight(.semibold))
                 .foregroundStyle(DesignTokens.warning)
                 .frame(maxWidth: .infinity, minHeight: 112, alignment: .leading)
             } else {
@@ -187,10 +187,10 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             HStack(alignment: .firstTextBaseline, spacing: 6) {
-                Text(title).font(.callout.weight(.semibold))
+                Text(title).font(Typography.identity.weight(.semibold))
                 if !subtitle.isEmpty {
                     Text(subtitle)
-                        .font(.caption2.weight(.medium))
+                        .font(Typography.annotation)
                         .foregroundStyle(DesignTokens.mutedInk)
                         .lineLimit(1)
                 }
@@ -199,7 +199,7 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
 
             if series.allSatisfy({ $0.points.isEmpty }) {
                 Label(emptyMessage, systemImage: "chart.line.flattrend.xyaxis")
-                    .font(.caption2.weight(.medium))
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .frame(maxWidth: .infinity, minHeight: 178, alignment: .leading)
             } else {
@@ -207,14 +207,14 @@ private struct EndpointTelemetryMetricChart: View, Equatable {
                 chart
 #else
                 Text("当前系统没有 Swift Charts，使用文本降级。")
-                    .font(.caption2.weight(.medium))
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
                     .frame(maxWidth: .infinity, minHeight: 178, alignment: .leading)
 #endif
             }
         }
         .padding(7)
-        .background(DesignTokens.glassSmoke, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
+        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous).stroke(DesignTokens.surfaceStroke, lineWidth: 0.8))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(title)
@@ -293,13 +293,13 @@ private struct EndpointTelemetryGPULegend: View {
                         Capsule().fill(line.color).frame(width: 12, height: 3)
                         Text(line.label).lineLimit(1)
                     }
-                    .font(.caption2.weight(.semibold))
+                    .font(Typography.annotation.weight(.semibold))
                     .foregroundStyle(DesignTokens.mutedInk)
                 }
             }
             if series.count > Self.visibleLimit {
                 Text("另 \(series.count - Self.visibleLimit) 张未列出")
-                    .font(.caption2.weight(.medium))
+                    .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
         }
@@ -413,7 +413,7 @@ private struct EndpointTelemetryHoverCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text(historyDateTime(item.timestamp))
-                .font(.system(.caption2, design: .monospaced).weight(.bold))
+                .font(Typography.commandSmall.weight(.bold))
                 .foregroundStyle(DesignTokens.ink)
             ScrollView(.vertical) {
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 4) {
@@ -428,7 +428,7 @@ private struct EndpointTelemetryHoverCard: View {
                             Text(entry.value)
                                 .fontWeight(.bold)
                         }
-                        .font(.system(.caption2, design: .monospaced).weight(.medium))
+                        .font(Typography.commandSmall)
                         .foregroundStyle(DesignTokens.ink)
                     }
                 }

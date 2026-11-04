@@ -124,6 +124,8 @@ struct ResourcesDashboard: View {
     @State private var selectedEndpointIDs: Set<String> = []
     @State private var isRemovingEndpoints = false
     @State private var showsViewPanel = false
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Namespace private var filterSelection
     @AppStorage("serverTableHiddenColumns") private var hiddenColumnsRaw = EndpointColumn.temperature.rawValue
     @AppStorage("serverTableGrouped") private var groupsTable = true
     let manageGroups: () -> Void
@@ -268,8 +270,8 @@ struct ResourcesDashboard: View {
             }
             endpointTable
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 2)
+        .padding(.horizontal, 24)
+        .padding(.top, 16)
         .padding(.bottom, 12)
         .onChange(of: sort) { _, newSort in
             sortDirection = newSort.defaultDirection
@@ -278,20 +280,36 @@ struct ResourcesDashboard: View {
 
     private var controlBar: some View {
         HStack(spacing: 8) {
-            ForEach(EndpointFilter.allCases) { item in
-                FilterChip(
-                    label: item.label,
-                    count: scopedEndpoints.filter { matches($0, item) }.count,
-                    selected: filter == item
-                ) { filter = item }
+            HStack(spacing: 0) {
+                ForEach(EndpointFilter.allCases) { item in
+                    FilterChip(
+                        label: item.label,
+                        count: scopedEndpoints.filter { matches($0, item) }.count,
+                        selected: filter == item,
+                        selection: filterSelection
+                    ) { filter = item }
+                }
             }
+            .padding(3)
+            .background(
+                DesignTokens.ink.opacity(DesignTokens.Alpha.hairline),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel - 1, style: .continuous)
+            )
+            .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: filter)
             Spacer(minLength: 8)
             TextField("搜索服务器、GPU、项目或任务", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.body)
+                .font(Typography.body)
                 .padding(.horizontal, 12)
-                .frame(minWidth: 120, idealWidth: 230, maxWidth: 230, minHeight: 28, maxHeight: 28)
-                .background(DesignTokens.ink.opacity(DesignTokens.Alpha.edge), in: Capsule())
+                .frame(minWidth: 120, idealWidth: 230, maxWidth: 230, minHeight: 30, maxHeight: 30)
+                .background(
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+                        .fill(DesignTokens.surface)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+                        .strokeBorder(DesignTokens.tileStrokeStrong, lineWidth: 1)
+                )
                 .accessibilityLabel("搜索服务器")
             Button { showsViewPanel.toggle() } label: {
                 Label("视图", systemImage: "slider.horizontal.3")
@@ -351,7 +369,7 @@ struct ResourcesDashboard: View {
                 }
             }
         }
-        .font(.body)
+        .font(Typography.body)
         .fixedSize()
     }
 
@@ -390,12 +408,12 @@ struct ResourcesDashboard: View {
                 if filteredEndpoints.isEmpty {
                     VStack(spacing: 8) {
                         Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
-                            .font(.title2)
+                            .font(Typography.icon)
                             .foregroundStyle(DesignTokens.mutedInk)
                         Text(endpoints.isEmpty ? "暂无服务器" : "没有匹配的服务器")
                             .font(Typography.label)
                         Text(endpoints.isEmpty ? "添加服务器后会显示资源。" : "调整搜索或过滤条件。")
-                            .font(Typography.secondary)
+                            .font(Typography.annotation)
                             .foregroundStyle(DesignTokens.mutedInk)
                     }
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -435,7 +453,7 @@ struct ResourcesDashboard: View {
         columns: Set<EndpointColumn>
     ) -> some View {
         let rows = sectionRows(section)
-        let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+        let shape = RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
         return VStack(spacing: 0) {
             if section.showsHeader {
                 groupSectionHeader(section)
@@ -492,7 +510,7 @@ struct ResourcesDashboard: View {
         let selected = selectedEndpoints
         return HStack(spacing: 12) {
             Text("已选 \(selected.count) 台")
-                .font(.body.weight(.semibold))
+                .font(Typography.label)
                 .foregroundStyle(DesignTokens.ink)
                 .monospacedDigit()
             Button(allFilteredSelected ? "取消全选" : "全选当前结果（\(filteredEndpoints.count) 台）") {
@@ -698,28 +716,37 @@ struct ResourcesDashboard: View {
 }
 
 
-/// A filter is a pill you can read the answer off: the count is already there.
+/// One segment of the filter above the table.  The white block marks the one in
+/// use without spending a colour on it, and the count is already the answer.
 private struct FilterChip: View {
     let label: String
     let count: Int
     let selected: Bool
+    let selection: Namespace.ID
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 5) {
                 Text(label)
-                Text("\(count)").fontWeight(.semibold).monospacedDigit()
+                    .font(selected ? Typography.rowPrimary : Typography.body)
+                    .foregroundStyle(selected ? DesignTokens.ink : DesignTokens.mutedInk)
+                Text("\(count)")
+                    .font(Typography.annotation)
+                    .monospacedDigit()
+                    .foregroundStyle(DesignTokens.mutedInk)
             }
-            .font(.body)
-            .foregroundStyle(selected ? DesignTokens.onInteraction : DesignTokens.ink)
-            .padding(.horizontal, 11)
-            .frame(height: 28)
-            .background(
-                selected ? AnyShapeStyle(DesignTokens.ink) : AnyShapeStyle(DesignTokens.ink.opacity(DesignTokens.Alpha.edge)),
-                in: Capsule()
-            )
-            .contentShape(Capsule())
+            .padding(.horizontal, 10)
+            .frame(height: 24)
+            .background {
+                if selected {
+                    RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+                        .fill(DesignTokens.surface)
+                        .shadow(color: .black.opacity(DesignTokens.Alpha.fill), radius: 1.5, y: 0.5)
+                        .matchedGeometryEffect(id: "selection", in: selection)
+                }
+            }
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .focusable()
@@ -765,7 +792,7 @@ enum EndpointTableLayout {
         var showsAssignment: Bool { self != .compact }
 
         var columnSpacing: CGFloat { self == .wide ? 12 : 10 }
-        var assignmentWidth: CGFloat { self == .wide ? 170 : 150 }
+        var assignmentWidth: CGFloat { self == .wide ? 164 : 150 }
         /// Eight squares of 11 pt, and a model such as `A800-SXM4-80GB × 8` under them.
         var gpuModelWidth: CGFloat { 128 }
         var availabilityWidth: CGFloat { 60 }
@@ -977,12 +1004,12 @@ private struct EndpointTableHeader: View {
         .padding(.horizontal, EndpointTableLayout.cardPadding)
         .frame(height: EndpointTableLayout.headerHeight)
         .background(shape.fill(DesignTokens.surface))
-        .overlay(shape.strokeBorder(DesignTokens.surfaceStroke, lineWidth: 1))
+        .overlay(shape.strokeBorder(DesignTokens.tileStroke, lineWidth: 1))
         .padding(.bottom, 8)
     }
 
     private var shape: some InsettableShape {
-        RoundedRectangle(cornerRadius: DesignTokens.Radius.tile, style: .continuous)
+        RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
     }
 
     private func header(_ key: EndpointSort, trailing: Bool) -> some View {
@@ -1138,7 +1165,7 @@ private struct EndpointTableRow: View {
             HStack(spacing: tier.columnSpacing) {
                 if let checked = removalMark {
                     Image(systemName: checked ? "checkmark.circle.fill" : "circle")
-                        .font(.body)
+                        .font(Typography.body)
                         .foregroundStyle(checked ? DesignTokens.danger : DesignTokens.mutedInk)
                 }
                 serverCell
@@ -1214,7 +1241,7 @@ private struct EndpointTableRow: View {
                     .accessibilityHidden(true)
                 Text(statusLine)
                     .font(Typography.annotation)
-                    .foregroundStyle(status.color)
+                    .foregroundStyle(status.wordColor)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }

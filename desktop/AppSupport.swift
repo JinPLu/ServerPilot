@@ -3,11 +3,10 @@ import SwiftUI
 
 /// The app's complete type ramp.
 ///
-/// The overview, server and task pages use four sizes: 26 for the title and the
-/// figures a page exists to answer, 15 for a section or a task's name, 13 for
-/// what a row says first, 11 for what explains it.  Sizes a point apart read as
-/// a mistake rather than as hierarchy.  Alerts, forms, sheets and settings still
-/// reach for 12 and 10.
+/// 26 for the figures a page exists to answer, 17 for its title, 15 for a section
+/// or a task's name, 13 for what a row says first, 11 for what explains it.  A
+/// number outranks the title above it, because the number is what a person came
+/// for.  12 is only for field text and command lines in forms and sheets.
 ///
 /// Add a role rather than a size: a new `.system(size:)` in interface code is
 /// a regression, not a tweak.  Numerals carry `.monospacedDigit()` because the
@@ -20,7 +19,7 @@ import SwiftUI
 /// as three products.  Every page-level panel now renders through this.
 struct HomeCard<Content: View>: View {
     var padding: CGFloat = 20
-    var radius: CGFloat = DesignTokens.Radius.tile
+    var radius: CGFloat = DesignTokens.Radius.panel
     @ViewBuilder var content: () -> Content
 
     var body: some View {
@@ -49,7 +48,7 @@ struct CardSectionLabel: View {
     var body: some View {
         HStack(alignment: .center, spacing: 8) {
             Text(text)
-                .font(Typography.metricLabel)
+                .font(Typography.annotation)
                 .foregroundStyle(DesignTokens.mutedInk)
                 .textCase(nil)
                 .accessibilityAddTraits(.isHeader)
@@ -69,17 +68,21 @@ struct CardSectionLabel: View {
 }
 
 enum Typography {
-    /// 26 · The page title, set directly on the page plane.
-    static let screenTitle = Font.largeTitle.weight(.bold)
     /// 26 · The figures a page exists to answer: everywhere else a number sits in its row.
     static let display = Font.system(.largeTitle, design: .rounded).weight(.semibold).monospacedDigit()
+    /// 17 · A page's title in its header, and a sheet's title.
+    static let screenTitle = Font.title2.weight(.semibold)
+    /// 17 · A glyph standing in for an empty page.
+    static let icon = Font.title2
     /// 15 · A section on a page, a task's name, and the figures on a task card.
     static let sectionTitle = Font.title3.weight(.semibold)
     /// 15 · The primary value on a card or ring.
     static let cardValue = Font.system(.title3, design: .rounded).weight(.semibold).monospacedDigit()
-    /// 13 · A card's heading and field labels.  Table column headers use
-    /// `annotation`: at 13 pt they outweighed the values underneath them.
-    static let label = Font.headline
+    /// 13 · A card's heading, field labels and button text.  Table column headers
+    /// use `annotation`: at 13 pt they outweighed the values underneath them.
+    static let label = Font.body.weight(.semibold)
+    /// 13 · Running text.
+    static let body = Font.body
     /// 13 · Percentages, counts, ratios inside a row.
     static let rowValue = Font.body.weight(.medium).monospacedDigit()
     /// 13 · The first line of a two-line row: an address, a task.
@@ -90,11 +93,8 @@ enum Typography {
     static let command = Font.system(.callout, design: .monospaced).weight(.medium)
     /// 11 · Units, timestamps, status words, null markers.
     static let annotation = Font.subheadline.weight(.medium)
-
-    // Retired names kept only so no call site silently changes meaning during
-    // the migration; both resolved to 10pt, which was the duplicate pair.
-    static let metricLabel = annotation
-    static let secondary = annotation
+    /// 11 · Chart scales and identifiers inside a row.
+    static let commandSmall = Font.system(.subheadline, design: .monospaced).weight(.medium)
 }
 
 /// Republishes when the system accessibility display options change.
@@ -244,6 +244,12 @@ enum DesignTokens {
         normal: (229.0, 232.0, 238.0),
         increased: (198.0, 203.0, 214.0)
     )
+    /// Lines that plot over time.  A hue no state uses, so a chart beside the
+    /// squares cannot read as "low utilization", which is what blue means there.
+    static let chartLine = statusColor(
+        normal: (8.0, 145.0, 178.0),
+        increased: (14.0, 116.0, 144.0)
+    )
     static let selection = Color(nsColor: .unemphasizedSelectedContentBackgroundColor)
     /// Content plane.  White against a single page plane gives one visible
     /// 1.18:1 step; the previous three planes stepped 1.06-1.09 each, which
@@ -273,34 +279,34 @@ enum DesignTokens {
         _ = appearance
         return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.20 : 0.08)
     })
-    /// Page plane.  A neutral grey with no blue in it, 1.12:1 below `surface`,
-    /// the step Apple's grouped backgrounds use.  Increase Contrast darkens it
-    /// and draws `tileStroke` around every tile.
-    static let ambientSmoke = statusColor(
+    /// Page plane.  Planes are told apart by an edge, not by a step in grey:
+    /// shadow and tint are kept for what actually floats.
+    static let page = surface
+    /// A panel set into a card, such as one GPU in a server's detail.
+    static let subtle = statusColor(
         normal: (245.0, 245.0, 247.0),
         increased: (229.0, 229.0, 234.0)
     )
-    /// Tile edge.  Home tiles carry no outline normally — the elevation step
-    /// does that work — but Increase Contrast asks for a drawn boundary.
+    /// A card's edge on the page plane.
     static let tileStroke = Color(nsColor: NSColor(name: nil) { appearance in
         _ = appearance
-        return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.34 : 0.06)
+        return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.34 : 0.10)
     })
-    /// The retired middle plane.  Kept as an alias so existing call sites do
-    /// not gain a third elevation back; it now resolves to the content plane.
-    static let glassSmoke = surface
+    /// The same edge under the pointer, and around an outlined button.
+    static let tileStrokeStrong = Color(nsColor: NSColor(name: nil) { appearance in
+        _ = appearance
+        return NSColor(white: 0, alpha: wantsIncreasedContrast ? 0.50 : 0.20)
+    })
 
-    /// Four radii, one per role.  Eleven distinct values read as drift rather
+    /// Three radii, one per role.  Eleven distinct values read as drift rather
     /// than as a system; anything between two steps rounds to the nearer one.
     enum Radius {
         /// Pips, count chips, inline badges.
         static let pip: CGFloat = 4
         /// Buttons, fields, segmented controls, icon squares.
-        static let control: CGFloat = 7
-        /// Inner panels nested inside a tile, and sheet sections.
+        static let control: CGFloat = 6
+        /// Cards, and the panels set into them.
         static let panel: CGFloat = 10
-        /// The tile itself, and any page-level card that is one.
-        static let tile: CGFloat = 16
     }
 
     /// Five alphas.  Same reasoning as `Radius`: twenty-two values cannot be
@@ -350,7 +356,7 @@ enum DashboardSection: Hashable {
 
 struct AmbientBackground: View {
     var body: some View {
-        DesignTokens.ambientSmoke
+        DesignTokens.page
             .ignoresSafeArea()
     }
 }
@@ -367,7 +373,7 @@ struct SoftButtonStyle: ButtonStyle {
             .frame(height: 31)
             .background(
                 tint.opacity(isEnabled ? (configuration.isPressed ? 0.72 : 0.94) : 0.22),
-                in: Capsule()
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
@@ -378,13 +384,13 @@ struct PrimaryActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.body.weight(.semibold))
+            .font(Typography.label)
             .foregroundStyle(DesignTokens.onInteraction.opacity(isEnabled ? 1 : 0.58))
             .padding(.horizontal, 14)
             .frame(height: 30)
             .background(
                 DesignTokens.ink.opacity(isEnabled ? (configuration.isPressed ? 0.78 : 1) : 0.26),
-                in: Capsule()
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
@@ -395,29 +401,50 @@ struct SecondaryActionButtonStyle: ButtonStyle {
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(.body.weight(.semibold))
+            .font(Typography.label)
             .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
             .padding(.horizontal, 12)
             .frame(height: 30)
             .background(
-                DesignTokens.ink.opacity(configuration.isPressed ? DesignTokens.Alpha.fill : DesignTokens.Alpha.edge),
-                in: Capsule()
+                DesignTokens.ink.opacity(configuration.isPressed ? DesignTokens.Alpha.edge : 0),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
+                    .strokeBorder(DesignTokens.tileStrokeStrong, lineWidth: 1)
             )
             .scaleEffect(configuration.isPressed ? 0.98 : 1)
     }
 }
 
+/// A quiet button: nothing but its glyph until the pointer is on it.
 struct IconActionButtonStyle: ButtonStyle {
-    @Environment(\.isEnabled) private var isEnabled
-
     func makeBody(configuration: Configuration) -> some View {
+        IconActionLabel(configuration: configuration)
+    }
+}
+
+private struct IconActionLabel: View {
+    @Environment(\.isEnabled) private var isEnabled
+    @State private var hovering = false
+    let configuration: ButtonStyleConfiguration
+
+    private var wash: Double {
+        guard isEnabled else { return 0 }
+        if configuration.isPressed { return DesignTokens.Alpha.fill }
+        return hovering ? DesignTokens.Alpha.edge : 0
+    }
+
+    var body: some View {
         configuration.label
             .foregroundStyle(DesignTokens.ink.opacity(isEnabled ? 1 : 0.42))
             .frame(width: 30, height: 30)
             .background(
-                DesignTokens.ink.opacity(configuration.isPressed ? DesignTokens.Alpha.fill : DesignTokens.Alpha.edge),
-                in: Circle()
+                DesignTokens.ink.opacity(wash),
+                in: RoundedRectangle(cornerRadius: DesignTokens.Radius.control, style: .continuous)
             )
+            .contentShape(Rectangle())
+            .onHover { hovering = $0 }
             .scaleEffect(configuration.isPressed ? 0.95 : 1)
     }
 }
@@ -442,7 +469,7 @@ struct VisualEffect: NSViewRepresentable {
 
 extension View {
     func fieldLabel() -> some View {
-        font(.callout.weight(.semibold))
+        font(Typography.identity.weight(.semibold))
             .foregroundStyle(DesignTokens.ink)
     }
 
