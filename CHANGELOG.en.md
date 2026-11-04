@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.2.0 - 2026-11-04
 
 - **The interface is now white with hairline edges.** Pages and cards are both white, separated by thin lines, with smaller corner radii and buttons that are no longer capsules, across the App.
 - **A tidier page header.** Each page has a slim bar running to the top of the window, which gives the content more room. Page titles drop from 26 to 17, so the large figures outrank them.
