@@ -4,6 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Bars on the server page now have colour.** Green below 80%, yellow from 80% and orange from 95%, while red still only means an error. Keepalive and offline readings stay grey. Figures are always dark, so the bar alone carries the colour. CPU now counts as under pressure from 80%, down from 90%.
+- **Alerts name the server by its address.** "Unreachable" and "needs signing in again" no longer use an internal ID, so they match the address on the page, and alerts already open update too.
+
 ## 5.2.0 - 2026-11-04
 
 - **The interface is now white with hairline edges.** Pages and cards are both white, separated by thin lines, with smaller corner radii and buttons that are no longer capsules, across the App.

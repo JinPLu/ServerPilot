@@ -1091,7 +1091,7 @@ struct TablePressureCell: View {
             Text(percentageLabel(fraction))
                 .font(Typography.rowValue)
                 .monospacedDigit()
-                .foregroundStyle(muted ? DesignTokens.mutedInk : metricTextColor(metric, fraction))
+                .foregroundStyle(muted ? DesignTokens.mutedInk : DesignTokens.ink)
                 .lineLimit(1)
                 .frame(width: EndpointTableLayout.meterFigureWidth, alignment: .leading)
             if fraction != nil {

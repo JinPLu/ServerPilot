@@ -169,19 +169,10 @@ func endpointRequiresAttention(endpoint: EndpointRecord, gpus: [GPURecord]) -> B
 func metricColor(_ metric: ResourceMetric, _ fraction: Double?) -> Color {
     guard let fraction else { return DesignTokens.mutedInk }
     switch metric.pressure(fraction) {
-    case .normal: return DesignTokens.meterFill
+    case .normal: return DesignTokens.meterRoom
     case .warning: return DesignTokens.nearFullCard
-    case .critical: return DesignTokens.danger
-    }
-}
-
-/// The same answer for the figure beside a bar: yellow is too light to read as text.
-func metricTextColor(_ metric: ResourceMetric, _ fraction: Double?) -> Color {
-    guard let fraction else { return DesignTokens.mutedInk }
-    switch metric.pressure(fraction) {
-    case .normal: return DesignTokens.ink
-    case .warning: return DesignTokens.warning
-    case .critical: return DesignTokens.danger
+    // Not red, which is kept for a fault: a full card is a reading.
+    case .critical: return DesignTokens.meterFull
     }
 }
 

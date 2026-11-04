@@ -3,17 +3,13 @@ import Testing
 @testable import ServerPilotCore
 
 struct ResourceMetricTests {
-    @Test func aBusyGPUIsNeverAWarning() {
-        #expect(ResourceMetric.gpuUtilization.pressure(1.0) == .normal)
-    }
-
-    @Test func eachMetricWarnsFromItsOwnThreshold() {
-        #expect(ResourceMetric.gpuMemory.pressure(0.79) == .normal)
-        #expect(ResourceMetric.gpuMemory.pressure(0.80) == .warning)
-        #expect(ResourceMetric.cpu.pressure(0.89) == .normal)
-        #expect(ResourceMetric.cpu.pressure(0.90) == .warning)
-        #expect(ResourceMetric.memory.pressure(0.94) == .warning)
-        #expect(ResourceMetric.memory.pressure(0.95) == .critical)
+    @Test func everyMetricSharesOneRule() {
+        for metric in [ResourceMetric.gpuUtilization, .gpuMemory, .cpu, .memory] {
+            #expect(metric.pressure(0.79) == .normal)
+            #expect(metric.pressure(0.80) == .warning)
+            #expect(metric.pressure(0.94) == .warning)
+            #expect(metric.pressure(0.95) == .critical)
+        }
     }
 
     @Test func aNodeCarriesItsLastReadingOnceItGoesQuiet() throws {

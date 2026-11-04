@@ -169,6 +169,13 @@ def _as_utc(value: datetime | None) -> datetime | None:
     return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
+def _endpoint_address(endpoint: Endpoint) -> str:
+    """The name a person knows a server by, as the App prints it."""
+
+    host = f"[{endpoint.host}]" if ":" in endpoint.host and not endpoint.host.startswith("[") else endpoint.host
+    return f"{host}:{endpoint.port}"
+
+
 def _iso(value: datetime | None) -> str | None:
     return _as_utc(value).isoformat() if value is not None else None
 
@@ -7063,7 +7070,7 @@ class BrokerService:
             ):
                 signals.append(self._server_signal(
                     endpoint, f"offline:{endpoint.id}", "server_offline",
-                    f"服务器 {endpoint.id} 持续无法连接",
+                    f"服务器 {_endpoint_address(endpoint)} 持续无法连接",
                     hold_seconds=alert_rules.OFFLINE_HOLD_SECONDS,
                 ))
             connection = session.get(EndpointConnection, endpoint.id)
@@ -7072,7 +7079,7 @@ class BrokerService:
             }:
                 signals.append(self._server_signal(
                     endpoint, f"auth:{endpoint.id}", "server_auth",
-                    f"服务器 {endpoint.id} 需要重新登录",
+                    f"服务器 {_endpoint_address(endpoint)} 需要重新登录",
                 ))
         for current in session.scalars(
             select(KeepaliveCurrent).where(KeepaliveCurrent.actual == "ERROR")

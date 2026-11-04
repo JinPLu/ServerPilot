@@ -197,10 +197,16 @@ enum DesignTokens {
         normal: (0.0, 112.0, 240.0),
         increased: (0.0, 88.0, 208.0)
     )
-    /// A bar nothing is wrong with.
-    static let meterFill = statusColor(
-        normal: (180.0, 180.0, 186.0),
-        increased: (99.0, 99.0, 102.0)
+    /// A bar with room to spare.  Brighter than `success`, which has to stay
+    /// legible as text; a bar is read by its length and its hue.
+    static let meterRoom = statusColor(
+        normal: (52.0, 199.0, 89.0),
+        increased: (0.0, 131.0, 47.0)
+    )
+    /// A bar with nothing left to give.
+    static let meterFull = statusColor(
+        normal: (255.0, 149.0, 0.0),
+        increased: (190.0, 90.0, 0.0)
     )
     /// A bar that is not a load: a keepalive's own hold, or a reading gone stale.
     static let meterMuted = statusColor(

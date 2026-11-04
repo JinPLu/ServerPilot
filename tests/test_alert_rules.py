@@ -11,7 +11,7 @@ from sqlalchemy import select
 from serverpilot import alerts
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig, ServerGroupConfig
 from serverpilot.database import Database
-from serverpilot.models import Alert
+from serverpilot.models import Alert, Endpoint
 from serverpilot.schemas import RequestCreate
 from serverpilot.service import ActorContext, BrokerService
 from serverpilot.timeutil import utcnow
@@ -111,6 +111,15 @@ def test_an_outage_nobody_was_told_about_leaves_no_record(service, clock) -> Non
     clock.watch(service, 60, "endpoint-a", "endpoint-b")
 
     assert not [row for row in service.list_reminders() if row["type"] == "server_offline"]
+
+
+def test_a_server_reminder_names_the_address_people_know_it_by(service, clock) -> None:  # type: ignore[no-untyped-def]
+    clock.watch(service, 20, "endpoint-a", "endpoint-b")
+    clock.watch(service, 370, "endpoint-b")
+
+    endpoint = service._read(lambda session: session.get(Endpoint, "endpoint-a"))
+    [reminder] = [row for row in service.pending_notifications() if row["type"] == "server_offline"]
+    assert reminder["message"] == f"服务器 {endpoint.host}:{endpoint.port} 持续无法连接"
 
 
 def test_a_server_going_up_and_down_is_not_a_banner_per_outage(service, admin, clock) -> None:  # type: ignore[no-untyped-def]
