@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.2.2 - 2026-11-05
 
 - **Free cards held by keepalive can be claimed on a slow network.** Stopping keepalive now uses the same established SSH connection as observation, with the same time limit for its preflight, so a slow new connection no longer makes the claim fail.
 - **An unreachable keepalive helper no longer asks you to upgrade it.** The error now says the helper could not be reached, that no keepalive was changed, and tells the Agent when to retry. You are asked to upgrade only when the helper actually answers as incompatible.
