@@ -19,6 +19,7 @@ from serverpilot.adapters import (
     AdapterRegistryError,
     ServerScriptKeepaliveAdapter,
     endpoint_keepalive_adapter,
+    endpoint_ssh_argv,
 )
 from serverpilot.config import EndpointConfig
 from serverpilot.keepalive_protocol import (
@@ -325,35 +326,22 @@ def test_adapter_uses_fixed_ssh_command_and_exact_json_stdin(
         workspace_path="/srv/project-a",
     )
 
-    response = asyncio.run(ServerScriptKeepaliveAdapter().set_enabled(endpoint, False, [GPU_A]))
+    control_dir = Path("/tmp/serverpilot-test-control")
+    adapter = ServerScriptKeepaliveAdapter(control_dir=control_dir)
+    response = asyncio.run(adapter.set_enabled(endpoint, False, [GPU_A]))
 
     assert response.results[0].outcome == "stopped"
-    assert calls[0][0] == (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "ConnectTimeout=8",
-        "-p",
-        "2202",
-        "gpu@gpu.example.test",
-        "cd -- /srv/project-a && ./serverpilot-keepalive --protocol-info",
+    # The helper rides the same sealed, multiplexed SSH as observation.
+    assert calls[0][0] == endpoint_ssh_argv(
+        endpoint,
+        control_dir=control_dir,
+        remote_command="cd -- /srv/project-a && ./serverpilot-keepalive --protocol-info",
     )
     assert calls[0][2] == b""
-    assert calls[1][0] == (
-        "ssh",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "StrictHostKeyChecking=yes",
-        "-o",
-        "ConnectTimeout=8",
-        "-p",
-        "2202",
-        "gpu@gpu.example.test",
-        "cd -- /srv/project-a && ./serverpilot-keepalive --schema-version 3",
+    assert calls[1][0] == endpoint_ssh_argv(
+        endpoint,
+        control_dir=control_dir,
+        remote_command="cd -- /srv/project-a && ./serverpilot-keepalive --schema-version 3",
     )
     assert json.loads(calls[1][2]) == {
         "schema_version": 3,
@@ -604,6 +592,81 @@ def test_adapter_attestation_timeout_is_read_only_and_fails_closed(
 
     assert failure.value.uncertain is False
     assert process.killed is True
+
+
+
+def _probe_endpoint() -> EndpointConfig:
+    return EndpointConfig(
+        id="endpoint-a",
+        host="gpu.example.test",
+        port=22,
+        ssh_user="gpu",
+        workspace_path="/srv/project-a",
+    )
+
+
+def test_probe_timeout_is_unreachable_not_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A slow handshake used to surface as "upgrade the helper", which sent the
+    # operator after a version problem that did not exist.
+    invocations: list[tuple[Any, ...]] = []
+
+    class HungProcess:
+        returncode = None
+
+        async def communicate(self, _payload: bytes = b"") -> tuple[bytes, bytes]:
+            await asyncio.sleep(10)
+            return b"", b""
+
+        def kill(self) -> None:
+            return None
+
+        async def wait(self) -> int:
+            return -9
+
+    async def fake_create_subprocess_exec(*args: Any, **_options: Any) -> HungProcess:
+        invocations.append(args)
+        return HungProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+    adapter = ServerScriptKeepaliveAdapter()
+    adapter.probe_timeout_seconds = 0.01
+
+    with pytest.raises(AdapterCommandError, match="keepalive_helper_unreachable") as failure:
+        asyncio.run(adapter.set_enabled(_probe_endpoint(), False, [GPU_A]))
+
+    assert "keepalive_helper_incompatible" not in str(failure.value)
+    assert failure.value.uncertain is False
+    # Only the preflight ran; no mutation was sent.
+    assert len(invocations) == 1
+    assert invocations[0][-1].endswith("--protocol-info")
+
+
+def test_probe_ssh_failure_is_unreachable_but_helper_error_is_incompatible(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    returncode = 255
+
+    class FailedProcess:
+        @property
+        def returncode(self) -> int:
+            return returncode
+
+        async def communicate(self, _payload: bytes = b"") -> tuple[bytes, bytes]:
+            return b"", b"ssh: connect to host gpu.example.test port 22: Operation timed out"
+
+    async def fake_create_subprocess_exec(*_args: Any, **_options: Any) -> FailedProcess:
+        return FailedProcess()
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", fake_create_subprocess_exec)
+
+    with pytest.raises(AdapterCommandError, match="keepalive_helper_unreachable"):
+        asyncio.run(ServerScriptKeepaliveAdapter().set_enabled(_probe_endpoint(), False, [GPU_A]))
+
+    returncode = 127
+    with pytest.raises(AdapterCommandError, match="keepalive_helper_incompatible"):
+        asyncio.run(ServerScriptKeepaliveAdapter().set_enabled(_probe_endpoint(), False, [GPU_A]))
 
 
 class FakeProvider:

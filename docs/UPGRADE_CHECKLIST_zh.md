@@ -95,7 +95,7 @@ ssh user@host 'cd -- <workspace_path> && ./serverpilot-keepalive --protocol-info
 
 输出必须是 `kind=serverpilot-keepalive`、`schema_version=3`，并含 `per_gpu_keepalive`、`pidfd_identity`、`pci_bus_id`、`worker_attestation`。`implementation_version` 等于构建它的 ServerPilot 包装版本；预检不按这个数字做兼容判断，但现场应用和本机包装版本对齐。
 
-漏做：预检失败，返回 `keepalive_helper_incompatible`，不会发送任何变更。占卡开关在 App 里看起来能点，远端什么都不会启动。旧 v2 helper / 旧 state 直接拒绝，不会被收养。
+漏做：预检失败，返回 `keepalive_helper_incompatible`，不会发送任何变更。预检连不上（SSH 失败或超时）返回的是 `keepalive_helper_unreachable`，那是网络问题，不是版本问题。占卡开关在 App 里看起来能点，远端什么都不会启动。旧 v2 helper / 旧 state 直接拒绝，不会被收养。
 
 ## 6. 本机插件升到 v5
 

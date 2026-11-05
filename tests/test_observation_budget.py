@@ -14,7 +14,7 @@ import pytest
 from serverpilot.adapters import (
     RAW_SSH_COMBINED_QUERY,
     control_socket_path,
-    observation_ssh_argv,
+    endpoint_ssh_argv,
 )
 from serverpilot.config import SSH_BUDGETS, EndpointConfig, default_control_dir, stale_after_seconds
 
@@ -96,7 +96,7 @@ def test_probe_argv_is_the_single_sealed_option_list() -> None:
     """Every option that decides how a probe fails is pinned by us, not the endpoint."""
 
     control_dir = Path("/tmp/serverpilot-test-ssh")
-    argv = observation_ssh_argv(
+    argv = endpoint_ssh_argv(
         _endpoint(), control_dir=control_dir, remote_command=RAW_SSH_COMBINED_QUERY
     )
     options = {argv[index + 1] for index, item in enumerate(argv) if item == "-o"}
@@ -131,7 +131,7 @@ def test_control_path_is_quoted_because_the_real_one_contains_a_space() -> None:
     reads like an SSH or network fault.
     """
 
-    argv = observation_ssh_argv(
+    argv = endpoint_ssh_argv(
         _endpoint(), control_dir=default_control_dir(), remote_command="echo"
     )
     control_option = next(
@@ -147,7 +147,7 @@ def test_control_path_is_quoted_because_the_real_one_contains_a_space() -> None:
 def test_probe_argv_carries_the_endpoint_port_explicitly() -> None:
     """The port comes from the endpoint row, never from a matching ssh_config Host."""
 
-    argv = observation_ssh_argv(
+    argv = endpoint_ssh_argv(
         _endpoint(port=6972), control_dir=Path("/tmp/x"), remote_command="echo"
     )
     assert "-p" in argv

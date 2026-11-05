@@ -1,9 +1,25 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-11-04（Asia/Taipei）
+更新时间：2026-11-05（Asia/Taipei）
 
 当前包装版本为 `5.2.1`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 停占卡改走复用连接，连不上不再报“请升级 helper”（2026-11-05，未发布）
+
+一个 Agent 会话在百舸 hyshi 申请 4 张卡，组里有 7 张空卡（单次最多 5 张），却连续三次被拒，返回 `keepalive_helper_incompatible`，提示“请先完成该服务器的 helper 升级”。用户问：“怎么申请不了”。
+
+根因：空卡挂着占卡程序，分配前要逐卡停掉；停之前 adapter 先跑只读的 `--protocol-info` 预检。采集早已改走 daemon 的复用 SSH 连接，占卡 adapter 却每次新建连接，而且连接加执行一共只给 8 秒。当天新建连接变慢，`daemon.log` 记了 30 条 `protocol-info probe timed out`，全在 hyshi 的两台机器上；同一时间采集一直正常。超时又被归成“版本不匹配”，于是 fail closed，还把人引去升级一个没有问题的 helper。
+
+改动：
+
+- 占卡的预检、启停和核验三条 SSH 改用采集那份参数（`observation_ssh_argv` 改名 `endpoint_ssh_argv`），和采集共用同一个 `ControlMaster`。预检时限从 8 秒改成一次采集的时限 30 秒，`direct_claim_budget_seconds` 随之变大。
+- 预检超时、ssh 起不来或 ssh 自身退出码 255，改报新的 `keepalive_helper_unreachable`；只有 helper 真的答了不兼容才报 `keepalive_helper_incompatible`。两者都发生在任何变更之前。
+- 申请和停卡遇到这个码时返回 503，details 带 `retry_after_seconds: 30`；MCP 把它列为可重试的拒绝，Agent 拿到 `retryable: true`，不再是工具异常。
+
+验证：全量 Python 800 项、Ruff 通过（在只含已跟踪文件的干净副本里跑：工作区里有 61 个同步冲突留下的 `* 2` 旧副本，其中两份迁移让 alembic 出现两个 head；逐个核对都等于 HEAD 或某个历史提交后，经用户同意删除）。`update-macos-app.sh` 一次跑通，运行中的后端构建含新错误码，复用连接的 socket 已重建。
+
+未验证：没有在真实服务器上走一次“停占卡再分配”的新路径，更新后 hyshi 已没有空卡；也没有在慢连接下实测复用连接确实避开了超时。
 
 ## 指标条按余量着色，提醒写服务器地址（2026-11-04，5.2.1）
 

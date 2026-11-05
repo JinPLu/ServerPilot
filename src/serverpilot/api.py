@@ -28,7 +28,7 @@ from serverpilot.adapters import (
     endpoint_keepalive_adapter,
 )
 from serverpilot.collector import SSHCollector
-from serverpilot.config import Settings, load_inventory, project_root_override
+from serverpilot.config import SSH_BUDGETS, Settings, load_inventory, project_root_override
 from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
@@ -180,6 +180,9 @@ def _public_error_message(exc: BrokerError) -> str:
         "keepalive_helper_incompatible": (
             "远端占卡 helper 版本或能力不匹配；请先完成该服务器的 helper 升级。"
         ),
+        "keepalive_helper_unreachable": (
+            "暂时连不上这台服务器的占卡 helper，没有改动任何占卡；稍后重试。"
+        ),
         "keepalive_attestation_invalid": "远端占卡程序的身份校验未通过；该 GPU 暂不可申请。",
         "keepalive_outcome_uncertain": "占卡程序返回结果不确定，本次没有分配任务。",
         "keepalive_adapter_failed": "占卡程序启动或停止失败；下一采集周期会继续尝试。",
@@ -212,10 +215,20 @@ def _public_error_message(exc: BrokerError) -> str:
     return f"操作未完成（{exc.code}）。"
 
 
+def _keepalive_failure_details(code: str | None, details: dict[str, Any]) -> dict[str, Any]:
+    """Tell a caller when to retry a failure that left the host untouched."""
+
+    if code == "keepalive_helper_unreachable":
+        return {**details, "retry_after_seconds": SSH_BUDGETS.probe_deadline_seconds}
+    return details
+
+
 def _keepalive_adapter_failure_code(exc: AdapterCommandError) -> str:
     """Preserve a known actionable helper failure without exposing remote stderr."""
 
     message = str(exc)
+    if "keepalive_helper_unreachable" in message:
+        return "keepalive_helper_unreachable"
     if "keepalive_helper_incompatible" in message:
         return "keepalive_helper_incompatible"
     if "PyTorch with CUDA support is required" in message:
@@ -749,20 +762,26 @@ def create_app(
                         )
 
                 if stop_failures:
-                    deterministic_codes = {
-                        item["code"]
-                        for item in stop_failures
-                        if item["code"] == "keepalive_helper_incompatible"
-                    }
-                    if len(deterministic_codes) == 1 and all(
-                        item["code"] == "keepalive_helper_incompatible" for item in stop_failures
-                    ):
-                        code = next(iter(deterministic_codes))
+                    # A preflight failure stops before any mutation, so when
+                    # every card failed the same way it is the whole answer,
+                    # not a partial stop the caller must clean up after.
+                    failed_gpu_ids = [item["gpu_id"] for item in stop_failures]
+                    failure_codes = {item["code"] for item in stop_failures}
+                    if failure_codes == {"keepalive_helper_unreachable"}:
                         raise BrokerError(
-                            code,
+                            "keepalive_helper_unreachable",
+                            "暂时连不上这台服务器的占卡 helper，没有改动任何占卡，稍后重试。",
+                            status_code=503,
+                            details=_keepalive_failure_details(
+                                "keepalive_helper_unreachable", {"failed_gpu_ids": failed_gpu_ids}
+                            ),
+                        )
+                    if failure_codes == {"keepalive_helper_incompatible"}:
+                        raise BrokerError(
+                            "keepalive_helper_incompatible",
                             "占卡 helper 版本或能力不匹配，请先完成该服务器的 helper 升级。",
                             status_code=503,
-                            details={"failed_gpu_ids": [item["gpu_id"] for item in stop_failures]},
+                            details={"failed_gpu_ids": failed_gpu_ids},
                         )
                     raise BrokerError(
                         "keepalive_partial_stop",
@@ -874,7 +893,9 @@ def create_app(
                         adapter_code or exc.code,
                         "占卡 GPU 未能确认释放，本次没有分配任务。",
                         status_code=503,
-                        details={"failed_gpu_ids": targeted_gpu_ids},
+                        details=_keepalive_failure_details(
+                            adapter_code, {"failed_gpu_ids": targeted_gpu_ids}
+                        ),
                     ) from None
                 for target in prepared:
                     try:
@@ -895,14 +916,18 @@ def create_app(
                             adapter_code or exc.code,
                             "占卡 GPU 未能确认释放，本次没有分配任务。",
                             status_code=503,
-                            details={"gpu_id": target["gpu_id"]},
+                            details=_keepalive_failure_details(
+                                adapter_code, {"gpu_id": target["gpu_id"]}
+                            ),
                         ) from None
                 if adapter_code is not None:
                     raise BrokerError(
                         adapter_code,
                         "占卡程序停止失败，本次没有分配任务。",
                         status_code=503,
-                        details={"failed_gpu_ids": targeted_gpu_ids},
+                        details=_keepalive_failure_details(
+                            adapter_code, {"failed_gpu_ids": targeted_gpu_ids}
+                        ),
                     )
             # Keep the endpoint locks through the ordinary claim.
             # Otherwise collector reconciliation could observe the fresh

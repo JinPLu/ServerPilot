@@ -862,9 +862,11 @@ DOCUMENTED_REFUSALS = frozenset({
     "lease_not_found", "lease_forbidden", "lease_taken_over", "lease_ended",
     "takeover_project_mismatch", "project_required", "allocation_unconfirmed", "duration_required",
     "entry_unusable", "restart_client", "server_required", "server_group_not_found",
-    "endpoint_not_found",
+    "endpoint_not_found", "keepalive_helper_unreachable",
 })
-RETRYABLE_REFUSALS = frozenset({"no_capacity", "allocation_unconfirmed"})
+RETRYABLE_REFUSALS = frozenset(
+    {"no_capacity", "allocation_unconfirmed", "keepalive_helper_unreachable"}
+)
 
 
 def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:

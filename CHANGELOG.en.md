@@ -4,6 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Free cards held by keepalive can be claimed on a slow network.** Stopping keepalive now uses the same established SSH connection as observation, with the same time limit for its preflight, so a slow new connection no longer makes the claim fail.
+- **An unreachable keepalive helper no longer asks you to upgrade it.** The error now says the helper could not be reached, that no keepalive was changed, and tells the Agent when to retry. You are asked to upgrade only when the helper actually answers as incompatible.
+
 ## 5.2.1 - 2026-11-04
 
 - **Bars on the server page now have colour.** Green below 80%, yellow from 80% and orange from 95%, while red still only means an error. Keepalive and offline readings stay grey. Figures are always dark, so the bar alone carries the colour. CPU now counts as under pressure from 80%, down from 90%.

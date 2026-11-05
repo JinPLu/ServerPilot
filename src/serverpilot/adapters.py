@@ -18,7 +18,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Literal
 
-from serverpilot.config import SSH_BUDGETS, EndpointConfig
+from serverpilot.config import SSH_BUDGETS, EndpointConfig, default_control_dir
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_INSPECT_COMMAND,
     KEEPALIVE_PROTOCOL_INFO_CAPABILITIES,
@@ -181,10 +181,16 @@ def control_socket_path(endpoint: EndpointConfig, control_dir: Path) -> Path:
     return control_dir / digest
 
 
-def observation_ssh_argv(
+def endpoint_ssh_argv(
     endpoint: EndpointConfig, *, control_dir: Path, remote_command: str
 ) -> tuple[str, ...]:
-    """The sealed option list for one observation. One definition, one caller.
+    """The sealed option list for every SSH call the daemon makes to an endpoint.
+
+    Observation and the keepalive helper share it, and with it one master per
+    (user, host, port).  The helper once opened its own connection on every call,
+    so on a day when new handshakes were slow its preflight timed out while the
+    observation riding the master stayed healthy, and a free card could not be
+    claimed.
 
     Multiplexing is the point: without it every cycle paid a full TCP handshake,
     key exchange and authentication per host, which over a VPN cost more than
@@ -257,7 +263,7 @@ class RawSSHObservationAdapter:
         if probe != "endpoint-telemetry":
             raise ValueError(f"unknown raw SSH probe: {probe}")
         process = await asyncio.create_subprocess_exec(
-            *observation_ssh_argv(
+            *endpoint_ssh_argv(
                 endpoint,
                 control_dir=control_dir,
                 remote_command=RAW_SSH_COMBINED_QUERY,
@@ -329,13 +335,39 @@ class ServerScriptKeepaliveAdapter:
     """Mutating adapter with one sealed, exact-GPU reconciliation operation."""
 
     id: AdapterId = "server-script-v1"
-    connect_timeout_seconds = 8
+    # The preflight gets exactly an observation's budget: it is the same kind of
+    # call over the same master, so a host that can be observed can be probed.
+    probe_timeout_seconds = SSH_BUDGETS.probe_deadline_seconds
     timeout_seconds = 45
+
+    def __init__(self, control_dir: Path | None = None) -> None:
+        self._control_dir = control_dir
+
+    @property
+    def control_dir(self) -> Path:
+        return self._control_dir or default_control_dir()
+
+    async def _spawn(self, endpoint: EndpointConfig, remote_command: str, *, stdin: int) -> Any:
+        return await asyncio.create_subprocess_exec(
+            *endpoint_ssh_argv(endpoint, control_dir=self.control_dir, remote_command=remote_command),
+            stdin=stdin,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
 
     @staticmethod
     def _incompatible_helper(message: str) -> AdapterCommandError:
         return AdapterCommandError(
             f"keepalive_helper_incompatible: {message}",
+            uncertain=False,
+        )
+
+    @staticmethod
+    def _unreachable_helper(message: str) -> AdapterCommandError:
+        # Not a verdict on the helper: the preflight never got an answer, and
+        # it runs before any mutation, so nothing on the host has changed.
+        return AdapterCommandError(
+            f"keepalive_helper_unreachable: {message}",
             uncertain=False,
         )
 
@@ -348,24 +380,9 @@ class ServerScriptKeepaliveAdapter:
         )
         process: Any | None = None
         try:
-            process = await asyncio.create_subprocess_exec(
-                "ssh",
-                "-o",
-                "BatchMode=yes",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                f"ConnectTimeout={self.connect_timeout_seconds}",
-                "-p",
-                str(endpoint.port),
-                f"{endpoint.ssh_user}@{endpoint.host}",
-                remote_command,
-                stdin=asyncio.subprocess.DEVNULL,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
+            process = await self._spawn(endpoint, remote_command, stdin=asyncio.subprocess.DEVNULL)
             stdout, stderr = await asyncio.wait_for(
-                process.communicate(), timeout=self.connect_timeout_seconds
+                process.communicate(), timeout=self.probe_timeout_seconds
             )
         except TimeoutError as exc:
             if process is not None:
@@ -373,11 +390,16 @@ class ServerScriptKeepaliveAdapter:
                     process.kill()
                 with contextlib.suppress(Exception):
                     await process.wait()
-            raise self._incompatible_helper("protocol-info probe timed out") from exc
+            raise self._unreachable_helper("protocol-info probe timed out") from exc
         except (OSError, subprocess.SubprocessError, ValueError) as exc:
-            raise self._incompatible_helper(
+            raise self._unreachable_helper(
                 f"protocol-info probe could not start: {type(exc).__name__}"
             ) from exc
+        if process.returncode == 255:
+            # OpenSSH's own exit status: the connection or authentication
+            # failed, so the helper was never asked anything.
+            detail = _clean_output(_decode_remote_output(stderr[:16_384], stream_name="stderr"))
+            raise self._unreachable_helper(detail[-500:] if detail else "ssh exited with code 255")
         if process.returncode != 0:
             detail = _clean_output(_decode_remote_output(stderr[:16_384], stream_name="stderr"))
             raise self._incompatible_helper(
@@ -440,22 +462,7 @@ class ServerScriptKeepaliveAdapter:
         remote_command = (
             f"cd -- {shlex.quote(endpoint.workspace_path)} && {KEEPALIVE_REMOTE_COMMAND}"
         )
-        process = await asyncio.create_subprocess_exec(
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"ConnectTimeout={self.connect_timeout_seconds}",
-            "-p",
-            str(endpoint.port),
-            f"{endpoint.ssh_user}@{endpoint.host}",
-            remote_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        process = await self._spawn(endpoint, remote_command, stdin=asyncio.subprocess.PIPE)
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(payload), timeout=self.timeout_seconds
@@ -513,22 +520,7 @@ class ServerScriptKeepaliveAdapter:
         remote_command = (
             f"cd -- {shlex.quote(endpoint.workspace_path)} && {KEEPALIVE_INSPECT_COMMAND}"
         )
-        process = await asyncio.create_subprocess_exec(
-            "ssh",
-            "-o",
-            "BatchMode=yes",
-            "-o",
-            "StrictHostKeyChecking=yes",
-            "-o",
-            f"ConnectTimeout={self.connect_timeout_seconds}",
-            "-p",
-            str(endpoint.port),
-            f"{endpoint.ssh_user}@{endpoint.host}",
-            remote_command,
-            stdin=asyncio.subprocess.PIPE,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
+        process = await self._spawn(endpoint, remote_command, stdin=asyncio.subprocess.PIPE)
         try:
             stdout, stderr = await asyncio.wait_for(
                 process.communicate(payload), timeout=self.timeout_seconds
@@ -614,7 +606,7 @@ def direct_claim_budget_seconds() -> int:
     """
 
     return (
-        ServerScriptKeepaliveAdapter.connect_timeout_seconds
+        ServerScriptKeepaliveAdapter.probe_timeout_seconds
         + ServerScriptKeepaliveAdapter.timeout_seconds
         + SSH_BUDGETS.probe_deadline_seconds
     )

@@ -148,7 +148,9 @@ adapter 在做任何启停变更前，先执行只读的 `--protocol-info` 预�
 helper 还会报告 `implementation_version`，该值等于构建它的 ServerPilot 包装版本
 （`KEEPALIVE_IMPLEMENTATION_VERSION` 直接取自 `serverpilot.__version__`）；adapter **不**
 按这个数字做兼容判断。预检失败返回 `keepalive_helper_incompatible`，不发送任何变更
-payload。旧 v2 wire/state 版本直接拒绝。
+payload。旧 v2 wire/state 版本直接拒绝。预检和启停走与采集同一份 SSH 参数和复用连接，
+预检时限等于一次采集的时限；SSH 本身失败（退出码 255）或超时返回可重试的
+`keepalive_helper_unreachable`，同样不发送任何变更，不能当成版本不兼容。
 
 恢复时只接受 helper 自己的 v3 状态里仍然存活、且带固定 marker 的 worker：helper 对指定
 物理 UUID 做固定的 NVIDIA compute 查询，必须恰好得到一个 driver-visible PID，ServerPilot

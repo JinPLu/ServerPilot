@@ -19,7 +19,8 @@ from serverpilot.api import (
     _public_keepalive_result,
     claim_candidate_endpoint_ids,
 )
-from serverpilot.config import InventoryConfig, ServerGroupConfig
+from serverpilot.client import BrokerClientError
+from serverpilot.config import SSH_BUDGETS, InventoryConfig, ServerGroupConfig
 from serverpilot.keepalive_protocol import (
     KEEPALIVE_WORKER_MARKER,
     KeepaliveAttestationResponse,
@@ -27,7 +28,7 @@ from serverpilot.keepalive_protocol import (
     KeepaliveResponse,
     KeepaliveWorkerAttestation,
 )
-from serverpilot.mcp_server import mcp
+from serverpilot.mcp_server import _refusal, mcp
 from serverpilot.models import Lease
 from serverpilot.schemas import LeaseObservedBind, RequestCreate
 from serverpilot.service import BrokerError
@@ -156,6 +157,20 @@ class PartiallyFailingStopAdapter(FakeKeepaliveAdapter):
         if not enabled and self.fail_gpu_uuid in gpu_uuids:
             self.calls.append((endpoint.id, enabled, tuple(gpu_uuids)))
             raise AdapterCommandError("one GPU stop failed", uncertain=True)
+        return await super().set_enabled(endpoint, enabled, gpu_uuids)
+
+
+
+class UnreachableStopAdapter(FakeKeepaliveAdapter):
+    """The stop preflight never reaches the helper, so nothing is stopped."""
+
+    async def set_enabled(self, endpoint, enabled: bool, gpu_uuids: list[str]) -> KeepaliveResponse:  # type: ignore[no-untyped-def]
+        if not enabled:
+            self.calls.append((endpoint.id, enabled, tuple(gpu_uuids)))
+            raise AdapterCommandError(
+                "keepalive_helper_unreachable: protocol-info probe timed out",
+                uncertain=False,
+            )
         return await super().set_enabled(endpoint, enabled, gpu_uuids)
 
 
@@ -1169,6 +1184,10 @@ def test_keepalive_api_reports_known_cuda_worker_failure_in_chinese_without_remo
     ("remote_failure", "expected_code"),
     [
         ("keepalive_helper_incompatible: expected schema 3", "keepalive_helper_incompatible"),
+        (
+            "keepalive_helper_unreachable: protocol-info probe timed out",
+            "keepalive_helper_unreachable",
+        ),
         ("PyTorch with CUDA support is required", "keepalive_pytorch_cuda_required"),
         (
             "PyTorch CUDA runtime could not initialize the selected GPU",
@@ -1546,6 +1565,60 @@ def test_immediate_claim_stop_failure_does_not_create_workload_lease(
         ("endpoint-a", True, (GPU_UUIDS[0],)),
         ("endpoint-a", False, (GPU_UUIDS[0],)),
     ]
+
+
+
+def test_claim_with_unreachable_helper_is_retryable_not_an_upgrade_request(
+    build_app, inventory: InventoryConfig
+) -> None:
+    adapter = UnreachableStopAdapter()
+    collector = FakeTargetedCollector(adapter)
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
+    client = TestClient(app)
+
+    enabled = client.post(
+        "/api/v2/endpoints/endpoint-a/keepalive",
+        json={"enabled": True},
+        headers=_headers("unreachable-keeper-on"),
+    )
+    assert enabled.status_code == 200, enabled.text
+
+    failed = client.post(
+        "/api/v2/claims",
+        json={
+            "project_id": "project-a",
+            "task_ref": "unreachable-helper-claim",
+            "purpose": "a slow handshake is not a helper upgrade",
+            "constraints": {"gpu_count": 1},
+        },
+        headers=_headers("unreachable-helper-claim"),
+    )
+
+    assert failed.status_code == 503, failed.text
+    error = failed.json()["error"]
+    assert error["code"] == "keepalive_helper_unreachable"
+    assert error["details"]["retry_after_seconds"] == SSH_BUDGETS.probe_deadline_seconds
+    assert "升级" not in error["message"]
+    snapshot = client.get("/api/v2/snapshot", headers={"X-ServerPilot-Actor": "agent-a"}).json()[
+        "data"
+    ]
+    assert snapshot["leases"] == []
+
+
+def test_unreachable_helper_is_a_retryable_mcp_refusal() -> None:
+    refusal = _refusal(
+        BrokerClientError(
+            "broker HTTP 503: keepalive_helper_unreachable: 暂时连不上",
+            code="keepalive_helper_unreachable",
+            status_code=503,
+            details={"failed_gpu_ids": ["endpoint-a:GPU-1"], "retry_after_seconds": 30},
+        )
+    )
+
+    assert refusal["ok"] is False
+    assert refusal["error"]["code"] == "keepalive_helper_unreachable"
+    assert refusal["error"]["retryable"] is True
+    assert refusal["error"]["retry_after_seconds"] == 30
 
 
 def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(

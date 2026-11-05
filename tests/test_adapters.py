@@ -13,7 +13,7 @@ from serverpilot.adapters import (
     RAW_SSH_COMBINED_QUERY,
     AdapterRegistryError,
     RawSSHObservationAdapter,
-    observation_ssh_argv,
+    endpoint_ssh_argv,
 )
 from serverpilot.config import EndpointConfig
 
@@ -62,7 +62,7 @@ def test_raw_ssh_adapter_runs_fixed_ssh_invocation(
 
     assert result.stdout == "ok\n"
     assert calls == [
-        observation_ssh_argv(
+        endpoint_ssh_argv(
             endpoint, control_dir=tmp_path, remote_command=RAW_SSH_COMBINED_QUERY
         )
     ]
