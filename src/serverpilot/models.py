@@ -16,6 +16,7 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    false,
     text,
 )
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
@@ -267,6 +268,12 @@ class KeepaliveCurrent(Base):
     expected_boot_id: Mapped[str | None] = mapped_column(String(120))
     expected_process_started_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True)
+    )
+    # A start whose remote cleanup also failed may have left a worker the
+    # ledger holds no lease for. Until a later stop succeeds, the planner keeps
+    # asking the helper to stop its own worker on this card.
+    cleanup_pending: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, default=False, server_default=false()
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 

@@ -2972,10 +2972,15 @@ class BrokerService:
         error_reason: str | None = None,
         expected_process: ProcessObservation | None = None,
         clear_expected_process: bool = False,
+        cleanup_pending: bool | None = None,
         now: datetime,
     ) -> None:
         if actual not in {"ON", "OFF", "ERROR"}:
             raise ValueError("invalid keepalive actual state")
+        if actual == "ON":
+            # A confirmed worker is the helper's one worker for this card, so
+            # whatever an earlier failed start left behind is now owned.
+            cleanup_pending = False
         current = session.get(KeepaliveCurrent, gpu_id)
         if current is None:
             session.add(
@@ -2983,6 +2988,7 @@ class BrokerService:
                     gpu_id=gpu_id,
                     actual=actual,
                     error_reason=error_reason,
+                    cleanup_pending=bool(cleanup_pending),
                     expected_pid=(expected_process.pid if expected_process is not None else None),
                     expected_boot_id=(
                         expected_process.boot_id if expected_process is not None else None
@@ -2998,6 +3004,8 @@ class BrokerService:
             return
         current.actual = actual
         current.error_reason = error_reason
+        if cleanup_pending is not None:
+            current.cleanup_pending = cleanup_pending
         if clear_expected_process:
             current.expected_pid = None
             current.expected_boot_id = None
@@ -3349,6 +3357,33 @@ class BrokerService:
                                 "state": lease.state,
                             }
                         )
+                leased_keepalive_gpu_ids = {
+                    item.gpu_id
+                    for lease in active_leases
+                    for item in self._keepalive_resources(session, lease.id)
+                }
+                cleanup_gpu_ids: set[str] = set()
+                if endpoint.keepalive_adapter_id is not None:
+                    for gpu in gpus:
+                        current = session.get(KeepaliveCurrent, gpu.id)
+                        if (
+                            current is not None
+                            and current.cleanup_pending
+                            and gpu.id not in leased_keepalive_gpu_ids
+                        ):
+                            # Whatever the policy: a worker no lease points
+                            # at is never adopted from here, only stopped, and
+                            # the helper stops only a worker it recorded.
+                            cleanup_gpu_ids.add(gpu.id)
+                            transitions.append(
+                                {
+                                    "action": "cleanup",
+                                    "endpoint_id": endpoint.id,
+                                    "gpu_id": gpu.id,
+                                    "gpu_uuid": gpu.gpu_uuid,
+                                    "reason": "a failed start's cleanup did not finish",
+                                }
+                            )
                 if endpoint.keepalive_policy != "idle_keepalive":
                     continue
                 if endpoint.keepalive_adapter_id is None:
@@ -3364,6 +3399,8 @@ class BrokerService:
                         )
                     continue
                 for gpu in gpus:
+                    if gpu.id in cleanup_gpu_ids:
+                        continue
                     lease = self._active_lease_for_gpu(session, gpu.id)
                     if lease is not None:
                         current = session.get(KeepaliveCurrent, gpu.id)
@@ -3486,8 +3523,14 @@ class BrokerService:
         endpoint_id: str,
         gpu_ids: Iterable[str],
         reason: str,
+        *,
+        cleanup_pending: bool = False,
     ) -> None:
-        """Persist an operation failure as current state without changing policy."""
+        """Persist an operation failure as current state without changing policy.
+
+        ``cleanup_pending`` marks a start whose remote cleanup failed too; it is
+        only ever set here, so an unrelated later error cannot clear it.
+        """
 
         def operation(session: Session) -> None:
             now = utcnow()
@@ -3499,8 +3542,50 @@ class BrokerService:
                         gpu.id,
                         "ERROR",
                         error_reason=reason,
+                        cleanup_pending=True if cleanup_pending else None,
                         now=now,
                     )
+
+        self._write(operation)
+
+    def finish_keepalive_cleanup(
+        self,
+        actor: ActorContext,
+        endpoint_id: str,
+        gpu_ids: Iterable[str],
+    ) -> None:
+        """Record that the helper confirmed no worker of its own remains on these cards."""
+
+        def operation(session: Session) -> None:
+            now = utcnow()
+            for gpu_id in gpu_ids:
+                gpu = session.get(GPUDevice, gpu_id)
+                current = session.get(KeepaliveCurrent, gpu_id)
+                if (
+                    gpu is None
+                    or gpu.endpoint_id != endpoint_id
+                    or current is None
+                    or not current.cleanup_pending
+                ):
+                    continue
+                self._set_keepalive_current(
+                    session,
+                    gpu.id,
+                    "OFF",
+                    clear_expected_process=True,
+                    cleanup_pending=False,
+                    now=now,
+                )
+                self._audit(
+                    session,
+                    actor_id=actor.id,
+                    action="keepalive.orphan_cleaned",
+                    resource_type="gpu",
+                    resource_id=gpu.id,
+                    result="success",
+                    summary={"endpoint_id": endpoint_id},
+                    now=now,
+                )
 
         self._write(operation)
 

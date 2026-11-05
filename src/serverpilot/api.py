@@ -536,7 +536,10 @@ def create_app(
             recovers = [
                 transition for transition in transitions if transition.get("action") == "recover"
             ]
-            if not starts and not stops and not recovers:
+            cleanups = [
+                transition for transition in transitions if transition.get("action") == "cleanup"
+            ]
+            if not starts and not stops and not recovers and not cleanups:
                 return
             adapter_id = endpoint.keepalive_adapter_id
             if adapter_id is None:
@@ -554,6 +557,43 @@ def create_app(
                     status_code=409,
                 ) from None
 
+            if cleanups:
+                cleanup_targets: list[tuple[str, str]] = []
+                for transition in cleanups:
+                    gpu_id = transition.get("gpu_id")
+                    gpu_uuid = transition.get("gpu_uuid")
+                    if not isinstance(gpu_id, str) or not isinstance(gpu_uuid, str):
+                        raise BrokerError(
+                            "keepalive_transition_plan_invalid",
+                            "endpoint keepalive cleanup target is invalid",
+                            status_code=503,
+                        )
+                    cleanup_targets.append((gpu_id, gpu_uuid))
+                cleanup_gpu_uuids = [gpu_uuid for _gpu_id, gpu_uuid in cleanup_targets]
+                try:
+                    # The helper stops only a worker it recorded for these
+                    # UUIDs, and answers "stopped" when there is none, so a
+                    # foreign process on the card is never touched.
+                    cleaned = await adapter.set_enabled(endpoint, False, cleanup_gpu_uuids)
+                    result_by_gpu_uuid(cleaned, cleanup_gpu_uuids, enabled=False)
+                except Exception:
+                    # Keep the mark; the next collection tries again. Other
+                    # cards on this endpoint still get their own work below.
+                    logger.warning(
+                        "keepalive cleanup still pending for %s",
+                        endpoint_id,
+                        exc_info=True,
+                    )
+                else:
+                    with contextlib.suppress(BrokerError):
+                        await collect_keepalive_endpoint(endpoint)
+                    await service.in_domain(
+                        service.finish_keepalive_cleanup,
+                        actor,
+                        endpoint_id,
+                        [gpu_id for gpu_id, _gpu_uuid in cleanup_targets],
+                    )
+
             if starts:
                 start_targets: list[tuple[str, str]] = []
                 for transition in starts:
@@ -569,12 +609,16 @@ def create_app(
                 gpu_uuids = [gpu_uuid for _gpu_id, gpu_uuid in start_targets]
 
                 async def cleanup_failed_start(code: str, *, cleanup_remote: bool = True) -> None:
+                    cleanup_unfinished = False
                     if cleanup_remote:
                         try:
                             cleanup = await adapter.set_enabled(endpoint, False, gpu_uuids)
                             result_by_gpu_uuid(cleanup, gpu_uuids, enabled=False)
                         except Exception:
+                            # The start may have left a worker that no lease
+                            # will ever point at; remember to stop it later.
                             code = "keepalive_cleanup_failed"
+                            cleanup_unfinished = True
                     try:
                         await collect_keepalive_endpoint(endpoint)
                     except BrokerError:
@@ -587,6 +631,7 @@ def create_app(
                         _public_error_message(
                             BrokerError(code, "keepalive start failed", status_code=503)
                         ),
+                        cleanup_pending=cleanup_unfinished,
                     )
                     raise BrokerError(
                         code,

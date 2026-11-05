@@ -29,7 +29,7 @@ from serverpilot.keepalive_protocol import (
     KeepaliveWorkerAttestation,
 )
 from serverpilot.mcp_server import _refusal, mcp
-from serverpilot.models import Lease
+from serverpilot.models import AuditEvent, KeepaliveCurrent, Lease
 from serverpilot.schemas import LeaseObservedBind, RequestCreate
 from serverpilot.service import BrokerError
 from tests.helpers import age_out_processes, observation, process_for_gpu, tools
@@ -173,6 +173,34 @@ class UnreachableStopAdapter(FakeKeepaliveAdapter):
             )
         return await super().set_enabled(endpoint, enabled, gpu_uuids)
 
+
+
+class OrphaningStartAdapter(FakeKeepaliveAdapter):
+    """The start lands, then the helper becomes unreachable for the attestation
+    and for the cleanup, which leaves a worker no lease points at."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.reachable = True
+
+    def _unreachable(self) -> AdapterCommandError:
+        return AdapterCommandError(
+            "keepalive_helper_unreachable: protocol-info probe timed out", uncertain=False
+        )
+
+    async def set_enabled(self, endpoint, enabled: bool, gpu_uuids: list[str]) -> KeepaliveResponse:  # type: ignore[no-untyped-def]
+        if not self.reachable:
+            self.calls.append((endpoint.id, enabled, tuple(gpu_uuids)))
+            raise self._unreachable()
+        result = await super().set_enabled(endpoint, enabled, gpu_uuids)
+        if enabled:
+            self.reachable = False
+        return result
+
+    async def attest_workers(self, endpoint, gpu_uuids: list[str]) -> KeepaliveAttestationResponse:  # type: ignore[no-untyped-def]
+        if not self.reachable:
+            raise self._unreachable()
+        return await super().attest_workers(endpoint, gpu_uuids)
 
 class StopSucceedsThenReportsFailureAdapter(FakeKeepaliveAdapter):
     async def set_enabled(self, endpoint, enabled: bool, gpu_uuids: list[str]) -> KeepaliveResponse:  # type: ignore[no-untyped-def]
@@ -1620,6 +1648,80 @@ def test_unreachable_helper_is_a_retryable_mcp_refusal() -> None:
     assert refusal["error"]["retryable"] is True
     assert refusal["error"]["retry_after_seconds"] == 30
 
+
+
+def test_a_worker_left_by_a_failed_cleanup_is_stopped_on_a_later_reconcile(
+    build_app, inventory: InventoryConfig
+) -> None:
+    adapter = OrphaningStartAdapter()
+    collector = FakeTargetedCollector(adapter, gpu_uuids=(GPU_UUIDS[0],))
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
+    client = TestClient(app)
+    gpu_id = f"endpoint-a:{GPU_UUIDS[0]}"
+
+    started = client.post(
+        "/api/v2/endpoints/endpoint-a/keepalive",
+        json={"enabled": True},
+        headers=_headers("orphan-start"),
+    )
+
+    # The worker is running, the ledger holds no lease for it, and the mark
+    # that it must still be stopped survives the failed request.
+    assert started.status_code == 503, started.text
+    assert started.json()["error"]["code"] == "keepalive_cleanup_failed"
+    assert GPU_UUIDS[0] in adapter.active_pids
+    service = app.state.service
+    with service.database.session() as session:
+        assert session.scalars(select(Lease).where(Lease.kind == "keepalive")).all() == []
+        current = session.get(KeepaliveCurrent, gpu_id)
+        assert current is not None and current.cleanup_pending is True
+    plan = service.list_keepalive_transitions("endpoint-a")["transitions"]
+    assert [item["action"] for item in plan if item["gpu_id"] == gpu_id] == ["cleanup"]
+
+    # A later reconcile, even with the policy now off, stops only that worker.
+    adapter.reachable = True
+    stopped = client.post(
+        "/api/v2/endpoints/endpoint-a/keepalive",
+        json={"enabled": False},
+        headers=_headers("orphan-cleanup"),
+    )
+
+    assert stopped.status_code == 200, stopped.text
+    assert adapter.active_pids == {}
+    assert adapter.calls[-1] == ("endpoint-a", False, (GPU_UUIDS[0],))
+    with service.database.session() as session:
+        current = session.get(KeepaliveCurrent, gpu_id)
+        assert current is not None
+        assert current.cleanup_pending is False
+        assert current.actual == "OFF"
+        events = session.scalars(
+            select(AuditEvent).where(AuditEvent.action == "keepalive.orphan_cleaned")
+        ).all()
+        assert [event.resource_id for event in events] == [gpu_id]
+    assert service.list_keepalive_transitions("endpoint-a")["transitions"] == []
+
+
+def test_a_start_that_never_mutated_does_not_leave_a_cleanup_mark(
+    build_app, inventory: InventoryConfig
+) -> None:
+    adapter = FakeKeepaliveAdapter(
+        failure=AdapterCommandError(
+            "keepalive_helper_unreachable: protocol-info probe timed out", uncertain=False
+        )
+    )
+    collector = FakeTargetedCollector(adapter, gpu_uuids=(GPU_UUIDS[0],))
+    app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
+
+    response = TestClient(app).post(
+        "/api/v2/endpoints/endpoint-a/keepalive",
+        json={"enabled": True},
+        headers=_headers("preflight-only-failure"),
+    )
+
+    assert response.status_code == 503, response.text
+    with app.state.service.database.session() as session:
+        current = session.get(KeepaliveCurrent, f"endpoint-a:{GPU_UUIDS[0]}")
+        assert current is not None and current.cleanup_pending is False
 
 def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(
     build_app, inventory: InventoryConfig

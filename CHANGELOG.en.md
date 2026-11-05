@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Keepalive left behind by a failed start is now reclaimed on its own.** When the network was slow, a keepalive could start on the server while ServerPilot believed the start had failed and could not clean it up either, so the card showed as held by a foreign process until someone stepped in. ServerPilot now retries on later collections until it is stopped. It only ever stops a keepalive ServerPilot itself recorded, so other people's jobs are not affected.
+
 ## 5.2.2 - 2026-11-05
 
 - **Free cards held by keepalive can be claimed on a slow network.** Stopping keepalive now uses the same established SSH connection as observation, with the same time limit for its preflight, so a slow new connection no longer makes the claim fail.
