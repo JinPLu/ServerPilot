@@ -8,6 +8,7 @@
 
 ## Project current state
 
+- **5.2.3（11 月 6 日）**：起卡后清理也失败时留下的占卡 worker 以前永远成为“外来进程”；现在记 `cleanup_pending` 并每轮重试停掉，只停 helper 自己记录的 worker，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
 - **5.2.2（11 月 5 日）**：挂着占卡的空卡申请失败、提示“请升级 helper”，实为停占卡时新建 SSH 连接超时；占卡已改走和采集同一条复用连接，连不上改报可重试的 `keepalive_helper_unreachable`，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
 - **5.2.1（11 月 4 日）**：指标条按余量着色，绿、黄、橙，红色只表示出错；提醒里写服务器地址。
 - **5.2.0（11 月 4 日）**：参考 cc-switch 的界面第一轮，白底细描边、窄页头、绿色容量环、独立的图表色、分段筛选，字号全部走 `Typography`。第二轮（详情、任务、提醒、设置的结构）样稿已出，用户决定先不做，见[讨论](discussions/cc-switch-reference.md)。

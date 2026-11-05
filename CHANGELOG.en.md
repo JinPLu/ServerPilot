@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.2.3 - 2026-11-06
 
 - **Keepalive left behind by a failed start is now reclaimed on its own.** When the network was slow, a keepalive could start on the server while ServerPilot believed the start had failed and could not clean it up either, so the card showed as held by a foreign process until someone stepped in. ServerPilot now retries on later collections until it is stopped. It only ever stops a keepalive ServerPilot itself recorded, so other people's jobs are not affected.
 
