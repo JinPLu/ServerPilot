@@ -1905,6 +1905,14 @@ class BrokerService:
                         if (requested.get("project_id"), requested.get("task_ref")) == (request_data.project_id, request_data.task_ref):
                             existing = candidate
                             break
+                if (existing and not idempotency_key
+                        and existing.state in {"failed", "released", "expired"}):
+                    # A task is stable across attempts; a confirmed terminal
+                    # allocation must not permanently reserve its task key.
+                    # Explicit transport idempotency keys still replay the old result.
+                    existing.request_key = f"ended:{existing.id}"
+                    session.flush()
+                    existing = None
                 if existing:
                     if json_load(existing.request_json) != request_data.model_dump(mode="json"):
                         raise BrokerError("idempotency_conflict", "同一申请标识对应不同需求", status_code=409)

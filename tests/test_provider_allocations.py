@@ -150,6 +150,54 @@ def test_uncertain_apply_resolves_original_without_resubmitting(service, admin, 
     assert len(seen) == 1
 
 
+def test_task_can_retry_after_provider_confirms_original_attempt_ended(service, admin, provider, monkeypatch):
+    def lost_reply(plugin_id, **kwargs):
+        raise PluginError("response lost")
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", lost_reply)
+    with pytest.raises(BrokerError):
+        claim(service, admin, key=None)
+    old_id = record(service).id
+    failed = allocation_fact(old_id)
+    failed.update(state="released", locations=[], entry=None)
+    ingest(service, [failed])
+    seen = []
+    def retry(plugin_id, **kwargs):
+        seen.append(kwargs["request_id"])
+        return {**allocation_fact(kwargs["request_id"]), "allocation_ref": "902"}
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", retry)
+    result = claim(service, admin, key=None)
+    assert seen == [result["lease"]["allocations"][0]["id"]]
+    assert seen[0] != old_id
+    assert service._read(lambda session: session.get(ResourceAllocation, old_id).state) == "released"
+
+
+def test_no_capacity_can_retry_same_task(service, admin, provider, monkeypatch):
+    def full(plugin_id, **kwargs):
+        raise PluginError("no immediate capacity", no_capacity=True)
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", full)
+    with pytest.raises(BrokerError) as first:
+        claim(service, admin, key=None)
+    assert first.value.code == "no_capacity"
+    old_id = record(service).id
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", lambda _, **kw: allocation_fact(kw["request_id"]))
+    result = claim(service, admin, key=None)
+    assert result["lease"]["allocations"][0]["id"] != old_id
+
+
+def test_failed_explicit_request_key_does_not_submit_again(service, admin, provider, monkeypatch):
+    calls = []
+    def full(plugin_id, **kwargs):
+        calls.append(kwargs["request_id"])
+        raise PluginError("no immediate capacity", no_capacity=True)
+    monkeypatch.setattr("serverpilot.plugins.apply_plugin", full)
+    with pytest.raises(BrokerError):
+        claim(service, admin, key="fixed-request")
+    with pytest.raises(BrokerError) as repeated:
+        claim(service, admin, key="fixed-request")
+    assert repeated.value.code == "allocation_attempt_ended"
+    assert len(calls) == 1
+
+
 def test_local_lease_write_failure_keeps_remote_result(service, admin, provider, monkeypatch):
     original = service._write
     failed = False

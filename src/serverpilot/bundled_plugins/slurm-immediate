@@ -522,13 +522,14 @@ def job_details(job_id):
         values = dict(re.findall(r"(?:^|\s)([A-Za-z][A-Za-z0-9_]*)=(\S+)", result.stdout))
         values["NodePlacements"] = re.findall(r"(?:^|\s)Nodes=(\S+)\s+CPU_IDs=\S+\s+Mem=\S+\s+GRES=(\S+)", result.stdout)
         return values
-    history = subprocess.run(["sacct", "-n", "-P", "-j", job_id, "--format=JobIDRaw,State,NodeList,End"],
+    history = subprocess.run(["sacct", "-n", "-P", "-j", job_id, "--format=JobIDRaw,State,NodeList,End,JobName%100"],
                              capture_output=True, text=True, timeout=10)
     if history.returncode == 0:
         for line in history.stdout.splitlines():
             parts = line.split("|")
             if len(parts) >= 4 and parts[0] == job_id:
-                return {"JobState": parts[1].split()[0], "NodeList": parts[2], "EndTime": parts[3]}
+                return {"JobState": parts[1].split()[0], "NodeList": parts[2], "EndTime": parts[3],
+                        "JobName": parts[4] if len(parts) >= 5 else ""}
     return {}
 
 
@@ -611,6 +612,20 @@ def read_accounting(job_ids):
     return values
 
 
+def request_job_id(request):
+    if request.get("allocation_ref"):
+        return request["allocation_ref"]
+    # srun can be accepted and then expire before the hold process starts.
+    # Its local log supplies a candidate only; Slurm must confirm the unique name.
+    log = ROOT / ("request-" + request["request_id"] + ".log")
+    if not log.is_file():
+        return None
+    candidates = set(re.findall(r"(?m)^srun: job ([0-9]+) ", log.read_text(errors="replace")))
+    matches = [job_id for job_id in candidates
+               if job_details(job_id).get("JobName") == "sp-" + request["request_id"]]
+    return matches[0] if len(matches) == 1 else None
+
+
 def all_allocations():
     requests = {}
     samples = {}
@@ -620,7 +635,7 @@ def all_allocations():
             if not request:
                 continue
             sample = read_json(ROOT / (request["request_id"] + ".json"))
-            job_id = sample.get("allocation_ref") if sample else request.get("allocation_ref")
+            job_id = sample.get("allocation_ref") if sample else request_job_id(request)
             if job_id:
                 requests[job_id] = request
                 if sample:
@@ -710,8 +725,12 @@ def cmd_apply():
     if ACCOUNT:
         argv.extend(["-A", ACCOUNT])
     argv.extend(["python3", str(hold), request_id, str(count)])
+    # Slurm exposes a dedicated immediate-capacity failure exit code. Do not
+    # infer no_capacity from stderr (invalid accounts and transport errors differ).
+    env = {**os.environ, "SLURM_EXIT_IMMEDIATE": str(NO_CAPACITY_EXIT_CODE), "SLURM_EXIT_ERROR": "1"}
     with log.open("w") as output:
-        proc = subprocess.Popen(argv, stdout=output, stderr=output, stdin=subprocess.DEVNULL, start_new_session=True)
+        proc = subprocess.Popen(argv, stdout=output, stderr=output, stdin=subprocess.DEVNULL,
+                                start_new_session=True, env=env)
     deadline = time.monotonic() + APPLY_IMMEDIATE_SECONDS + 5
     while time.monotonic() < deadline:
         sample = read_json(ROOT / (request_id + ".json"))
@@ -723,7 +742,10 @@ def cmd_apply():
             if fact["state"] == "active" and fact["expires_at"]:
                 print(json.dumps(fact, separators=(",", ":")))
                 return
-        if proc.poll() is not None:
+        code = proc.poll()
+        if code is not None:
+            if code == NO_CAPACITY_EXIT_CODE:
+                raise SystemExit(NO_CAPACITY_EXIT_CODE)
             raise RuntimeError("Slurm apply exited; original request retained for reconciliation")
         time.sleep(0.25)
     raise RuntimeError("allocation outcome unconfirmed; inspect the original request")
