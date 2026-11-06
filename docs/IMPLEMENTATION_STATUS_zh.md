@@ -18,7 +18,10 @@ Storyboard 的 checkpoint 文字验收申请反复返回 `allocation_unconfirmed
 
 本轮只修改随包插件、核心申请结束后的重试和回归测试，不改数据库结构，不停止用户工作负载。
 全量 Python 回归、相关 Ruff 与 diff 检查通过。本机插件已通过 `serverpilot plugin add` 热更新，
-只读 observe 已将原申请识别为作业 1318807 的 released 终态；控制面标准更新与现场验收在推进。
+只读 observe 已将原申请识别为作业 1318807 的 released 终态。标准 `update-macos-app.sh` 已完成，
+新 daemon PID 57280、App PID 57293，构建核验通过；更新前后四个工作租约的 ID 与 ACTIVE 状态完全相同。
+同任务再次经 MCP 申请，返回正确的 `no_capacity`（新申请 `9fca8cf5d5667b39a835b87a2fe77607`），
+不再返回 unconfirmed，未获得租约；这是原申请终态恢复与同任务重试的真实现场验证。
 现场也核实了无容量的原因：唯一未用完 GPU 的 gnode19 仍有 4 张卡，但 64 个 CPU 核已全分配；
 provider 请求仅为每卡 8 CPU、16 GiB，不是独占节点或整机内存。其余 GPU 节点没有空卡，且没有第二个 GPU 分区。
 
