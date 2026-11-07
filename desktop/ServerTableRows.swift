@@ -155,7 +155,6 @@ struct SchedulerNodeTableRow: View {
         .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .onHover { hovering = $0 }
         .help("\(node.name) · \(stateWord) · 已分配 \(node.allocatedGPUs)/\(node.totalGPUs) GPU。指标来自与普通服务器相同的节点探针。未分配量不保证立即可申请，仍由 Slurm 校验 CPU、内存与调度条件。")
         .sheet(isPresented: $showDetails) { NodeAllocationSheet(store: store, endpoint: endpoint, node: node) { openEndpoint(endpoint) } }

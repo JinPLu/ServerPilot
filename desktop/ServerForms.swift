@@ -384,15 +384,26 @@ private struct ServerGroupAssignmentFields: View {
 }
 
 
-private enum ServerGroupSheetMode: Equatable {
+/// Where the server group sheet opens: its list, or straight into one form, as
+/// the sidebar's add button and a group's context menu do.
+enum ServerGroupSheetMode: Hashable, Identifiable {
     case list
     case create
     case edit(String)
+
+    var id: String {
+        switch self {
+        case .list: "list"
+        case .create: "create"
+        case .edit(let groupID): "edit:\(groupID)"
+        }
+    }
 }
 
 
 struct ManageServerGroupsSheet: View {
     @ObservedObject var store: BrokerStore
+    let opening: ServerGroupSheetMode
     @Environment(\.dismiss) private var dismiss
     @State private var mode: ServerGroupSheetMode = .list
     @State private var displayName = ""
@@ -440,6 +451,7 @@ struct ManageServerGroupsSheet: View {
         .frame(width: 640, height: 640)
         .background(VisualEffect(material: .hudWindow, blendingMode: .behindWindow))
         .accessibilityElement(children: .contain)
+        .onAppear { open(opening) }
     }
 
     @ViewBuilder
@@ -549,13 +561,25 @@ struct ManageServerGroupsSheet: View {
         .frame(maxHeight: .infinity)
         HStack {
             Spacer()
-            Button("取消") { cancelEditor() }
+            Button("取消") { leaveEditor() }
                 .keyboardShortcut(.cancelAction)
             Button(mode == .create ? "创建服务器组" : "保存服务器组") { submitEditor() }
                 .buttonStyle(SoftButtonStyle(tint: DesignTokens.ink, foreground: DesignTokens.onInteraction))
                 .keyboardShortcut(.defaultAction)
                 .disabled(!canMutateGroups || isSubmitting)
                 .help(groupMutationHelp)
+        }
+    }
+
+    private func open(_ requested: ServerGroupSheetMode) {
+        switch requested {
+        case .list:
+            mode = .list
+        case .create:
+            beginCreate()
+        case .edit(let groupID):
+            guard let group = store.snapshot.serverGroups.first(where: { $0.id == groupID }) else { return }
+            beginEdit(group)
         }
     }
 
@@ -578,10 +602,16 @@ struct ManageServerGroupsSheet: View {
         validationMessage = nil
     }
 
-    private func cancelEditor() {
-        mode = .list
+    /// A form reached from the list goes back to it; one the sheet opened on
+    /// closes the sheet, so nobody lands in a list they never asked for.
+    private func leaveEditor() {
         validationMessage = nil
         isSubmitting = false
+        if opening == .list {
+            mode = .list
+        } else {
+            dismiss()
+        }
     }
 
     private func submitEditor() {

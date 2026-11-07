@@ -430,7 +430,6 @@ private struct ServerTile: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
         .accessibilityElement(children: .ignore)

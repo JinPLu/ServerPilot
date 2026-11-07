@@ -354,11 +354,11 @@ full_keyboard_access = (result_dir / "ax/keyboard-uimode.txt").read_text(
     encoding="utf-8", errors="replace"
 ).strip()
 if full_keyboard_access not in {"2", "3"}:
-    # Without Full Keyboard Access, .focusable() views legitimately take no Tab
+    # Without Full Keyboard Access, buttons legitimately take no Tab
     # stop, so a verdict here would describe System Settings, not this app.
     semantic_checks["keyboard_focus_traversal"] = None
     semantic_checks["keyboard_focus_traversal_note"] = (
-        "not measured: Full Keyboard Access is off, so .focusable() views take no "
+        "not measured: Full Keyboard Access is off, so buttons take no "
         "Tab stop and any verdict here would describe System Settings.  Re-run with "
         "SERVERPILOT_AX_SET_KEYBOARD_MODE=1 to let this script set and restore it, or "
         "enable System Settings > Keyboard > Keyboard navigation."

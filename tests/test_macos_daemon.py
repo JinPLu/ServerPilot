@@ -1136,3 +1136,15 @@ def test_macos_interface_type_goes_through_typography() -> None:
             )[1]
         for forbidden in (".font(.", ".font(Font.", "font(.callout", ".system(size:"):
             assert forbidden not in source, f"{path.name}: {forbidden}"
+
+
+def test_macos_a_click_leaves_no_focus_ring() -> None:
+    project_root = Path(__file__).resolve().parents[1]
+
+    # A forced .focusable() makes a click take keyboard focus, so a header that
+    # spans its column wore a ring the column's width.  Buttons join Tab order
+    # when the system's Keyboard navigation is on, as in every other Mac app.
+    for path in sorted((project_root / "desktop").glob("*.swift")):
+        source = path.read_text(encoding="utf-8")
+        for forbidden in (".focusable()", ".focusEffectDisabled()"):
+            assert forbidden not in source, f"{path.name}: {forbidden}"

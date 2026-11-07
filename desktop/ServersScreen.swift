@@ -194,6 +194,18 @@ struct ResourcesDashboard: View {
         return endpoints.filter { (store.snapshot.serverGroup(for: $0)?.id ?? "") == groupID }
     }
 
+    /// Why the table is empty: nothing added yet, a group nobody has joined,
+    /// or a search and filter that match nothing.
+    private var emptyTableMessage: (icon: String, title: String, detail: String) {
+        if endpoints.isEmpty {
+            return ("server.rack", "暂无服务器", "添加服务器后会显示资源。")
+        }
+        if scopedEndpoints.isEmpty {
+            return ("rectangle.3.group", "这个组还没有服务器", "打开一台服务器的「编辑」，在「服务器组」里选择这个组。")
+        }
+        return ("magnifyingglass", "没有匹配的服务器", "调整搜索或过滤条件。")
+    }
+
     private var filteredEndpoints: [EndpointRecord] {
         let query = searchText.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         return scopedEndpoints
@@ -406,13 +418,14 @@ struct ResourcesDashboard: View {
                 )
                 .padding(.trailing, EndpointTableLayout.scrollbarWidth)
                 if filteredEndpoints.isEmpty {
+                    let empty = emptyTableMessage
                     VStack(spacing: 8) {
-                        Image(systemName: endpoints.isEmpty ? "server.rack" : "magnifyingglass")
+                        Image(systemName: empty.icon)
                             .font(Typography.icon)
                             .foregroundStyle(DesignTokens.mutedInk)
-                        Text(endpoints.isEmpty ? "暂无服务器" : "没有匹配的服务器")
+                        Text(empty.title)
                             .font(Typography.label)
-                        Text(endpoints.isEmpty ? "添加服务器后会显示资源。" : "调整搜索或过滤条件。")
+                        Text(empty.detail)
                             .font(Typography.annotation)
                             .foregroundStyle(DesignTokens.mutedInk)
                     }
@@ -749,7 +762,6 @@ private struct FilterChip: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .fixedSize()
         .accessibilityLabel(label)
         .accessibilityValue("\(count) 台\(selected ? "，已选中" : "")")
@@ -922,7 +934,6 @@ private struct EndpointGroupSectionHeader: View {
                     .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.interaction)
                     .fixedSize()
-                    .focusable()
                     .accessibilityLabel(actionTitle)
             }
         }
@@ -1070,7 +1081,6 @@ private struct EndpointColumnHeader: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .onHover { hovering = $0 }
     }
 }
@@ -1199,7 +1209,6 @@ private struct EndpointTableRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
         // Everything a row cannot print — the workspace path, per-card VRAM,

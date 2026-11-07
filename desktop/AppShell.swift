@@ -15,7 +15,7 @@ struct NativeBrokerRoot: View {
     @ObservedObject private var contrast = ContrastState.shared
     @State private var showAddServer = false
     @State private var showClaim = false
-    @State private var showGroupManagement = false
+    @State private var groupSheet: ServerGroupSheetMode?
     @State private var claimInitialEndpointID = ""
     @State private var selectedEndpointDetailID: String?
     @State private var editingEndpointID: String?
@@ -96,7 +96,8 @@ struct NativeBrokerRoot: View {
                         selectedGroupID = groupID
                         resourceFilter = .all
                         selectedDashboardSection = .resources
-                    }
+                    },
+                    openGroupSheet: { groupSheet = $0 }
                 )
                 .toolbar(removing: .sidebarToggle)
                 .navigationSplitViewColumnWidth(min: sidebarWidth, ideal: sidebarWidth, max: sidebarWidth)
@@ -120,7 +121,7 @@ struct NativeBrokerRoot: View {
                             claimInitialEndpointID = ""
                             showClaim = true
                         },
-                        manageGroups: { showGroupManagement = true },
+                        manageGroups: { groupSheet = .list },
                         openEndpoint: { endpoint in
                             selectedEndpointDetailID = endpoint.id
                         },
@@ -145,8 +146,8 @@ struct NativeBrokerRoot: View {
         .sheet(isPresented: $showClaim) {
             ClaimSheet(store: store, initialEndpointID: claimInitialEndpointID)
         }
-        .sheet(isPresented: $showGroupManagement) {
-            ManageServerGroupsSheet(store: store)
+        .sheet(item: $groupSheet) { opening in
+            ManageServerGroupsSheet(store: store, opening: opening)
         }
         .sheet(item: selectedEndpointSelection) { selection in
             ServerDetailSheet(
@@ -204,8 +205,23 @@ private struct AppSidebar: View {
     let compact: Bool
     let navigate: (DashboardSection) -> Void
     let openGroup: (String) -> Void
+    let openGroupSheet: (ServerGroupSheetMode) -> Void
 
-    private var fleets: [ServerFleet] { serverFleets(in: store.snapshot) }
+    /// Every server group, one with no servers yet included so a group just
+    /// made can be found and filled; then the servers outside any group.
+    private var groupRows: [ServerFleet] {
+        let fleets = serverFleets(in: store.snapshot)
+        let groups = store.snapshot.serverGroups
+            .sorted { $0.displayName.localizedStandardCompare($1.displayName) == .orderedAscending }
+            .map { group in
+                fleets.first { $0.id == group.id } ?? ServerFleet(id: group.id, name: group.displayName, servers: [])
+            }
+        return groups + fleets.filter { $0.id.isEmpty }
+    }
+
+    private var canMutateGroups: Bool {
+        store.allowsMutations && store.supportsServerGroupCRUD
+    }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -224,18 +240,48 @@ private struct AppSidebar: View {
                 navigate(.alerts)
             }
 
-            // Server groups are the rooms of this house: go straight to one.
-            if !compact, !fleets.isEmpty {
-                Text("服务器组")
-                    .font(Typography.annotation.weight(.semibold))
-                    .foregroundStyle(DesignTokens.mutedInk)
-                    .padding(.horizontal, 20)
-                    .padding(.top, 18)
-                    .padding(.bottom, 4)
-                    .accessibilityAddTraits(.isHeader)
-                ForEach(fleets) { fleet in
-                    SidebarSelection(title: fleet.name, systemImage: nil, badge: "\(fleet.freeCardCount(in: store.snapshot))", selected: selectedSection == .resources && selectedGroupID == fleet.id, compact: false) {
+            // Server groups are the rooms of this house: go straight to one, or
+            // add one from the header, where the groups are.
+            if !compact {
+                HStack(spacing: 4) {
+                    Text("服务器组")
+                        .font(Typography.annotation.weight(.semibold))
+                        .foregroundStyle(DesignTokens.mutedInk)
+                        .accessibilityAddTraits(.isHeader)
+                    Spacer(minLength: 4)
+                    Button {
+                        openGroupSheet(.create)
+                    } label: {
+                        Image(systemName: "plus")
+                            .font(Typography.annotation.weight(.semibold))
+                    }
+                    .buttonStyle(IconActionButtonStyle())
+                    .disabled(!canMutateGroups)
+                    .help(canMutateGroups ? "新建服务器组" : store.mutationUnavailableReason)
+                    .accessibilityLabel("新建服务器组")
+                }
+                .padding(.leading, 20)
+                .padding(.trailing, 12)
+                .padding(.top, 10)
+                ForEach(groupRows) { fleet in
+                    SidebarSelection(
+                        title: fleet.name,
+                        systemImage: nil,
+                        badge: fleet.servers.isEmpty ? nil : "\(fleet.freeCardCount(in: store.snapshot))",
+                        selected: selectedSection == .resources && selectedGroupID == fleet.id,
+                        compact: false
+                    ) {
                         openGroup(fleet.id)
+                    }
+                    .contextMenu {
+                        if !fleet.id.isEmpty {
+                            Button("编辑服务器组…") { openGroupSheet(.edit(fleet.id)) }
+                                .disabled(!canMutateGroups)
+                        }
+                        Button("新建服务器组…") { openGroupSheet(.create) }
+                            .disabled(!canMutateGroups)
+                        Divider()
+                        Button("管理服务器组…") { openGroupSheet(.list) }
                     }
                 }
             }
@@ -309,9 +355,7 @@ private struct SidebarSelection: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .focusable()
         .padding(.horizontal, compact ? 8 : 10)
-        .focusEffectDisabled()
         .help(title)
         .accessibilityLabel(title)
         .accessibilityValue(selected ? "当前页面" : (badge ?? "未选中"))
@@ -359,7 +403,6 @@ private struct AppToolbar: View {
                     .font(Typography.identity)
             }
             .buttonStyle(IconActionButtonStyle())
-            .focusable()
             .disabled(!store.canRefresh)
             .keyboardShortcut("r", modifiers: [.command])
             .help(store.canRefresh ? "更新资源数据" : "测试数据不能刷新")
@@ -370,7 +413,6 @@ private struct AppToolbar: View {
                     Text("添加服务器")
                 }
                 .buttonStyle(SecondaryActionButtonStyle())
-                .focusable()
                 .disabled(!store.allowsMutations)
                 .help(store.allowsMutations ? "添加服务器到本机资源池" : store.mutationUnavailableReason)
                 .accessibilityLabel("添加服务器")
@@ -380,7 +422,6 @@ private struct AppToolbar: View {
                     Text("申请 GPU")
                 }
                 .buttonStyle(PrimaryActionButtonStyle())
-                .focusable()
                 .disabled(!store.allowsMutations || store.snapshot.operationalEndpoints.isEmpty)
                 .help(claimHelp)
                 .accessibilityLabel("申请 GPU")
