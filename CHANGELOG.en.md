@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.3.0 - 2026-11-07
 
 - **Server groups can now be made and filled in the App.** The + beside the server groups heading in the sidebar opens a form where you name the group, tick its servers and confirm its working path; the group's id is generated from its name instead of being typed. Editing a group ticks members in or out, a server in another group moves over, and a server that cannot move, such as one holding a keepalive, is named with the reason while the rest still move. Right-clicking a group in the sidebar edits it or opens group management, and a group with no servers yet is listed too.
 - **Clicking a column header, a server row or a button no longer leaves a large blue ring.** The focus ring appears only when moving with Tab while the system's Keyboard navigation setting is on, as in other Mac apps.
