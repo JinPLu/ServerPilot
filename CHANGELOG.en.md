@@ -6,7 +6,7 @@ This changelog records user-visible changes; implementation details belong in Gi
 
 ## Unreleased
 
-- **Server groups can be created from the sidebar.** The + beside the server groups heading opens the new-group form, and right-clicking a group edits it or opens group management. A group with no servers yet is listed too, and opening it explains how to add servers.
+- **Server groups can now be made and filled in the App.** The + beside the server groups heading in the sidebar opens a form where you name the group, tick its servers and confirm its working path; the group's id is generated from its name instead of being typed. Editing a group ticks members in or out, a server in another group moves over, and a server that cannot move, such as one holding a keepalive, is named with the reason while the rest still move. Right-clicking a group in the sidebar edits it or opens group management, and a group with no servers yet is listed too.
 - **Clicking a column header, a server row or a button no longer leaves a large blue ring.** The focus ring appears only when moving with Tab while the system's Keyboard navigation setting is on, as in other Mac apps.
 - Cluster requests that time out waiting for immediate capacity now report no capacity. Requests that end before their holder starts can be reconciled, allowing the same task to try again instead of remaining unconfirmed indefinitely.
 

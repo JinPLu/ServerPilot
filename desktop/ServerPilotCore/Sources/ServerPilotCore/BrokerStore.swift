@@ -805,6 +805,57 @@ public final class BrokerStore: ObservableObject {
         )
     }
 
+    /// Moves servers into a group or out of one, a request each and one after
+    /// another, then reloads once.  A server that refuses keeps its place and
+    /// is answered by name; the rest still move.
+    public func moveServers(
+        _ moves: [ServerMove],
+        completion: @escaping @MainActor @Sendable ([ServerMoveFailure]) -> Void
+    ) {
+        let refusal: String? = if !supportsEndpointUpdate {
+            endpointCompatibilityMessage("更新服务器设置", capability: "endpoint_update")
+        } else if !allowsEndpointLifecycleMutations {
+            endpointLifecycleMutationUnavailableReason
+        } else {
+            nil
+        }
+        if let refusal {
+            completion(moves.map { ServerMoveFailure(endpointName: $0.endpoint.connectionAddress, message: refusal) })
+            return
+        }
+        moveNext(moves[...], failures: [], completion: completion)
+    }
+
+    private func moveNext(
+        _ remaining: ArraySlice<ServerMove>,
+        failures: [ServerMoveFailure],
+        completion: @escaping @MainActor @Sendable ([ServerMoveFailure]) -> Void
+    ) {
+        guard let move = remaining.first else {
+            errorMessage = nil
+            if failures.isEmpty { notice = "已更新服务器所在的组，正在确认状态。" }
+            reload()
+            completion(failures)
+            return
+        }
+        guard !mutatingEndpointIDs.contains(move.endpoint.id) else {
+            let failure = ServerMoveFailure(endpointName: move.endpoint.connectionAddress, message: "这台服务器的设置正在更新，请稍候。")
+            moveNext(remaining.dropFirst(), failures: failures + [failure], completion: completion)
+            return
+        }
+        mutatingEndpointIDs.insert(move.endpoint.id)
+        performMutationWithPayload(
+            path: "api/v2/endpoints/\(move.endpoint.id)",
+            method: "PATCH",
+            payload: Self.endpointUpdatePayload(move.draft)
+        ) { [weak self] _, error in
+            guard let self else { return }
+            self.mutatingEndpointIDs.remove(move.endpoint.id)
+            let failed = error.map { [ServerMoveFailure(endpointName: move.endpoint.connectionAddress, message: $0)] } ?? []
+            self.moveNext(remaining.dropFirst(), failures: failures + failed, completion: completion)
+        }
+    }
+
     public func setEndpointKeepalive(
         _ endpoint: EndpointRecord,
         enabled: Bool,
@@ -1761,6 +1812,8 @@ public final class BrokerStore: ObservableObject {
             return "找不到这个服务器分组。"
         case "server_group_has_members":
             return "这个分组下还有服务器，请先移出后再删除。"
+        case "keepalive_endpoint_connection_in_use":
+            return "这台服务器正在占卡，改连接设置或工作路径前要先停掉占卡。"
         case "idempotency_key_required":
             return "本次操作缺少防重复标识，请重试。"
         case "validation_error":

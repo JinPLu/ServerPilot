@@ -1783,7 +1783,60 @@ public enum ServerGroupDraftError: LocalizedError, Equatable, Sendable {
     case invalidGroupFields
 
     public var errorDescription: String? {
-        "请填写有效的分组标识、显示名称、绝对工作路径和纯文本说明。"
+        "请填写有效的名称、绝对工作路径和纯文本说明。"
+    }
+}
+
+/// A group's id, made from the name a person typed so nobody has to invent
+/// one: Chinese becomes pinyin, anything else is folded to ASCII, and a name
+/// already taken gets a number.  Agents ask for a group by this id.
+public enum ServerGroupIdentifier {
+    public static func make(from displayName: String, taken: Set<String>) -> String {
+        let latin = displayName.applyingTransform(.toLatin, reverse: false) ?? displayName
+        let ascii = (latin.applyingTransform(.stripDiacritics, reverse: false) ?? latin).lowercased()
+        var slug = ""
+        for scalar in ascii.unicodeScalars {
+            if ("a"..."z").contains(scalar) || ("0"..."9").contains(scalar) {
+                slug.unicodeScalars.append(scalar)
+            } else if !slug.isEmpty, !slug.hasSuffix("-") {
+                slug.append("-")
+            }
+        }
+        while slug.hasSuffix("-") { slug.removeLast() }
+        if slug.count < 2 || !(slug.unicodeScalars.first.map { ("a"..."z").contains($0) } ?? false) {
+            slug = slug.isEmpty ? "group" : "group-\(slug)"
+        }
+        slug = String(slug.prefix(120))
+        while slug.hasSuffix("-") { slug.removeLast() }
+        var candidate = slug
+        var number = 2
+        while taken.contains(candidate) {
+            candidate = "\(slug)-\(number)"
+            number += 1
+        }
+        return candidate
+    }
+}
+
+/// One server's change of group, as `BrokerStore.moveServers` sends it.
+public struct ServerMove: Sendable {
+    public let endpoint: EndpointRecord
+    public let draft: EndpointUpdateDraft
+
+    public init(endpoint: EndpointRecord, draft: EndpointUpdateDraft) {
+        self.endpoint = endpoint
+        self.draft = draft
+    }
+}
+
+/// A server that stayed where it was, and why.
+public struct ServerMoveFailure: Equatable, Sendable {
+    public let endpointName: String
+    public let message: String
+
+    public init(endpointName: String, message: String) {
+        self.endpointName = endpointName
+        self.message = message
     }
 }
 

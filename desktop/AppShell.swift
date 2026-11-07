@@ -67,6 +67,21 @@ struct NativeBrokerRoot: View {
 #endif
     }
 
+    /// Fixture captures open the server group sheet the way the sidebar does:
+    /// `create`, `list`, or `edit:<group id>`.
+    private func openFixtureGroupSheetIfRequested() {
+#if DEBUG || DESKTOP_FIXTURES
+        guard let requested = ProcessInfo.processInfo.environment["SERVERPILOT_DESKTOP_GROUP_SHEET"] else { return }
+        if requested == "create" {
+            groupSheet = .create
+        } else if requested == "list" {
+            groupSheet = .list
+        } else if requested.hasPrefix("edit:") {
+            groupSheet = .edit(String(requested.dropFirst("edit:".count)))
+        }
+#endif
+    }
+
     var body: some View {
         // Keyed on the contrast generation: SwiftUI holds a resolved colour for
         // a view body's lifetime, so toggling Increase Contrast has to rebuild
@@ -176,6 +191,7 @@ struct NativeBrokerRoot: View {
         }
         .onAppear {
             openFixtureDetailIfRequested(endpointIDs: store.snapshot.endpoints.map(\.id))
+            openFixtureGroupSheetIfRequested()
         }
         .onReceive(NotificationCenter.default.publisher(for: .serverPilotOpenSettings)) { _ in
             selectedGroupID = nil

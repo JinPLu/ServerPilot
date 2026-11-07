@@ -4,6 +4,19 @@ import Testing
 
 @MainActor
 @Suite(.serialized) struct ServerGroupTests {
+    @Test func aGroupIDComesFromItsNameWhateverTheScript() {
+        #expect(ServerGroupIdentifier.make(from: "训练组", taken: []) == "xun-lian-zu")
+        #expect(ServerGroupIdentifier.make(from: "Training Lab", taken: []) == "training-lab")
+        #expect(ServerGroupIdentifier.make(from: "Training Lab", taken: ["training-lab"]) == "training-lab-2")
+        #expect(ServerGroupIdentifier.make(from: "Training Lab", taken: ["training-lab", "training-lab-2"]) == "training-lab-3")
+        #expect(ServerGroupIdentifier.make(from: "3090 机器", taken: []) == "group-3090-ji-qi")
+        #expect(ServerGroupIdentifier.make(from: "A", taken: []) == "group-a")
+        #expect(ServerGroupIdentifier.make(from: "  ", taken: []) == "group")
+        for name in ["训练组", "Training Lab", "3090 机器", "A", "", "!!", "Ünïcödé — 组 2", String(repeating: "长", count: 200)] {
+            #expect(CoreFieldValidation.isSlugID(ServerGroupIdentifier.make(from: name, taken: [])), "\(name)")
+        }
+    }
+
     @Test func schedulerNodesPreserveDrainedNodesAndSortNaturally() throws {
         let capacity = try #require(EndpointRecord(raw: [
             "id": "cluster", "host": "login", "ssh_user": "user",

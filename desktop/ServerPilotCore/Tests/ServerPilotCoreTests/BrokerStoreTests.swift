@@ -1397,6 +1397,62 @@ import Testing
             .appendingPathComponent("Fixtures", isDirectory: true)
     }
 
+    @Test func movingServersBetweenGroupsReportsARefusalAndMovesTheRest() async throws {
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [StateRouteURLProtocol.self]
+        let mutationSession = URLSession(configuration: configuration)
+        var snapshot = try Self.snapshot(named: "dashboard")
+        snapshot.snapshotRevision = 102
+        let refusing = try #require(snapshot.endpoints.first)
+        let moving = try #require(snapshot.endpoints.dropFirst().first)
+        let store = BrokerStore(
+            actorID: "tester",
+            refreshTimeoutSeconds: 1,
+            refreshIntervalSeconds: 0,
+            mutationSession: mutationSession
+        )
+        let accepted = try JSONSerialization.data(withJSONObject: ["snapshot_revision": 102])
+        let refusal = try JSONSerialization.data(withJSONObject: ["error": [
+            "code": "keepalive_endpoint_connection_in_use",
+            "message": "stop the active endpoint keepalive before changing its connection or verification settings",
+        ]])
+        StateRouteURLProtocol.queuedResponses = [(409, refusal), (200, accepted)]
+        defer { StateRouteURLProtocol.reset() }
+        store.connectForTesting(
+            snapshotClient: RepeatingClient(snapshot),
+            serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: ["endpoint_update", "server_group_crud"]),
+            baseURL: URL(string: "http://broker.test/")!
+        )
+        try await waitUntil { store.freshness == .fresh && !store.isRefreshing }
+
+        func joining(_ endpoint: EndpointRecord) throws -> ServerMove {
+            ServerMove(endpoint: endpoint, draft: try EndpointUpdateDraft(
+                sshUser: endpoint.sshUser,
+                workspacePath: "",
+                observationProfile: endpoint.observationProfile,
+                serverGroupID: "xun-lian-zu",
+                workspacePathOverride: nil
+            ))
+        }
+        nonisolated(unsafe) var reported: [ServerMoveFailure]?
+        store.moveServers([try joining(refusing), try joining(moving)]) { reported = $0 }
+        try await waitUntil { reported != nil }
+
+        #expect(reported == [ServerMoveFailure(
+            endpointName: refusing.connectionAddress,
+            message: "提交失败：这台服务器正在占卡，改连接设置或工作路径前要先停掉占卡。"
+        )])
+        #expect(StateRouteURLProtocol.requests.filter { $0.httpMethod != "GET" }.map(\.url?.path) == [
+            "/api/v2/endpoints/\(refusing.id)", "/api/v2/endpoints/\(moving.id)",
+        ])
+        #expect(StateRouteURLProtocol.requests.filter { $0.httpMethod != "GET" }.allSatisfy { $0.httpMethod == "PATCH" })
+        let body = try #require(StateRouteURLProtocol.lastBody)
+        let payload = try #require(try JSONSerialization.jsonObject(with: body) as? [String: Any])
+        #expect(payload["server_group_id"] as? String == "xun-lian-zu")
+        #expect(payload["workspace_path_override"] is NSNull)
+        #expect(store.errorMessage == nil)
+    }
+
     private static func snapshot(named name: String) throws -> BrokerSnapshot {
         let url = try FixtureSnapshots.resolve(name, fixturesRoot: fixturesRoot)
         return try FixtureSnapshots.load(from: url)
@@ -1688,6 +1744,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
     nonisolated(unsafe) static var lastBody: Data?
     nonisolated(unsafe) static var requests: [URLRequest] = []
     nonisolated(unsafe) static var statusCode = 200
+    nonisolated(unsafe) static var queuedResponses: [(status: Int, data: Data)] = []
 
     /// URLSession turns `httpBody` into a stream before a protocol sees the
     /// request, so the body has to be drained here or the test observes nothing.
@@ -1717,10 +1774,13 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         Self.lastRequest = request
         Self.requests.append(request)
         Self.lastBody = request.httpBody ?? Self.drain(request.httpBodyStream)
-        let data = Self.responseData ?? Data("{}".utf8)
+        // Queued responses answer mutations in order; the reads a connected
+        // store makes on its own keep the default response.
+        let queued = request.httpMethod == "GET" || Self.queuedResponses.isEmpty ? nil : Self.queuedResponses.removeFirst()
+        let data = queued?.data ?? Self.responseData ?? Data("{}".utf8)
         let response = HTTPURLResponse(
             url: request.url!,
-            statusCode: Self.statusCode,
+            statusCode: queued?.status ?? Self.statusCode,
             httpVersion: nil,
             headerFields: ["Content-Type": "application/json"]
         )!
@@ -1737,6 +1797,7 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         lastBody = nil
         requests = []
         statusCode = 200
+        queuedResponses = []
     }
 }
 
