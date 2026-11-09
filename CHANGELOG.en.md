@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.4.0 - 2026-11-10
 
 - **Returning a task in the App ends its processes.** The confirmation lists the processes running on that task's cards; once confirmed, ServerPilot checks each one is still the process it observed and belongs to the SSH login account, sends SIGTERM, sends SIGKILL to whatever is still running ten seconds later, and reports each result. Other accounts' processes are never ended.
 - **Agents can clear tasks another project abandoned.** A task whose holder has gone quiet (ten minutes by default) with nothing running on its cards appears under `abandoned` in `gpu_status()`, and any agent can return it with `gpu_release(lease_id)`; a task still in use, or on a server that does not answer, is handed to a person in the App.
