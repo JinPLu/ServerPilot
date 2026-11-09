@@ -1103,3 +1103,5 @@ def test_returning_a_task_in_the_app_ends_its_processes_before_the_cards_go(
         select(AuditEvent).where(AuditEvent.action == "lease.processes_stopped")
     ).all())
     assert [event.resource_id for event in stopped_events] == [lease_id]
+    # A person's own return is not news to them.
+    assert not [item for item in service.list_reminders() if item["type"] == "lease_ended"]

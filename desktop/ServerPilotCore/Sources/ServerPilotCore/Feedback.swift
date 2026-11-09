@@ -46,6 +46,8 @@ public struct AlertRecord: Equatable, Sendable, Identifiable {
         case serverAbnormal = "server_abnormal"
         case resourceIdle = "resource_idle"
         case capacityAvailable = "capacity_available"
+        /// An agent's task ended or was returned.
+        case taskEnded = "task_ended"
 
         public var title: String {
             switch self {
@@ -53,6 +55,7 @@ public struct AlertRecord: Equatable, Sendable, Identifiable {
             case .serverAbnormal: "服务器异常"
             case .resourceIdle: "资源闲置"
             case .capacityAvailable: "有卡可用"
+            case .taskEnded: "任务结束"
             }
         }
     }

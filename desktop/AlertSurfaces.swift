@@ -67,7 +67,7 @@ struct AlertsDashboard: View {
                                 .font(Typography.icon)
                                 .foregroundStyle(DesignTokens.mutedInk)
                             Text("没有提醒").font(Typography.label)
-                            Text("任务受影响、服务器异常、资源闲置或有卡可用时，会出现在这里。")
+                            Text("Agent 的任务结束或被归还、任务受影响、服务器异常、资源闲置或有卡可用时，会出现在这里。")
                                 .font(Typography.identity)
                                 .foregroundStyle(DesignTokens.mutedInk)
                         }

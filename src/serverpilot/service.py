@@ -102,6 +102,12 @@ RETRY_MAX_SECONDS = 1800
 # longer own resources. `idle_lease` belongs here: a released lease is not idle,
 # it is gone, and nothing else was closing its warning.
 LEASE_SCOPED_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy", "idle_lease"}
+# How an agent's own release reads in the reminder that tells a person.
+TASK_ENDINGS = {
+    "workload_completed": "已完成",
+    "workload_failed": "失败结束",
+    "workload_abandoned": "被放弃",
+}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
 # What the App's server table shows: load over the last half minute, not one
@@ -7098,7 +7104,7 @@ class BrokerService:
                 select(Alert).where(
                     Alert.dedupe_key.is_not(None),
                     Alert.state.in_(alert_rules.OPEN_STATES),
-                    Alert.alert_type.not_in(("lease_reclaimed", "capacity_available")),
+                    Alert.alert_type.not_in((*alert_rules.EVENT_TYPES, "capacity_available")),
                 )
             ).all()
         }
@@ -7391,6 +7397,20 @@ class BrokerService:
             key=f"reclaimed:{lease.id}:{lease.resource_epoch}", category=alert_rules.TASK_IMPACTED,
             alert_type="lease_reclaimed", severity="warning", resource_type="lease",
             resource_id=lease.id, message=f"任务「{lease.task_ref}」有 {count} 张 GPU 已被回收",
+            lease_id=lease.id, project_id=lease.project_id, task_ref=lease.task_ref,
+        ), now)
+        row.state = "active"
+
+    def _raise_task_ended(self, session: Session, lease: Lease, how: str, cards: int, now: datetime) -> None:
+        """An agent's task ending is news a person may be waiting on; it stands until read."""
+
+        if lease.kind != "workload":
+            return
+        task = lease.task_ref or lease.purpose or lease.id
+        row = self._new_reminder(session, alert_rules.Signal(
+            key=f"ended:{lease.id}", category=alert_rules.TASK_ENDED,
+            alert_type="lease_ended", severity="info", resource_type="lease", resource_id=lease.id,
+            message=f"任务「{task}」{how}，交还 {cards} 张 GPU（项目 {lease.project_id}）",
             lease_id=lease.id, project_id=lease.project_id, task_ref=lease.task_ref,
         ), now)
         row.state = "active"
@@ -8394,16 +8414,21 @@ class BrokerService:
             lease.state = "RELEASED"
             lease.released_at = now
             lease.release_reason = reason.strip()[:500]
-            for resource in session.scalars(
+            returned = session.scalars(
                 select(LeaseResource).where(
                     LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
                 )
-            ).all():
+            ).all()
+            for resource in returned:
                 resource.active = False
                 resource.released_at = now
             if not self._plugin_allocation_payload(session, lease):
                 self._sync_direct_allocations(session, lease, [], now)
             self._resolve_lease_alerts(session, lease.id, now)
+            if not operator_override:
+                self._raise_task_ended(
+                    session, lease, TASK_ENDINGS.get(lease.release_reason, "已归还"), len(returned), now
+                )
             event = self._audit(
                 session,
                 actor_id=actor.id,
@@ -8953,6 +8978,11 @@ class BrokerService:
                 lease.state = "RELEASED"
                 lease.released_at = now
                 lease.release_reason = reason
+                if actor.session_id is not None:
+                    self._raise_task_ended(
+                        session, lease, f"无人在用，被项目 {actor.session_project} 的 Agent 清理",
+                        len(resources), now,
+                    )
             self._resolve_lease_alerts(session, lease.id, now)
             event = self._audit(
                 session,
@@ -9635,6 +9665,7 @@ class BrokerService:
                         resource.active = False
                         resource.released_at = now
                     self._remember_plugin_release(session, lease, plugin_releases)
+                    self._raise_task_ended(session, lease, "到期结束", len(resources), now)
                 self._audit(
                     session,
                     actor_id=actor_id,

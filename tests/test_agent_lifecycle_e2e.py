@@ -345,3 +345,40 @@ def test_only_a_person_settles_a_task_on_a_server_that_does_not_answer(routine, 
         person, "endpoint-a", lease_id, observation_not_before=utcnow(), idempotency_key="person-clear"
     )
     assert released["released"] is True
+
+
+def _ended(service) -> list[dict]:  # type: ignore[no-untyped-def]
+    return [item for item in service.list_reminders() if item["type"] == "lease_ended"]
+
+
+def test_a_finished_agent_task_is_a_reminder_that_stands_until_read(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    tools.gpu_apply(task="训练完成", duration_seconds=3600)
+    assert tools.gpu_release(task="训练完成", outcome="completed")["ok"] is True
+
+    [ended] = _ended(routine)
+    assert ended["state"] == "active"
+    assert ended["category"] == "task_ended"
+    assert "训练完成" in ended["message"] and "已完成" in ended["message"] and "交还 1 张 GPU" in ended["message"]
+    open_before = routine.pulse()["open_alerts"]
+
+    # The sweep has no condition to find for it, and must not settle it.
+    routine._alerts_evaluated_at = None
+    routine.ingest_observation(observation(count=1))
+    assert [item["state"] for item in _ended(routine)] == ["active"]
+
+    routine.mark_reminders(ACTOR, [ended["id"]], acked=True)
+    assert routine.pulse()["open_alerts"] == open_before - 1
+
+
+def test_a_task_that_runs_out_its_time_is_reported_too(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(task="到点了", duration_seconds=3600)["lease_id"]
+
+    def expire(session) -> None:  # type: ignore[no-untyped-def]
+        session.get(Lease, lease_id).expires_at = utcnow() - timedelta(seconds=1)
+
+    routine._write(expire)
+    routine.ingest_observation(observation(count=1))
+
+    assert ["到期结束" in item["message"] for item in _ended(routine)] == [True]

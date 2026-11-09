@@ -11,7 +11,9 @@ This changelog records user-visible changes; implementation details belong in Gi
 - **The MCP guides weaker agents more clearly.** The rules spell out the order of calls, more refusals carry a next step, a step only a person can take is marked `next.human`, a granted apply says what to do next, and every parameter is described.
 - **Server page load is now a 30-second average.** Bars, sorting and each card's square read the same average, so one collection that caught a job mid-step no longer makes a row jump.
 - **Squares and bars share one palette.** Green below 80%, yellow from 80% and orange from 95%; the legend gains "full".
-- **A tighter server page.** The server column no longer fills the row with blank space, and the room goes to the task column; the cards, free and metric columns centre their headers over their values. The task column's hover no longer competes with a whole-row tooltip and appears sooner.
+- **A tighter server page.** The server column narrows to its addresses, and the room left is shared by the task column and the four metrics, whose bars lengthen, instead of opening a field of blank between two columns; the cards, free and metric columns centre their headers over their values. The task column's hover no longer competes with a whole-row tooltip and appears sooner.
+- **A reminder when an agent's task ends or is returned.** Completed, failed, abandoned, run out of time, or cleared by another agent as abandoned: each leaves a "task ended" reminder naming the task, project and cards returned, until you confirm it. A task you return yourself in the App does not.
+- **Confirming reminders clears the sidebar count at once,** instead of at the next background check a few seconds later.
 - **The menu bar popover is readable in Dark Mode again.**
 
 ## 5.3.0 - 2026-11-07

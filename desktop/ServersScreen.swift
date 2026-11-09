@@ -408,6 +408,14 @@ struct ResourcesDashboard: View {
                 width: proxy.size.width - EndpointTableLayout.scrollbarWidth,
                 columns: columns
             )
+            let plan = EndpointTableLayout.Plan(
+                width: proxy.size.width - EndpointTableLayout.scrollbarWidth,
+                tier: tier,
+                columns: columns,
+                addresses: filteredEndpoints.flatMap { endpoint in
+                    [endpoint.connectionAddress] + endpoint.nodes.map { "\(endpoint.connectionAddress) / \($0.name)" }
+                }
+            )
             VStack(alignment: .leading, spacing: 0) {
                 EndpointTableHeader(
                     tier: tier,
@@ -453,6 +461,7 @@ struct ResourcesDashboard: View {
                 tableFooter(showsLegend: tier.showsGPUModel && columns.contains(.cards))
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+            .environment(\.endpointColumnPlan, plan)
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         // Labelling this container turned it into one leaf element and hid
@@ -780,11 +789,13 @@ private struct FilterChip: View {
 
 enum EndpointTableLayout {
     static let scrollbarWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
-    /// host:port at 13 pt, and the status word beneath it.
+    /// host:port at 13 pt, and the status word beneath it, before the
+    /// addresses on screen are measured.
     static let addressLane: CGFloat = 200
-    /// Past this the server column is only blank; the room goes to 任务,
-    /// whose task names are what get cut short.
-    static let addressLaneMax: CGFloat = 280
+    /// The server column hugs the longest address on screen within this range.
+    static let addressRange: ClosedRange<CGFloat> = 150...280
+    /// A bar longer than this reads no better; past it the room goes to 任务.
+    static let pressureMax: CGFloat = 150
     static let cardPadding: CGFloat = 16
     /// Two lines of text; the room around them is the point.
     static let rowHeight: CGFloat = 56
@@ -807,12 +818,6 @@ enum EndpointTableLayout {
 
         var showsGPUModel: Bool { self == .wide }
         var showsAssignment: Bool { self != .compact }
-
-        /// The server column stops at `addressLaneMax` while 任务 is there to
-        /// take the rest of the row, and fills the row when it is not.
-        func addressMaxWidth(columns: Set<EndpointColumn>) -> CGFloat {
-            showsAssignment && columns.contains(.assignment) ? EndpointTableLayout.addressLaneMax : .infinity
-        }
 
         var columnSpacing: CGFloat { self == .wide ? 12 : 10 }
         var assignmentWidth: CGFloat { self == .wide ? 164 : 150 }
@@ -839,11 +844,83 @@ enum EndpointTableLayout {
         }
     }
 
+    /// How wide each column is, decided once per layout and read by the header
+    /// and every row through the environment, so they cannot disagree.
+    ///
+    /// The server column hugs the addresses on screen; what the fixed columns
+    /// leave is shared between the bars, which lengthen up to `pressureMax`,
+    /// and 任务, which takes the rest.  Handing it all to one column left a
+    /// field of blank between two others, whichever column that was.
+    struct Plan: Equatable {
+        var address: CGFloat
+        var assignment: CGFloat
+        var pressure: CGFloat
+        /// Without 任务 the server column takes the row.
+        var addressFills: Bool
+
+        static let minimum = Plan(
+            address: EndpointTableLayout.addressLane,
+            assignment: Tier.wide.assignmentWidth,
+            pressure: Tier.wide.pressureWidth,
+            addressFills: false
+        )
+
+        init(address: CGFloat, assignment: CGFloat, pressure: CGFloat, addressFills: Bool) {
+            self.address = address
+            self.assignment = assignment
+            self.pressure = pressure
+            self.addressFills = addressFills
+        }
+
+        init(width: CGFloat, tier: Tier, columns: Set<EndpointColumn>, addresses: [String]) {
+            let range = EndpointTableLayout.addressRange
+            // Room for the unset-workspace triangle beside the widest address.
+            address = min(max(EndpointTableLayout.widestAddress(addresses) + 24, range.lowerBound), range.upperBound)
+            let showsAssignment = tier.showsAssignment && columns.contains(.assignment)
+            let meters = CGFloat([EndpointColumn.gpuUtilization, .gpuMemory, .cpu, .memory].filter(columns.contains).count)
+            var fixed = address + tier.availabilityWidth
+            var count = 2 + meters + (showsAssignment ? 1 : 0)
+            if tier.showsGPUModel, columns.contains(.cards) {
+                fixed += tier.gpuModelWidth
+                count += 1
+            }
+            if columns.contains(.temperature) {
+                fixed += tier.temperatureWidth
+                count += 1
+            }
+            let flexible = width - EndpointTableLayout.cardPadding * 2 - fixed - tier.columnSpacing * (count - 1)
+            let extra = max(0, flexible - (showsAssignment ? tier.assignmentWidth : 0) - meters * tier.pressureWidth)
+            let barShare = meters > 0
+                ? min(EndpointTableLayout.pressureMax - tier.pressureWidth, extra * (showsAssignment ? 0.5 : 1) / meters)
+                : 0
+            pressure = tier.pressureWidth + barShare
+            assignment = showsAssignment ? tier.assignmentWidth + extra - barShare * meters : 0
+            addressFills = !showsAssignment
+        }
+    }
+
+    /// The widest host:port as the table sets it, in `Typography.rowPrimary`.
+    static func widestAddress(_ addresses: [String]) -> CGFloat {
+        let font = NSFont.monospacedDigitSystemFont(ofSize: NSFont.systemFontSize, weight: .medium)
+        return addresses.map { ($0 as NSString).size(withAttributes: [.font: font]).width }.max() ?? 0
+    }
+
     static func tier(width: CGFloat, columns: Set<EndpointColumn>) -> Tier {
         let content = width - cardPadding * 2
         if content >= Tier.wide.minimumWidth(columns: columns) { return .wide }
         if content >= Tier.medium.minimumWidth(columns: columns) { return .medium }
         return .compact
+    }
+}
+
+private struct EndpointColumnPlanKey: EnvironmentKey {
+    static let defaultValue = EndpointTableLayout.Plan.minimum
+}
+
+extension EnvironmentValues {
+    var endpointColumnPlan: EndpointTableLayout.Plan {
+        get { self[EndpointColumnPlanKey.self] }
+        set { self[EndpointColumnPlanKey.self] = newValue }
     }
 }
 
@@ -989,14 +1066,15 @@ private struct EndpointTableHeader: View {
     /// The window the load columns average over, to say so where they are named.
     let averageWindowSeconds: Int?
     let selectSort: (EndpointSort) -> Void
+    @Environment(\.endpointColumnPlan) private var plan
 
     var body: some View {
         HStack(spacing: tier.columnSpacing) {
             header(.id, centered: false)
-                .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
+                .frame(minWidth: plan.address, maxWidth: plan.addressFills ? .infinity : plan.address, alignment: .leading)
             if tier.showsAssignment, columns.contains(.assignment) {
                 header(.assignment, centered: false)
-                    .frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: plan.assignment, maxWidth: .infinity, alignment: .leading)
             }
             if tier.showsGPUModel, columns.contains(.cards) {
                 header(.gpuModel, centered: true)
@@ -1006,19 +1084,19 @@ private struct EndpointTableHeader: View {
                 .frame(width: tier.availabilityWidth)
             if columns.contains(.gpuUtilization) {
                 header(.gpuUtilization, centered: true)
-                    .frame(width: tier.pressureWidth)
+                    .frame(width: plan.pressure)
             }
             if columns.contains(.gpuMemory) {
                 header(.gpuMemory, centered: true)
-                    .frame(width: tier.pressureWidth)
+                    .frame(width: plan.pressure)
             }
             if columns.contains(.cpu) {
                 header(.cpuLoad, centered: true)
-                    .frame(width: tier.pressureWidth)
+                    .frame(width: plan.pressure)
             }
             if columns.contains(.memory) {
                 header(.memory, centered: true)
-                    .frame(width: tier.pressureWidth)
+                    .frame(width: plan.pressure)
             }
             if columns.contains(.temperature) {
                 header(.temperature, centered: true)
@@ -1168,6 +1246,7 @@ private struct EndpointTableRow: View {
     let group: ServerGroupRecord?
     let isSnapshotFresh: Bool
     let tier: EndpointTableLayout.Tier
+    @Environment(\.endpointColumnPlan) private var plan
     let columns: Set<EndpointColumn>
     /// nil outside bulk removal; otherwise whether this row is checked.
     let removalMark: Bool?
@@ -1201,30 +1280,30 @@ private struct EndpointTableRow: View {
                         .foregroundStyle(checked ? DesignTokens.danger : DesignTokens.mutedInk)
                 }
                 serverCell
-                    .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
+                    .frame(minWidth: plan.address, maxWidth: plan.addressFills ? .infinity : plan.address, alignment: .leading)
                     // Everything a row cannot print about the machine — the
                     // workspace path, per-card VRAM — is one hover away here.
                     // It used to cover the whole row, where it fought the task
                     // column's own hover for the same spot.
                     .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
                 if tier.showsAssignment, columns.contains(.assignment) {
-                    assignmentCell.frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
+                    assignmentCell.frame(minWidth: plan.assignment, maxWidth: .infinity, alignment: .leading)
                 }
                 if tier.showsGPUModel, columns.contains(.cards) {
                     gpuModelCell.frame(width: tier.gpuModelWidth)
                 }
                 availabilityCell.frame(width: tier.availabilityWidth)
                 if columns.contains(.gpuUtilization) {
-                    TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: gpuPressure ?? lastUsage?.gpuUtilization, muted: gpuReadingsAreQuiet || gpuPressure == nil, width: tier.pressureWidth)
+                    TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: gpuPressure ?? lastUsage?.gpuUtilization, muted: gpuReadingsAreQuiet || gpuPressure == nil, width: plan.pressure)
                 }
                 if columns.contains(.gpuMemory) {
-                    TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: gpuMemoryPressure ?? lastUsage?.gpuMemory, muted: gpuReadingsAreQuiet || gpuMemoryPressure == nil, width: tier.pressureWidth)
+                    TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: gpuMemoryPressure ?? lastUsage?.gpuMemory, muted: gpuReadingsAreQuiet || gpuMemoryPressure == nil, width: plan.pressure)
                 }
                 if columns.contains(.cpu) {
-                    TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: cpuLoadPressure ?? lastUsage?.cpu, muted: cpuLoadPressure == nil, width: tier.pressureWidth)
+                    TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: cpuLoadPressure ?? lastUsage?.cpu, muted: cpuLoadPressure == nil, width: plan.pressure)
                 }
                 if columns.contains(.memory) {
-                    TablePressureCell(label: "内存占用率", metric: .memory, fraction: memoryPressure ?? lastUsage?.memory, muted: memoryPressure == nil, width: tier.pressureWidth)
+                    TablePressureCell(label: "内存占用率", metric: .memory, fraction: memoryPressure ?? lastUsage?.memory, muted: memoryPressure == nil, width: plan.pressure)
                 }
                 if columns.contains(.temperature) {
                     TableTemperatureCell(celsius: peakTemperature, width: tier.temperatureWidth)

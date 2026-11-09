@@ -17,6 +17,10 @@ TASK_IMPACTED = "task_impacted"
 SERVER_ABNORMAL = "server_abnormal"
 RESOURCE_IDLE = "resource_idle"
 CAPACITY_AVAILABLE = "capacity_available"
+TASK_ENDED = "task_ended"
+#: Reminders about something that happened once, not a condition that holds:
+#: the sweep neither renews nor resolves them, so they stand until read.
+EVENT_TYPES = ("lease_reclaimed", "lease_ended")
 
 OPEN_STATES = ("armed", "pending", "active", "acked")
 #: Waiting for a group to have cards. Invisible: it is the memory that the

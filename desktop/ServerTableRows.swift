@@ -8,6 +8,7 @@ struct SchedulerNodeTableRow: View {
     let node: SchedulerNodeRecord
     let gpuName: String
     let tier: EndpointTableLayout.Tier
+    @Environment(\.endpointColumnPlan) private var plan
     let columns: Set<EndpointColumn>
     let isSnapshotFresh: Bool
     let leases: [LeaseRecord]
@@ -97,13 +98,13 @@ struct SchedulerNodeTableRow: View {
                         .lineLimit(1)
                 }
             }
-            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
+            .frame(minWidth: plan.address, maxWidth: plan.addressFills ? .infinity : plan.address, alignment: .leading)
             if tier.showsAssignment, columns.contains(.assignment) {
                 Text(assignment ?? "—")
                     .font(Typography.rowPrimary)
                     .lineLimit(1)
                     .foregroundStyle(assignment == nil ? DesignTokens.mutedInk : DesignTokens.ink)
-                    .frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: plan.assignment, maxWidth: .infinity, alignment: .leading)
             }
             if tier.showsGPUModel, columns.contains(.cards) {
                 VStack(alignment: .center, spacing: 4) {
@@ -132,16 +133,16 @@ struct SchedulerNodeTableRow: View {
             }
             .frame(width: tier.availabilityWidth)
             if columns.contains(.gpuUtilization) {
-                TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: usage?.gpuUtilizationFraction ?? lastUsage?.gpuUtilization, muted: usage?.gpuUtilizationFraction == nil, width: tier.pressureWidth)
+                TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: usage?.gpuUtilizationFraction ?? lastUsage?.gpuUtilization, muted: usage?.gpuUtilizationFraction == nil, width: plan.pressure)
             }
             if columns.contains(.gpuMemory) {
-                TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: usage?.gpuMemoryFraction ?? lastUsage?.gpuMemory, muted: usage?.gpuMemoryFraction == nil, width: tier.pressureWidth)
+                TablePressureCell(label: "显存占用率", metric: .gpuMemory, fraction: usage?.gpuMemoryFraction ?? lastUsage?.gpuMemory, muted: usage?.gpuMemoryFraction == nil, width: plan.pressure)
             }
             if columns.contains(.cpu) {
-                TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: usage?.cpuUtilizationFraction ?? lastUsage?.cpu, muted: usage?.cpuUtilizationFraction == nil, width: tier.pressureWidth)
+                TablePressureCell(label: "CPU 负载", metric: .cpu, fraction: usage?.cpuUtilizationFraction ?? lastUsage?.cpu, muted: usage?.cpuUtilizationFraction == nil, width: plan.pressure)
             }
             if columns.contains(.memory) {
-                TablePressureCell(label: "内存占用率", metric: .memory, fraction: usage?.memoryFraction ?? lastUsage?.memory, muted: usage?.memoryFraction == nil, width: tier.pressureWidth)
+                TablePressureCell(label: "内存占用率", metric: .memory, fraction: usage?.memoryFraction ?? lastUsage?.memory, muted: usage?.memoryFraction == nil, width: plan.pressure)
             }
             if columns.contains(.temperature) {
                 TableTemperatureCell(celsius: peakTemperature, width: tier.temperatureWidth)

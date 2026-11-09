@@ -1578,7 +1578,9 @@ public final class BrokerStore: ObservableObject {
             path: "api/v2/alerts/mark",
             body: ["alert_ids": ids, "notified": notified, "acked": acked]
         )
-        await reloadAlerts()
+        // The badge answers now, not at the next pulse; the pulse reloads the
+        // list whenever the count it reports has moved.
+        await checkPulse()
     }
 
     private func requestJSON(path: String, query: String? = nil, body: [String: Any]? = nil) async -> [String: Any]? {
