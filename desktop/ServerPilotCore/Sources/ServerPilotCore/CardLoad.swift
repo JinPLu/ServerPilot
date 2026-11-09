@@ -8,6 +8,7 @@ public enum CardLoad: String, CaseIterable, Sendable {
     case free
     case low
     case nearFull
+    case full
     /// In use, but nothing measured it. A cluster's allocation count is a
     /// scheduling fact, so it must not read as a low load.
     case unmeasured
@@ -19,6 +20,7 @@ public enum CardLoad: String, CaseIterable, Sendable {
         case .free: "空闲"
         case .low: "利用率低"
         case .nearFull: "接近满"
+        case .full: "已满"
         case .unmeasured: "利用率未知"
         case .fault: "有错误"
         case .stale: "数据过期"
@@ -35,7 +37,12 @@ public enum CardLoad: String, CaseIterable, Sendable {
                 self = .unmeasured
                 return
             }
-            self = peak >= ResourceMetric.nearlyFull ? .nearFull : .low
+            // The bars' rule, so a square and the bar beside it never disagree.
+            self = switch ResourceMetric.gpuUtilization.pressure(peak) {
+            case .normal: .low
+            case .warning: .nearFull
+            case .critical: .full
+            }
         case "CONFLICT", "ORPHANED_BUSY", "UNHEALTHY", "ERROR", "MAINTENANCE":
             self = .fault
         default:
@@ -44,13 +51,25 @@ public enum CardLoad: String, CaseIterable, Sendable {
     }
 }
 
+extension CardLoad {
+    /// The bar colour a measured square shares; nil for a square that is not a reading.
+    public var pressure: MetricPressure? {
+        switch self {
+        case .low: .normal
+        case .nearFull: .warning
+        case .full: .critical
+        case .free, .unmeasured, .fault, .stale: nil
+        }
+    }
+}
+
 extension GPURecord {
-    /// The current reading, the same one the server table prints beside the squares.
+    /// The short average, the same reading the server table prints beside the squares.
     public var load: CardLoad {
         CardLoad(
             state: state,
-            utilization: utilization.map { Double($0) / 100 },
-            memory: memoryUsedMiB == nil ? nil : memoryFraction
+            utilization: shortTelemetryAverage?.utilizationFraction,
+            memory: shortTelemetryAverage?.memoryFraction
         )
     }
 }

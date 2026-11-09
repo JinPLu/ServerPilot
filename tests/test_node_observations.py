@@ -114,3 +114,44 @@ def test_idle_plugin_gpu_is_observable_but_requires_scheduler(service, admin, mo
     assert gpu["state"] == "SCHEDULER_MANAGED"
     assert gpu["publicly_available"] is False
     assert gpu["telemetry"]["gpu_utilization_pct"] == 0
+
+
+def test_the_server_table_reads_load_over_the_last_half_minute(service, admin):
+    now = utcnow()
+    # One collection every ten seconds; the oldest falls outside the window.
+    for seconds_ago, utilization, used in ((40, 90, 90_000), (20, 30, 20_000), (10, 50, 60_000), (0, 10, 40_000)):
+        value = observation(count=1, observed_at=now - timedelta(seconds=seconds_ago))
+        value.nodes[0].gpus[0].gpu_utilization_pct = utilization
+        value.nodes[0].gpus[0].memory_used_mib = used
+        value.nodes[0].gpus[0].memory_free_mib = 100_000 - used
+        service.ingest_observation(value)
+    data = service.snapshot(admin)["data"]
+    node = data["endpoints"][0]["resource_nodes"][0]
+    card = data["gpus"][0]["telemetry"]
+    # Agents and admission still read the latest collection.
+    assert node["usage"]["gpu_utilization_pct"] == 10
+    assert card["gpu_utilization_pct"] == 10
+    assert card["short_average"]["sample_count"] == 3
+    assert card["short_average"]["gpu_utilization_pct"] == 30
+    assert card["short_average"]["memory_used_pct"] == 40
+    assert node["short_usage"]["window_seconds"] == 30
+    assert node["short_usage"]["gpu_utilization_pct"] == 30
+    assert node["short_usage"]["gpu_memory_used_pct"] == 40
+    assert node["short_usage"]["memory_used_pct"] == 25
+    # A quiet node has nothing to average, like its `usage`.
+    assert "short_usage" not in _node_view(node)
+
+
+def test_a_short_average_always_holds_the_reading_it_ends_at():
+    from serverpilot.short_window import ShortWindow
+
+    window = ShortWindow(30)
+    now = utcnow()
+    # A process that has not seen a collection yet still answers with now.
+    assert window.average("gpu", now, {"gpu_utilization_pct": 70}) == {
+        "window_seconds": 30, "sample_count": 1, "gpu_utilization_pct": 70.0,
+    }
+    window.add("gpu", now - timedelta(seconds=30), {"gpu_utilization_pct": 0})
+    window.add("gpu", now - timedelta(seconds=15), {"gpu_utilization_pct": 40})
+    window.add("gpu", now - timedelta(seconds=15), {"gpu_utilization_pct": 99})
+    assert window.average("gpu", now, {"gpu_utilization_pct": 60})["gpu_utilization_pct"] == 50

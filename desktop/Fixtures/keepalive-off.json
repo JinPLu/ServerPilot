@@ -72,7 +72,14 @@
           "telemetry": {
             "memory_used_mib": 0,
             "gpu_utilization_pct": 0,
-            "temperature_c": 42
+            "temperature_c": 42,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 0,
+              "memory_used_mib": 0,
+              "memory_used_pct": 0.0
+            }
           },
           "processes": []
         }

@@ -365,6 +365,7 @@ def test_no_capacity_after_an_unsent_retry_is_still_an_answer(scripted) -> None:
             "message": "no cards are available",
             "retryable": True,
             "retry_after_seconds": 60,
+            "next": {"tool": "gpu_apply", "args": "repeat the same call after retry_after_seconds"},
             "details": {"reason": "cards_busy"},
         },
     }
@@ -441,3 +442,79 @@ def test_the_schema_rejects_what_an_agent_should_not_send() -> None:
     apply_schema = listed["gpu_apply"].inputSchema
     assert apply_schema["required"] == ["task"]
     assert apply_schema["properties"]["gpu_count"]["minimum"] == 1
+
+
+class Listing(Scripted):
+    """A control plane that answers gpu_status()'s task listing as well."""
+
+    def __init__(self, abandoned, *outcomes) -> None:  # type: ignore[no-untyped-def]
+        super().__init__(*outcomes)
+        self.abandoned = abandoned
+
+    def get(self, path, *, params=None):  # type: ignore[no-untyped-def]
+        assert path == "/api/v2/leases/mine"
+        return {"mine": [], "recoverable": [], "other_cards": 2, "abandoned": self.abandoned}
+
+
+FORBIDDEN = BrokerClientError(
+    "broker HTTP 403: lease_forbidden: 这是其他 Agent 的租约", code="lease_forbidden", status_code=403
+)
+
+
+def test_another_projects_abandoned_task_is_cleared_on_each_of_its_servers(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    left = {"lease_id": "l9", "task": "旧任务", "project": "old", "gpu_count": 2,
+            "servers": ["server-a", "server-b"], "quiet_minutes": 42}
+    client = Listing([left], FORBIDDEN, {"released": True}, {"released": True})
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: client)
+
+    reply = tools.gpu_release(lease_id="l9", outcome="abandoned")
+
+    assert reply == {"ok": True, "lease_id": "l9", "ended": True, "left_by": "old"}
+    assert client.posts == [
+        "/api/v2/leases/heartbeat",
+        "/api/v2/endpoints/server-a/leases/l9/release-empty",
+        "/api/v2/endpoints/server-b/leases/l9/release-empty",
+    ]
+
+
+def test_a_task_still_in_use_elsewhere_is_handed_to_a_person(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    client = Listing([], FORBIDDEN)
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: client)
+
+    reply = tools.gpu_release(lease_id="l9")
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "lease_forbidden"
+    assert reply["error"]["next"] == {"human": "Ask a person to return this task in the ServerPilot app"}
+    assert client.posts == ["/api/v2/leases/heartbeat"]
+
+
+def test_a_holder_seen_recently_says_how_long_to_wait(monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    left = {"lease_id": "l9", "task": "旧任务", "project": "old", "gpu_count": 1,
+            "servers": ["server-a"], "quiet_minutes": 11}
+    alive = BrokerClientError(
+        "broker HTTP 409: lease_holder_recently_alive: 持有者刚刚还在",
+        code="lease_holder_recently_alive", status_code=409,
+        details={"liveness_age_seconds": 30.0, "required_seconds": 600, "retry_after_seconds": 570},
+    )
+    monkeypatch.setattr(mcp_server, "_session_client", lambda actor: Listing([left], FORBIDDEN, alive))
+
+    error = tools.gpu_release(lease_id="l9")["error"]
+
+    assert error["retryable"] is True
+    assert error["retry_after_seconds"] == 570
+    assert error["next"] == {"tool": "gpu_release", "args": "repeat the same call after retry_after_seconds"}
+
+
+def test_release_without_a_name_is_an_answer_not_a_fault() -> None:
+    reply = tools.gpu_release()
+
+    assert reply["ok"] is False
+    assert reply["error"]["code"] == "task_required"
+    assert reply["error"]["next"] == {"tool": "gpu_status", "args": {}}
+
+
+def test_a_granted_apply_says_what_to_do_next(scripted) -> None:  # type: ignore[no-untyped-def]
+    scripted(LEASE)
+    reply = tools.gpu_apply(task="t", duration_seconds=60)
+    assert "gpu_status(task)" in reply["next"] and "gpu_release(task" in reply["next"]

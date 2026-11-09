@@ -33,6 +33,11 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // The server table keeps what a row cannot print — the task list, a
+        // card's readings — one hover away; at AppKit's default delay that
+        // reads as no answer.  A registered default, so a person's own
+        // setting still wins.
+        UserDefaults.standard.register(defaults: ["NSInitialToolTipDelay": 400])
         NSApp.setActivationPolicy(.regular)
         NSApp.appearance = NSAppearance(named: .aqua)
         // Hairlines and secondary text read the Increase Contrast flag when

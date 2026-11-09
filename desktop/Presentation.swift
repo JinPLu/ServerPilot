@@ -168,11 +168,16 @@ func endpointRequiresAttention(endpoint: EndpointRecord, gpus: [GPURecord]) -> B
 /// neutral, so a row of healthy machines reads as calm rather than as green.
 func metricColor(_ metric: ResourceMetric, _ fraction: Double?) -> Color {
     guard let fraction else { return DesignTokens.mutedInk }
-    switch metric.pressure(fraction) {
-    case .normal: return DesignTokens.meterRoom
-    case .warning: return DesignTokens.nearFullCard
+    return pressureColor(metric.pressure(fraction))
+}
+
+/// The one palette for a reading, shared by every bar and every card's square.
+func pressureColor(_ pressure: MetricPressure) -> Color {
+    switch pressure {
+    case .normal: DesignTokens.meterRoom
+    case .warning: DesignTokens.nearFullCard
     // Not red, which is kept for a fault: a full card is a reading.
-    case .critical: return DesignTokens.meterFull
+    case .critical: DesignTokens.meterFull
     }
 }
 

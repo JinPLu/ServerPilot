@@ -224,6 +224,13 @@
         "gpu_memory_used_pct": 87.99641927083333,
         "cpu_utilization_pct": 55,
         "memory_used_pct": 71.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
+        "gpu_utilization_pct": 97.0,
+        "gpu_memory_used_pct": 87.99641927083333,
+        "cpu_utilization_pct": 55,
+        "memory_used_pct": 71.0
        }
       }
      ]
@@ -370,6 +377,13 @@
         "memory_used_pct": 64.0
        },
        "last_usage": {
+        "gpu_utilization_pct": 11.875,
+        "gpu_memory_used_pct": 8.87451171875,
+        "cpu_utilization_pct": 92,
+        "memory_used_pct": 64.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
         "gpu_utilization_pct": 11.875,
         "gpu_memory_used_pct": 8.87451171875,
         "cpu_utilization_pct": 92,
@@ -524,6 +538,13 @@
         "gpu_memory_used_pct": 80.0,
         "cpu_utilization_pct": 4,
         "memory_used_pct": 9.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
+        "gpu_utilization_pct": 65.0,
+        "gpu_memory_used_pct": 80.0,
+        "cpu_utilization_pct": 4,
+        "memory_used_pct": 9.0
        }
       }
      ]
@@ -649,7 +670,8 @@
         "gpu_memory_used_pct": 22.0,
         "cpu_utilization_pct": 6.0,
         "memory_used_pct": 14.0
-       }
+       },
+       "short_usage": null
       }
      ]
     },
@@ -795,6 +817,13 @@
         "memory_used_pct": 15.0
        },
        "last_usage": {
+        "gpu_utilization_pct": 0.0,
+        "gpu_memory_used_pct": 3.9990234375,
+        "cpu_utilization_pct": 2,
+        "memory_used_pct": 15.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
         "gpu_utilization_pct": 0.0,
         "gpu_memory_used_pct": 3.9990234375,
         "cpu_utilization_pct": 2,
@@ -949,6 +978,13 @@
         "gpu_memory_used_pct": 54.24957275390625,
         "cpu_utilization_pct": 41,
         "memory_used_pct": 38.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
+        "gpu_utilization_pct": 65.0,
+        "gpu_memory_used_pct": 54.24957275390625,
+        "cpu_utilization_pct": 41,
+        "memory_used_pct": 38.0
        }
       }
      ]
@@ -1099,6 +1135,13 @@
         "gpu_memory_used_pct": 0.999755859375,
         "cpu_utilization_pct": 6,
         "memory_used_pct": 12.0
+       },
+       "short_usage": {
+        "window_seconds": 30,
+        "gpu_utilization_pct": 0.0,
+        "gpu_memory_used_pct": 0.999755859375,
+        "cpu_utilization_pct": 6,
+        "memory_used_pct": 12.0
        }
       }
      ]
@@ -1200,6 +1243,13 @@
        "gpu_utilization_pct": 49.0,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 98,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -1523,6 +1573,13 @@
        "gpu_utilization_pct": 48.5,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 97,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -1846,6 +1903,13 @@
        "gpu_utilization_pct": 48.0,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 96,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -2169,6 +2233,13 @@
        "gpu_utilization_pct": 49.5,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 99,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -2492,6 +2563,13 @@
        "gpu_utilization_pct": 48.5,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 97,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -2815,6 +2893,13 @@
        "gpu_utilization_pct": 47.5,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 95,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -3138,6 +3223,13 @@
        "gpu_utilization_pct": 49.0,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 98,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -3461,6 +3553,13 @@
        "gpu_utilization_pct": 48.0,
        "memory_utilization_pct": 44.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 96,
+       "memory_used_mib": 21626,
+       "memory_used_pct": 88.0
       }
      },
      "processes": [
@@ -3772,6 +3871,13 @@
        "gpu_utilization_pct": 30.5,
        "memory_utilization_pct": 20.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 61,
+       "memory_used_mib": 9830,
+       "memory_used_pct": 40.0
       }
      },
      "processes": [
@@ -3842,6 +3948,13 @@
        "gpu_utilization_pct": 17.0,
        "memory_utilization_pct": 15.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 34,
+       "memory_used_mib": 7618,
+       "memory_used_pct": 31.0
       }
      },
      "processes": [
@@ -3912,6 +4025,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -3969,6 +4089,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4026,6 +4153,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4083,6 +4217,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4140,6 +4281,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4197,6 +4345,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4254,6 +4409,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4311,6 +4473,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4368,6 +4537,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4425,6 +4601,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4482,6 +4665,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4539,6 +4729,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4596,6 +4793,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4653,6 +4857,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 65,
+       "memory_used_mib": 19660,
+       "memory_used_pct": 80.0
       }
      },
      "processes": [],
@@ -4710,6 +4921,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4767,6 +4985,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4824,6 +5049,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4881,6 +5113,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4938,6 +5177,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -4995,6 +5241,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -5052,6 +5305,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -5109,6 +5369,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 0,
+       "memory_used_pct": 0.0
       }
      },
      "processes": [],
@@ -5178,6 +5445,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -5474,6 +5748,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -5770,6 +6051,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -6066,6 +6354,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -6362,6 +6657,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -6658,6 +6960,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -6954,6 +7263,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -7250,6 +7566,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 2.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 3276,
+       "memory_used_pct": 4.0
       }
      },
      "processes": [],
@@ -7546,6 +7869,13 @@
        "gpu_utilization_pct": 46.0,
        "memory_utilization_pct": 36.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 92,
+       "memory_used_mib": 58982,
+       "memory_used_pct": 72.0
       }
      },
      "processes": [
@@ -7839,6 +8169,13 @@
        "gpu_utilization_pct": 44.0,
        "memory_utilization_pct": 35.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 88,
+       "memory_used_mib": 58163,
+       "memory_used_pct": 71.0
       }
      },
      "processes": [
@@ -8132,6 +8469,13 @@
        "gpu_utilization_pct": 45.5,
        "memory_utilization_pct": 35.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 91,
+       "memory_used_mib": 57344,
+       "memory_used_pct": 70.0
       }
      },
      "processes": [
@@ -8425,6 +8769,13 @@
        "gpu_utilization_pct": 39.5,
        "memory_utilization_pct": 37.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 79,
+       "memory_used_mib": 60620,
+       "memory_used_pct": 74.0
       }
      },
      "processes": [
@@ -8718,6 +9069,13 @@
        "gpu_utilization_pct": 42.0,
        "memory_utilization_pct": 36.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 84,
+       "memory_used_mib": 59801,
+       "memory_used_pct": 73.0
       }
      },
      "processes": [
@@ -9011,6 +9369,13 @@
        "gpu_utilization_pct": 43.0,
        "memory_utilization_pct": 36.0,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 86,
+       "memory_used_mib": 58982,
+       "memory_used_pct": 72.0
       }
      },
      "processes": [
@@ -9292,6 +9657,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9349,6 +9721,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9406,6 +9785,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9463,6 +9849,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9520,6 +9913,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9577,6 +9977,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9634,6 +10041,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9691,6 +10105,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9748,6 +10169,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],
@@ -9805,6 +10233,13 @@
        "gpu_utilization_pct": 0.0,
        "memory_utilization_pct": 0.5,
        "temperature_c": 48.0
+      },
+      "short_average": {
+       "window_seconds": 30,
+       "sample_count": 1,
+       "gpu_utilization_pct": 0,
+       "memory_used_mib": 819,
+       "memory_used_pct": 1.0
       }
      },
      "processes": [],

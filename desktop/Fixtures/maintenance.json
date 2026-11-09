@@ -98,7 +98,14 @@
           "telemetry": {
             "memory_used_mib": 2048,
             "gpu_utilization_pct": 6,
-            "temperature_c": 35
+            "temperature_c": 35,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 6,
+              "memory_used_mib": 2048,
+              "memory_used_pct": 2.5
+            }
           },
           "processes": []
         },
@@ -118,7 +125,14 @@
           "telemetry": {
             "memory_used_mib": 2560,
             "gpu_utilization_pct": 11,
-            "temperature_c": 36
+            "temperature_c": 36,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 11,
+              "memory_used_mib": 2560,
+              "memory_used_pct": 3.12
+            }
           },
           "processes": [],
           "state_reason": "exclusive lease active",
@@ -143,7 +157,14 @@
           "telemetry": {
             "memory_used_mib": 3072,
             "gpu_utilization_pct": 16,
-            "temperature_c": 37
+            "temperature_c": 37,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 16,
+              "memory_used_mib": 3072,
+              "memory_used_pct": 3.75
+            }
           },
           "processes": [],
           "state_reason": "exclusive lease active",
@@ -168,7 +189,14 @@
           "telemetry": {
             "memory_used_mib": 3584,
             "gpu_utilization_pct": 21,
-            "temperature_c": 38
+            "temperature_c": 38,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 21,
+              "memory_used_mib": 3584,
+              "memory_used_pct": 4.38
+            }
           },
           "processes": [
             {
@@ -199,7 +227,14 @@
           "telemetry": {
             "memory_used_mib": 4096,
             "gpu_utilization_pct": 26,
-            "temperature_c": 39
+            "temperature_c": 39,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 26,
+              "memory_used_mib": 4096,
+              "memory_used_pct": 5.0
+            }
           },
           "processes": [
             {
@@ -226,7 +261,14 @@
           "telemetry": {
             "memory_used_mib": 4608,
             "gpu_utilization_pct": 31,
-            "temperature_c": 40
+            "temperature_c": 40,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 31,
+              "memory_used_mib": 4608,
+              "memory_used_pct": 5.62
+            }
           },
           "processes": [],
           "state_reason": "reservation fixture-state is active"
@@ -247,7 +289,14 @@
           "telemetry": {
             "memory_used_mib": 5120,
             "gpu_utilization_pct": 36,
-            "temperature_c": 41
+            "temperature_c": 41,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 36,
+              "memory_used_mib": 5120,
+              "memory_used_pct": 6.25
+            }
           },
           "processes": [],
           "state_reason": "maintenance window"
@@ -268,7 +317,14 @@
           "telemetry": {
             "memory_used_mib": 2048,
             "gpu_utilization_pct": 6,
-            "temperature_c": 35
+            "temperature_c": 35,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 6,
+              "memory_used_mib": 2048,
+              "memory_used_pct": 2.5
+            }
           },
           "processes": [],
           "state_reason": "no fresh telemetry after service start"
@@ -289,7 +345,14 @@
           "telemetry": {
             "memory_used_mib": 2560,
             "gpu_utilization_pct": 11,
-            "temperature_c": 36
+            "temperature_c": 36,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 11,
+              "memory_used_mib": 2560,
+              "memory_used_pct": 3.12
+            }
           },
           "processes": [],
           "state_reason": "telemetry age 94 exceeds stale threshold"
@@ -310,7 +373,14 @@
           "telemetry": {
             "memory_used_mib": 3072,
             "gpu_utilization_pct": 16,
-            "temperature_c": 37
+            "temperature_c": 37,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 16,
+              "memory_used_mib": 3072,
+              "memory_used_pct": 3.75
+            }
           },
           "processes": [],
           "state_reason": "health probe failed"
@@ -331,7 +401,14 @@
           "telemetry": {
             "memory_used_mib": 3584,
             "gpu_utilization_pct": 21,
-            "temperature_c": 38
+            "temperature_c": 38,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 21,
+              "memory_used_mib": 3584,
+              "memory_used_pct": 4.38
+            }
           },
           "processes": [
             {
@@ -362,7 +439,14 @@
           "telemetry": {
             "memory_used_mib": 4096,
             "gpu_utilization_pct": 26,
-            "temperature_c": 39
+            "temperature_c": 39,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 26,
+              "memory_used_mib": 4096,
+              "memory_used_pct": 5.0
+            }
           },
           "processes": [
             {

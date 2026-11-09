@@ -6,6 +6,7 @@ from datetime import timedelta
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import select
 from typer.testing import CliRunner
 
 from serverpilot import API_CAPABILITIES, mcp_server
@@ -14,7 +15,7 @@ from serverpilot.api import RateLimiter, RequestBodyLimitMiddleware
 from serverpilot.cli import app as cli_app
 from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.mcp_server import ROUTINE_MCP_TOOL_NAMES, mcp
-from serverpilot.models import GPUDevice
+from serverpilot.models import AuditEvent, GPUDevice
 from serverpilot.schemas import RequestCreate
 from serverpilot.service import BrokerError
 from serverpilot.timeutil import utcnow
@@ -1045,3 +1046,60 @@ def test_a_registered_host_can_join_a_group_without_the_desktop_app(build_app, i
 
     assert created.status_code == 200
     assert created.json()["endpoint"]["server_group_id"] == "lab-group"
+
+
+def test_returning_a_task_in_the_app_ends_its_processes_before_the_cards_go(
+    build_app, monkeypatch
+) -> None:
+    class QuietCollector:
+        control_dir = None
+        collected: list[str] = []
+
+        async def collect_selected(self, service, endpoints):  # type: ignore[no-untyped-def]
+            self.collected += [endpoint.id for endpoint in endpoints]
+            return {}
+
+    collector = QuietCollector()
+    app = build_app("operator-release-stops", collector=collector)
+    service = app.state.service
+    service.ingest_observation(observation(count=1))
+    owner = service.local_actor("lease-owner")
+    claimed = service.create_request(
+        owner,
+        RequestCreate.model_validate({
+            "project_id": "project-a", "task_ref": "仍在跑的任务", "purpose": "仍在跑的任务",
+            "duration_seconds": 3600, "constraints": {"gpu_count": 1, "placement": "pack"},
+        }),
+        idempotency_key="operator-release-stops-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+    gpu_uuid = service.snapshot(owner)["data"]["gpus"][0]["gpu_uuid"]
+    service.ingest_observation(observation(count=1, processes=[process_for_gpu(gpu_uuid, pid=4242)]))
+
+    asked: list[tuple[str, list[int]]] = []
+
+    async def fake_stop(endpoint, targets, *, run):  # type: ignore[no-untyped-def]
+        asked.append((endpoint.id, [target.pid for target in targets]))
+        return [{"pid": target.pid, "executable": target.executable, "result": "stopped", "detail": None}
+                for target in targets]
+
+    monkeypatch.setattr("serverpilot.api.stop_processes", fake_stop)
+    released = TestClient(app).post(
+        f"/api/v2/operator/leases/{lease_id}/release",
+        headers={"X-ServerPilot-Actor": "human", "X-ServerPilot-Client": "desktop-app",
+                 "Idempotency-Key": "operator-release-stops"},
+        json={"reason": "desktop release"},
+    )
+
+    assert released.status_code == 200
+    body = released.json()
+    assert body["lease"]["state"] == "RELEASED"
+    assert asked == [("endpoint-a", [4242])]
+    assert [(item["pid"], item["result"], item["server_id"]) for item in body["stopped_processes"]] == [
+        (4242, "stopped", "endpoint-a")
+    ]
+    assert collector.collected == ["endpoint-a"]
+    stopped_events = service._read(lambda session: session.scalars(
+        select(AuditEvent).where(AuditEvent.action == "lease.processes_stopped")
+    ).all())
+    assert [event.resource_id for event in stopped_events] == [lease_id]

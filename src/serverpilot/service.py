@@ -74,6 +74,7 @@ from serverpilot.schemas import (
     ServerGroupCreate,
     ServerGroupUpdate,
 )
+from serverpilot.short_window import ShortWindow
 from serverpilot.timeutil import ensure_utc, json_dump, json_load, utcnow
 
 ACTIVE_LEASE_STATES = {"HELD", "ACTIVE", "ORPHANED_BUSY", "CONFLICT"}
@@ -103,6 +104,9 @@ RETRY_MAX_SECONDS = 1800
 LEASE_SCOPED_ALERT_TYPES = {"lease_process_conflict", "orphaned_busy", "idle_lease"}
 TELEMETRY_HISTORY_INTERVAL_SECONDS = 60
 TELEMETRY_RECENT_AVERAGE_WINDOW_SECONDS = 10 * 60
+# What the App's server table shows: load over the last half minute, not one
+# collection. Agents keep the ten-minute window above; this one is for reading.
+SHORT_AVERAGE_WINDOW_SECONDS = 30
 FLEET_TREND_WINDOW_SECONDS = retention.TELEMETRY_SECONDS
 FLEET_TREND_BUCKET_SECONDS = 30 * 60
 SERVER_TREND_WINDOW_SECONDS = 60 * 60
@@ -238,6 +242,7 @@ class BrokerService:
         # already publishes, kept inside the process instead of being fought
         # out in SQLite's busy handler by whichever threads happen to arrive.
         self._domain_executor: ThreadPoolExecutor | None = None
+        self._short_window = ShortWindow(SHORT_AVERAGE_WINDOW_SECONDS)
         self._provider_operation_locks: dict[str, asyncio.Lock] = {}
         self._connection_locks: dict[str, asyncio.Lock] = {}
 
@@ -2399,6 +2404,22 @@ class BrokerService:
             "temperature_c": average("temperature_c"),
         }
 
+    def _short_telemetry_average(
+        self, gpu: GPUDevice, telemetry: TelemetryCurrent
+    ) -> dict[str, Any]:
+        """One card's load over the short window that ends at its current reading."""
+
+        average = self._short_window.average(
+            ("gpu", gpu.id),
+            _as_utc(telemetry.observed_at) or utcnow(),
+            {"gpu_utilization_pct": telemetry.gpu_utilization_pct, "memory_used_mib": telemetry.memory_used_mib},
+        )
+        used = average["memory_used_mib"]
+        average["memory_used_pct"] = (
+            round(used * 100 / gpu.total_vram_mib, 2) if used is not None and gpu.total_vram_mib > 0 else None
+        )
+        return average
+
     @staticmethod
     def _recent_host_telemetry_average(
         samples: list[EndpointTelemetryCurrent | EndpointTelemetrySnapshot],
@@ -4112,8 +4133,50 @@ class BrokerService:
                 "last_attempt_at": _iso(_as_utc(state.last_attempt_at)) if state else None,
                 "error_code": state.error_code if state else None, "message": state.message if state else None,
                 "host_telemetry": self._host_telemetry_dict(host),
-                "gpu_ids": [gpu["id"] for gpu in cards], "usage": usage, "last_usage": last_usage})
+                "gpu_ids": [gpu["id"] for gpu in cards], "usage": usage, "last_usage": last_usage,
+                "short_usage": self._short_node_usage(endpoint, node_id, host, sampled, gpu_complete)
+                if fresh else None})
         return result
+
+    def _short_node_usage(
+        self,
+        endpoint: Endpoint,
+        node_id: str,
+        host: EndpointTelemetryCurrent | None,
+        sampled: list[dict[str, Any]],
+        gpu_complete: bool,
+    ) -> dict[str, Any]:
+        """`usage` over the short window: what the server table prints and sorts by."""
+
+        cards = [gpu["telemetry"]["short_average"] for gpu in sampled]
+        utils = [card["gpu_utilization_pct"] for card in cards]
+        used = [card["memory_used_mib"] for card in cards]
+        total_vram = sum(gpu["total_vram_mib"] for gpu in sampled)
+        host_average = (
+            self._short_window.average(
+                ("host", endpoint.id, node_id),
+                _as_utc(host.observed_at) or utcnow(),
+                {
+                    "cpu_utilization_pct": host.cpu_utilization_pct,
+                    "memory_used_pct": self._host_memory_used_pct(host),
+                },
+            )
+            if host
+            else {}
+        )
+        return {
+            "window_seconds": self._short_window.seconds,
+            "gpu_utilization_pct": (
+                round(sum(utils) / len(utils), 2) if gpu_complete and all(x is not None for x in utils) else None
+            ),
+            "gpu_memory_used_pct": (
+                round(100 * sum(used) / total_vram, 2)
+                if gpu_complete and total_vram and all(x is not None for x in used)
+                else None
+            ),
+            "cpu_utilization_pct": host_average.get("cpu_utilization_pct"),
+            "memory_used_pct": host_average.get("memory_used_pct"),
+        }
 
     def snapshot(
         self,
@@ -4435,6 +4498,7 @@ class BrokerService:
                         gpu,
                         recent_telemetry_samples_by_gpu[gpu.id],
                     )
+                    telemetry_payload["short_average"] = self._short_telemetry_average(gpu, telemetry)
                 processes = processes_by_gpu[gpu.id]
                 lease = lease_by_gpu.get(gpu.id)
                 if telemetry_payload is not None and lease is not None and lease.kind == "workload":
@@ -5679,6 +5743,14 @@ class BrokerService:
             host_telemetry.memory_limit_mib = observation.host.memory_limit_mib
             host_telemetry.memory_current_mib = observation.host.memory_current_mib
             host_telemetry.provider = provider
+        self._short_window.add(
+            ("host", endpoint.id, observation.node_id),
+            observed_at,
+            {
+                "cpu_utilization_pct": host_telemetry.cpu_utilization_pct,
+                "memory_used_pct": self._host_memory_used_pct(host_telemetry),
+            },
+        )
         gpu_ids = list(observed_gpu_ids)
         existing_gpus = {
             gpu.id: gpu
@@ -5760,6 +5832,11 @@ class BrokerService:
                 current.pstate = sample.pstate
                 current.health = sample.health
                 current.provider = provider
+            self._short_window.add(
+                ("gpu", gpu_id),
+                observed_at,
+                {"gpu_utilization_pct": sample.gpu_utilization_pct, "memory_used_mib": sample.memory_used_mib},
+            )
             last_history_at = latest_history.get(gpu_id)
             if (
                 last_history_at is None
@@ -6773,14 +6850,21 @@ class BrokerService:
         ]
 
     def agent_leases(self, actor: ActorContext, project_id: str | None) -> dict[str, Any]:
-        """A session's own leases, what it could recover, and a count of the rest."""
+        """A session's own leases, what it could recover, and a count of the rest.
+
+        ``abandoned`` names the other projects' tasks any agent may clear: the
+        ones a person could clear in the App, minus any on a server that does
+        not answer, where only a person may settle the ledger.
+        """
 
         def operation(session: Session) -> dict[str, Any]:
+            now = utcnow()
             leases = session.scalars(select(Lease).where(
                 Lease.state.in_(ACTIVE_LEASE_STATES), Lease.kind == "workload"
             ).order_by(Lease.issued_at)).all()
             mine: list[dict[str, Any]] = []
             recoverable: list[dict[str, Any]] = []
+            abandoned: list[dict[str, Any]] = []
             other_cards = 0
             for lease in leases:
                 row = {
@@ -6798,9 +6882,38 @@ class BrokerService:
                     recoverable.append(row)
                 else:
                     other_cards += row["gpu_count"]
-            return {"mine": mine, "recoverable": recoverable, "other_cards": other_cards}
+                    if (left := self._left_by_holder(session, lease, now)) is not None:
+                        abandoned.append({**row, **left})
+            return {"mine": mine, "recoverable": recoverable, "other_cards": other_cards, "abandoned": abandoned}
 
         return self._read(operation)
+
+    def _left_by_holder(self, session: Session, lease: Lease, now: datetime) -> dict[str, Any] | None:
+        """Where a task's holder has gone and left its cards empty, as last observed.
+
+        The same verdict the App's release button reads. Clearing re-collects
+        each server before it believes the cards are empty, so this listing is
+        a pointer, not the proof.
+        """
+
+        resources = session.scalars(select(LeaseResource).where(
+            LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+        )).all()
+        servers = sorted({session.get(GPUDevice, resource.gpu_id).endpoint_id for resource in resources})
+        if not servers or any(self._endpoint_is_unreachable(session, server, now) for server in servers):
+            return None
+        verdict = self._manual_release_verdict(
+            session,
+            lease,
+            resources,
+            {resource.gpu_id: self._current_processes(session, resource.gpu_id, now) for resource in resources},
+            now,
+            endpoint_unreachable=False,
+        )
+        if not verdict["allowed"]:
+            return None
+        quiet = self._lease_liveness_age_seconds(session, lease, resources, now)
+        return {"servers": servers, "quiet_minutes": int(quiet // 60)}
 
     def capacity_groups(self, actor: ActorContext) -> list[dict[str, Any]]:
         """Where work can go, from the snapshot the App reads.
@@ -8181,6 +8294,56 @@ class BrokerService:
 
         return self._write(operation)
 
+    def lease_process_targets(self, lease_id: str) -> dict[str, list[dict[str, Any]]]:
+        """What returning this task in the App ends, by server.
+
+        The processes the collector last saw on the cards the task still
+        holds, each with the identity it must still have on the server before
+        anything is sent to it. A keepalive lease is ServerPilot's own hold and
+        is never a task to end.
+        """
+
+        def operation(session: Session) -> dict[str, list[dict[str, Any]]]:
+            lease = session.get(Lease, lease_id)
+            if lease is None or lease.kind != "workload":
+                return {}
+            now = utcnow()
+            by_server: dict[str, dict[tuple[int, str], dict[str, Any]]] = defaultdict(dict)
+            for resource in session.scalars(select(LeaseResource).where(
+                LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+            )).all():
+                gpu = session.get(GPUDevice, resource.gpu_id)
+                for process in self._current_processes(session, resource.gpu_id, now):
+                    by_server[gpu.endpoint_id][(process.pid, process.boot_id)] = {
+                        "pid": process.pid,
+                        "boot_id": process.boot_id,
+                        "started_at": _as_utc(process.process_started_at),
+                        "executable": process.executable,
+                        "node_id": gpu.node_id,
+                    }
+            return {server: list(processes.values()) for server, processes in by_server.items()}
+
+        return self._read(operation)
+
+    def record_process_stop(
+        self, actor: ActorContext, lease_id: str, outcomes: list[dict[str, Any]]
+    ) -> None:
+        """Keep what returning a task did to its processes, apart from the release."""
+
+        def operation(session: Session) -> None:
+            self._audit(
+                session,
+                actor_id=actor.id,
+                action="lease.processes_stopped",
+                resource_type="lease",
+                resource_id=lease_id,
+                result="success" if all(item["result"] != "failed" for item in outcomes) else "partial",
+                summary={"processes": outcomes},
+                now=utcnow(),
+            )
+
+        self._write(operation)
+
     def release_lease(
         self,
         actor: ActorContext,
@@ -8606,6 +8769,7 @@ class BrokerService:
                 "details": {
                     "liveness_age_seconds": round(age, 1),
                     "required_seconds": alert_after,
+                    "retry_after_seconds": max(1, int(alert_after - age)),
                 },
             }
         return {"allowed": True, "blocked_reason": None, "message": None, "details": {}}
@@ -8692,6 +8856,16 @@ class BrokerService:
 
             now = utcnow()
             unreachable = self._endpoint_is_unreachable(session, endpoint_id, now)
+            if unreachable and actor.session_id is not None:
+                # A person may settle the ledger for a machine that is gone; an
+                # agent clears a task only on proof that its cards are empty,
+                # and a machine that does not answer gives none.
+                raise BrokerError(
+                    "conflict_observation_stale",
+                    "服务器连不上，无法证明卡上没有进程；请在 ServerPilot App 里由人处理",
+                    status_code=409,
+                    details={"endpoint_unreachable": True},
+                )
             cutoff = now - timedelta(seconds=self.collector.stale_after_seconds)
             host = session.get(EndpointTelemetryCurrent, (endpoint_id, "self"))
             provider_state = session.scalar(
@@ -8790,7 +8964,8 @@ class BrokerService:
                 before=before,
                 after=self._lease_dict(session, lease),
                 summary={
-                    "source": "endpoint_operator",
+                    "source": "endpoint_operator" if actor.session_id is None else "agent",
+                    "agent_project": actor.session_project,
                     "endpoint_id": endpoint_id,
                     "endpoint_unreachable": unreachable,
                     "lease_kind": lease.kind,

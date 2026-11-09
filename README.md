@@ -280,8 +280,11 @@ new selector.
 ## 🛡️ Boundaries and security
 
 - ServerPilot manages the lifecycle of its own occupancy processes and of
-  plugin-side allocations. It does not start, stop, migrate, or preempt your
-  workloads. Keepalive starts and stops a per-GPU CUDA process on the remote
+  plugin-side allocations. It does not start, migrate, or preempt your
+  workloads. The one time it ends a process of yours is when you return a task
+  in the App and confirm: after checking each one, it stops the processes on
+  that task's cards that belong to the SSH login account (SIGTERM, then
+  SIGKILL ten seconds later). Keepalive starts and stops a per-GPU CUDA process on the remote
   host holding about 80% of that card's VRAM, and `gpu_apply` stops it before
   handing the card over. A plugin that declares `apply` / `release` performs the
   matching cluster allocation on request and release.

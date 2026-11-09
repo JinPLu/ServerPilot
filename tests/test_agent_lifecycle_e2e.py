@@ -13,7 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from serverpilot.models import GPUDevice, Lease, LeaseResource
-from serverpilot.service import ActorContext
+from serverpilot.service import ActorContext, BrokerError
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation, process_for_gpu, tools
 
@@ -300,3 +300,48 @@ def test_clearing_one_server_leaves_the_rest_of_a_lease_working(routine) -> None
     lease = routine._read(lambda session: session.get(Lease, lease_id))
     assert lease.state in {"HELD", "ACTIVE"}
     assert lease.resource_epoch == 1
+
+
+OTHER_AGENT = ActorContext("codex", "allocator", frozenset(), "other-session", session_project="other-project")
+
+
+def test_another_projects_quiet_empty_task_is_listed_for_any_agent(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(task="遗留任务", duration_seconds=3600)["lease_id"]
+
+    # Its holder was heard from a moment ago: nobody else's to clear.
+    routine.ingest_observation(observation(count=1))
+    assert routine.agent_leases(OTHER_AGENT, "other-project")["abandoned"] == []
+
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_alert_seconds + 5)
+    routine.ingest_observation(observation(count=1))
+    listed = routine.agent_leases(OTHER_AGENT, "other-project")["abandoned"]
+    assert [row["lease_id"] for row in listed] == [lease_id]
+    assert listed[0]["servers"] == ["endpoint-a"]
+    assert listed[0]["quiet_minutes"] >= routine.inventory.idle_lease_alert_seconds // 60
+
+    # A process on its card means somebody is still there.
+    routine.ingest_observation(_running_on_first_card(routine, lease_id))
+    assert routine.agent_leases(OTHER_AGENT, "other-project")["abandoned"] == []
+
+
+def test_only_a_person_settles_a_task_on_a_server_that_does_not_answer(routine, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=1))
+    lease_id = tools.gpu_apply(task="连不上", duration_seconds=3600)["lease_id"]
+    _age_idle(routine, lease_id, routine.inventory.idle_lease_alert_seconds + 5)
+    monkeypatch.setattr(routine, "_endpoint_is_unreachable", lambda *args: True)
+
+    with pytest.raises(BrokerError) as refused:
+        routine.release_empty_conflicted_lease(
+            OTHER_AGENT, "endpoint-a", lease_id, observation_not_before=utcnow(), idempotency_key="agent-clear"
+        )
+    assert refused.value.code == "conflict_observation_stale"
+    assert refused.value.details == {"endpoint_unreachable": True}
+    assert routine.agent_leases(OTHER_AGENT, "other-project")["abandoned"] == []
+
+    # The App: the same local actor, with no agent session behind it.
+    person = ActorContext("claude-code", "operator", frozenset())
+    released = routine.release_empty_conflicted_lease(
+        person, "endpoint-a", lease_id, observation_not_before=utcnow(), idempotency_key="person-clear"
+    )
+    assert released["released"] is True

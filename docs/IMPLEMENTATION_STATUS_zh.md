@@ -1,9 +1,24 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-11-07（Asia/Taipei）
+更新时间：2026-11-10（Asia/Taipei）
 
 当前包装版本为 `5.3.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 归还即结束进程、Agent 清理无人任务、30 秒平均与服务器页整理（2026-11-10，Unreleased）
+
+用户一次提出七点：MCP 对能力较弱的 Agent 缺少引导；新开的 Agent 清理不了废弃项目留下的任务；App 里“归还”只注销任务、不结束进程；菜单栏弹窗显示异常；服务器页用量是瞬时值；方块与指标条颜色不统一；服务器页列宽与对齐不好、任务列悬停反应慢。三处方向由用户选定，原话与理由见[决定记录](teamwork/records/return-ends-processes-and-agent-cleanup.md)。
+
+- 归还即结束进程：`/api/v2/operator/leases/{id}/release` 先读出任务卡上最近观测到的进程（`lease_process_targets`），按服务器交给 `process_stop.py`：在服务器上核对 boot id、`ps lstart` 启动时间、进程 uid 与登录账号 uid 一致，才发 SIGTERM，10 秒后仍在的发 SIGKILL；集群节点上的进程跳过。结果单独审计为 `lease.processes_stopped`，随后照常注销任务并重新采集；连不上时任务照样注销，结果写明未能结束。SSH 走与采集共用的 `run_sealed_ssh`。App 确认框逐个列出进程，按钮为 `归还并结束进程`。
+- Agent 清理：`/api/v2/leases/mine` 新增 `abandoned`，复用 App“释放空闲占用”的同一判据 `_manual_release_verdict`（持有者 `idle_lease_alert_seconds` 无存活迹象、卡上无进程），只列服务器连得上的。`gpu_release(lease_id)` 遇到其他项目的任务时，对每台服务器走 `release-empty`（现场采集后证明为空）；Agent 会话不享有服务器失联时的豁免，失联时拒绝并请人处理。审计记 `source=agent` 与发起项目。
+- MCP 引导：契约补一行调用顺序、`next.human`、`abandoned`，预算 2300 → 2600（理由写在 `agent_contract.py`）；更多拒绝原因带 `next`；申请成功的回复带 `next`；`gpu_release` 不给 task/lease_id 时返回结构化 `task_required`；补齐参数说明。
+- 30 秒平均：历史每分钟只存一点，30 秒窗口不够用，所以后台在内存里保留每张卡、每台主机最近的采集值（`short_window.py`），快照时算出每卡 `short_average` 与节点 `short_usage`，平均总包含当前读数，重启后先只有一点。`usage`、10 分钟平均和 Agent 看到的数值不变。App 的指标条、排序、方块都改读 30 秒平均；夹具补了这两个字段（只新增，原值不变）。
+- 配色：方块分档改用 `ResourceMetric.pressure`，颜色与指标条同出 `pressureColor`，新增“已满”档。
+- 菜单栏弹窗：根因是弹窗沿用菜单栏外观，深色模式下 `labelColor` 变白而卡片是固定白底；弹窗改为固定浅色外观。用临时程序复现：不设外观时只剩橙色标题，设为浅色后正常。
+- 服务器页：服务器列 200–280 pt，余下宽度给任务列；数字与图形列的表头和内容居中。任务列悬停慢的原因是整行与任务格两层提示重叠：整行提示移到服务器格，App 注册 `NSInitialToolTipDelay = 400`。
+
+验证：Python 全量、Ruff、`mcp policy --check`、Swift 测试（含方块分档、30 秒平均解码、归还结果汇总）、构建通过；新增 `test_process_stop.py`（核对身份、TERM 后 KILL、重启、SSH 失败）、归还接口测试（先结束进程、审计、注销、重新采集）、Agent 清理与失联拒绝测试、30 秒窗口测试；夹具截图核对列宽、居中与配色。
+未验证：真实服务器上结束进程（只用假服务器测过命令与核对逻辑）；真实环境的 Agent 清理；悬停延迟在真实鼠标下的效果（实测时屏幕被其他应用的全屏窗口覆盖，模拟的鼠标事件到不了 App，已停止测试）；菜单栏弹窗在真实 App 里的样子（这个系统上菜单栏图标不归 App 窗口管理，只能用临时程序复现）。
 
 ## 侧边栏建组并勾选成员，点击不再留焦点框（2026-11-07，5.3.0）
 

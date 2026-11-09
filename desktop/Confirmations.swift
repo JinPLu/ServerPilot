@@ -34,14 +34,31 @@ enum ServiceProbeResult {
 
 @discardableResult
 
-func confirmLeaseRelease(_ lease: LeaseRecord) -> Bool {
+/// Returning a task ends it: name the processes that will be stopped, and how.
+func confirmLeaseRelease(_ lease: LeaseRecord, processes: [GPUProcessRecord]) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
-    alert.informativeText = lease.allocations.contains { $0.releaseGranularity == "allocation" }
-        ? "将归还整个资源分配，提供方可能终止其中仍在运行的程序。请先确认任务已结束。"
-        : "请先确认任务已结束。归还不会停止任务。"
-    alert.addButton(withTitle: "归还")
+    if lease.allocations.contains(where: { $0.releaseGranularity == "allocation" }) {
+        alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
+        alert.informativeText = "将归还整个资源分配，提供方可能终止其中仍在运行的程序。请先确认任务已结束。"
+        alert.addButton(withTitle: "归还")
+    } else if processes.isEmpty {
+        alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
+        alert.informativeText = "这个任务的卡上没有看到运行中的进程。"
+        alert.addButton(withTitle: "归还")
+    } else {
+        alert.messageText = "归还 \(lease.gpuCount) 张 GPU，并结束 \(processes.count) 个进程？"
+        let listed = processes.prefix(6).map { process in
+            let memory = process.memoryMiB.map { " · \(memoryMiBLabel($0))" } ?? ""
+            return "PID \(process.pid) · \(process.executable) · \(process.username ?? "未知账号")\(memory)"
+        }
+        let more = processes.count > 6 ? "\n另有 \(processes.count - 6) 个" : ""
+        alert.informativeText = listed.joined(separator: "\n") + more + "\n\n"
+            + "ServerPilot 会先在服务器上核对每个进程仍是这个任务的、属于登录账号，"
+            + "再发送 SIGTERM；10 秒后仍在运行的发送 SIGKILL。其他账号的进程不会被结束。"
+        alert.addButton(withTitle: "归还并结束进程")
+        alert.buttons.first?.hasDestructiveAction = true
+    }
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
 }

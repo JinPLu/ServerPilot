@@ -8,6 +8,7 @@
 
 ## Project current state
 
+- **未发布（11 月 10 日）**：用户选定：App 里归还任务即结束它的进程（核对后 SIGTERM，10 秒后 SIGKILL，只限登录账号的进程）；Agent 可归还别的项目留下、确认无人在用的任务；服务器页用量改为最近 30 秒平均。另修菜单栏深色模式、统一方块与指标条配色、整理服务器页列宽与悬停。原话与取舍见[决定记录](records/return-ends-processes-and-agent-cleanup.md)。
 - **5.3.0（11 月 7 日）**：服务器组可以在 App 里建好并放进服务器——侧边栏「服务器组」旁的 + 打开一张表单，填名称、勾选服务器、确认路径，标识按名称自动生成；编辑时增减成员，没移动的服务器逐台说明原因。点击表头、行和按钮不再留下整列宽的焦点框（去掉了强制的 `.focusable()`）。同版带上 Slurm 立即申请失败后的终态对账与重试。见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
 - **5.2.3（11 月 6 日）**：起卡后清理也失败时留下的占卡 worker 以前永远成为“外来进程”；现在记 `cleanup_pending` 并每轮重试停掉，只停 helper 自己记录的 worker，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
 - **5.2.2（11 月 5 日）**：挂着占卡的空卡申请失败、提示“请升级 helper”，实为停占卡时新建 SSH 连接超时；占卡已改走和采集同一条复用连接，连不上改报可重试的 `keepalive_helper_unreachable`，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
@@ -103,6 +104,7 @@
 
 ### records/
 
+- [归还即结束进程、Agent 清理无人任务、30 秒平均](records/return-ends-processes-and-agent-cleanup.md) — 改变“ServerPilot 不停止用户程序”边界的用户决定原话，以及三处取舍。
 - [占卡程序与 agent 工作负载相撞（p8908）](records/keepalive-workload-collision-p8908.md) — keepalive 把 80% 显存占到 agent 正在跑的卡上；根因是「此刻没观察到进程」被当成「活干完了」；四条修法已落地（唯一存活原语 + 心跳、进程缺席由 `absent_since` 证据链计时且断连重置、人工还卡与自动回收共用判据、起卡冷却期），周转代价已收敛到 60 秒连续健康观测。
 - [端点 monitor 状态的两条正交轴拆分](records/endpoint-monitor-status-axis-split.md) — 端点 `monitor` 状态该由什么判据推导、消费者该读哪个字段;根因是连通性轴与人为设定轴被压进同一枚举、且连通性判据用错了时钟,已修法落地并通过对抗性审查。
 - [端点 CPU/内存容量的权威来源](records/endpoint-capacity-authority.md) — 容量口径由 `_host_capacity` 单独拥有；准入面已从整机 cpu_count/memory_total 收口到同一份 cgroup 份额，算不出份额时 fail closed。

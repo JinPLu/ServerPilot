@@ -22,6 +22,7 @@ from serverpilot import __version__
 from serverpilot.agent_contract import CARD_STATUS_BY_STATE, render_mcp_instructions
 from serverpilot.agent_identity import normalize_client, resolve_project
 from serverpilot.client import (
+    CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
     CONTROL_PLANE_READ_TIMEOUT_SECONDS,
     BrokerClient,
     BrokerClientError,
@@ -863,10 +864,16 @@ DOCUMENTED_REFUSALS = frozenset({
     "takeover_project_mismatch", "project_required", "allocation_unconfirmed", "duration_required",
     "entry_unusable", "restart_client", "server_required", "server_group_not_found",
     "endpoint_not_found", "keepalive_helper_unreachable",
+    # Clearing another project's abandoned task: the App's release, refused.
+    "lease_holder_recently_alive", "conflict_process_present", "conflict_observation_stale",
+    "conflict_observation_incomplete", "lease_has_no_resources", "lease_endpoint_mismatch",
 })
-RETRYABLE_REFUSALS = frozenset(
-    {"no_capacity", "allocation_unconfirmed", "keepalive_helper_unreachable"}
-)
+RETRYABLE_REFUSALS = frozenset({
+    "no_capacity", "allocation_unconfirmed", "keepalive_helper_unreachable",
+    "lease_holder_recently_alive", "conflict_observation_stale", "conflict_observation_incomplete",
+})
+# What only a person can do, said where an agent would otherwise retry forever.
+_ASK_A_PERSON = "Ask a person to return this task in the ServerPilot app"
 
 
 def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:
@@ -881,6 +888,20 @@ def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:
         return {"tool": "gpu_apply", "args": {"server_group_id": "<one of details.groups>"}}
     if code == "lease_taken_over":
         return {"tool": "gpu_status", "args": {}}
+    if code == "no_capacity":
+        return {"tool": "gpu_apply", "args": "repeat the same call after retry_after_seconds"}
+    if code == "lease_not_found":
+        return {"tool": "gpu_status", "args": {}}
+    if code == "duration_required":
+        return {"tool": "gpu_apply", "args": {"duration_seconds": "<how long the job runs>"}}
+    if code == "lease_holder_recently_alive":
+        return {"tool": "gpu_release", "args": "repeat the same call after retry_after_seconds"}
+    if code in {"conflict_observation_stale", "conflict_observation_incomplete"}:
+        if details.get("endpoint_unreachable"):
+            return {"human": _ASK_A_PERSON}
+        return {"tool": "gpu_release", "args": "repeat the same call"}
+    if code in {"conflict_process_present", "lease_forbidden", "takeover_project_mismatch"}:
+        return {"human": _ASK_A_PERSON}
     return None
 
 
@@ -1098,12 +1119,12 @@ async def gpu_status(
 async def gpu_apply(
     task: Annotated[str, Field(min_length=1, max_length=255, description="What this work is, stable across restarts")],
     gpu_count: Annotated[int, Field(ge=1, le=1024, description=ROUTINE_GPU_COUNT_DESCRIPTION)] = 1,
-    server_group_id: str | None = None,
-    server_id: str | None = None,
+    server_group_id: Annotated[str | None, Field(description="A group from gpu_status(); required when its servers are grouped")] = None,
+    server_id: Annotated[str | None, Field(description="One ungrouped server, only when the work must run there")] = None,
     duration_seconds: Annotated[int | None, Field(ge=60, le=2592000, description="Required on clusters, whose jobs end at this limit")] = None,
     change: Annotated[bool, Field(description="The count differs from what this task holds, on purpose")] = False,
     take_over: Annotated[bool, Field(description="Take this task from a session that is gone")] = False,
-    project: str | None = None,
+    project: Annotated[str | None, Field(description="Only when this client gives no project root; normally derived")] = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
     """Declare what a task needs. Returns how to enter its cards, or why not; nothing queues. Repeating is safe."""
@@ -1124,6 +1145,10 @@ async def gpu_apply(
         "existing": bool(payload.get("existing")),
         "heartbeat_within_seconds": payload.get("heartbeat_within_seconds"),
         "servers": _cards_by_server(lease),
+        "next": (
+            "Enter each server in servers[]. While the job runs, call gpu_status(task) "
+            "within heartbeat_within_seconds; call gpu_release(task, outcome) when it ends."
+        ),
     }
     if "added_gpu_ids" in payload:
         # A running process cannot see cards that were not there when it started.
@@ -1133,20 +1158,28 @@ async def gpu_apply(
 
 @mcp.tool(annotations=_RETURNS)
 async def gpu_release(
-    task: str | None = None,
-    lease_id: str | None = None,
+    task: Annotated[str | None, Field(description="The task name you applied with")] = None,
+    lease_id: Annotated[str | None, Field(description="From gpu_status(): your task's, or an abandoned one's")] = None,
     gpu_ids: Annotated[list[str] | None, Field(description="Return only these cards; omit to end the task")] = None,
     outcome: Literal["completed", "failed", "abandoned"] = "completed",
     context: Context | None = None,
 ) -> dict[str, Any]:
     """Return a task's cards: all when it ends or fails, or some when they have no work left."""
 
+    name = task or lease_id
+    if name is None:
+        return {"ok": False, "error": {
+            "code": "task_required", "message": "Name the task, or pass a lease_id from gpu_status().",
+            "retryable": False, "next": {"tool": "gpu_status", "args": {}},
+        }}
     try:
         client, project = await _identity(context)
-        name = task or lease_id
-        if name is None:
-            raise ValueError("gpu_release needs task or lease_id")
-        view = await _task_view(client, project, name)
+        try:
+            view = await _task_view(client, project, name)
+        except BrokerClientError as exc:
+            if exc.code != "lease_forbidden":
+                raise
+            return await _release_abandoned(client, project, name)
         lease_id = view["lease_id"]
         if "ended" in view:
             return {"ok": True, "lease_id": lease_id, "ended": True}
@@ -1169,6 +1202,30 @@ async def gpu_release(
     except BrokerClientError as exc:
         return _refusal(exc)
     return {"ok": True, "lease_id": lease_id, "ended": True}
+
+
+async def _release_abandoned(client: Any, project: str, lease_id: str) -> dict[str, Any]:
+    """Another project's task, freed only on proof that nobody is using it.
+
+    gpu_status() lists it under abandoned; each of its servers is collected
+    again and must show its cards empty before the task is let go, the same
+    release a person makes in the App.
+    """
+
+    listing = await _client_call(client, "get", "/api/v2/leases/mine", params={"project": project})
+    left = next((row for row in listing.get("abandoned", []) if row["lease_id"] == lease_id), None)
+    if left is None:
+        return {"ok": False, "error": {
+            "code": "lease_forbidden",
+            "message": "Another project's task that is still in use, or on a server that cannot be checked.",
+            "retryable": False, "next": {"human": _ASK_A_PERSON},
+        }}
+    for server in left["servers"]:
+        await _client_call(
+            client, "post", f"/api/v2/endpoints/{server}/leases/{lease_id}/release-empty", {},
+            idempotency_key=secrets.token_hex(16), timeout=CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS,
+        )
+    return {"ok": True, "lease_id": lease_id, "ended": True, "left_by": left["project"]}
 
 
 ROUTINE_MCP_TOOL_NAMES = ("gpu_status", "gpu_apply", "gpu_release")

@@ -1,6 +1,6 @@
 # ServerPilot (`serverpilot` package)
 
-- 本机 loopback GPU 协作控制面；GUI、CLI、MCP 共用 REST/领域逻辑。ServerPilot 管理自己的占卡进程与插件侧分配的生命周期，但不启动、停止、迁移或抢占你的 workload。
+- 本机 loopback GPU 协作控制面；GUI、CLI、MCP 共用 REST/领域逻辑。ServerPilot 管理自己的占卡进程与插件侧分配的生命周期，不启动、迁移或抢占你的 workload；唯一的例外是人在 App 里归还任务并确认时，结束这个任务的卡上、属于 SSH 登录账号的进程（`process_stop.py`：核对身份后先 SIGTERM，10 秒后 SIGKILL）。
 - `README.md` 是用户入口；当前交付与 gate 只写 `docs/IMPLEMENTATION_STATUS_zh.md`；全局 MCP 安装见 `docs/AGENT_MCP_zh.md`，外部 Agent 的运行契约以 MCP instructions 为准。
 - 源码在 `src/serverpilot/`；`build/`、`dist/`、`*.egg-info/`、`state/` 是生成物或运行状态。`inventory.yaml` 仅描述静态资产，不能证明 GPU 可用。
 

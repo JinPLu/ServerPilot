@@ -114,7 +114,7 @@ struct NodeAllocationSheet: View {
                                 Text("\(lease.projectID) · \(lease.taskReference ?? "未标注任务")").font(Typography.label)
                                 Spacer()
                                 Button("归还分配") {
-                                    guard confirmLeaseRelease(lease) else { return }
+                                    guard confirmLeaseRelease(lease, processes: store.snapshot.processes(holding: lease)) else { return }
                                     store.releaseLease(lease) { _, _ in }
                                 }
                                 .disabled(!store.allowsMutations)

@@ -1850,3 +1850,32 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints/server-a") == 10)
     }
 }
+
+@MainActor
+@Suite struct ProcessStopSummaryTests {
+    @Test func aReturnSaysHowManyEndedAndWhyEachOtherDidNot() {
+        let summary = BrokerStore.processStopSummary([
+            ["pid": 11, "executable": "python", "result": "stopped"],
+            ["pid": 12, "executable": "python", "result": "killed"],
+            ["pid": 13, "executable": "torchrun", "result": "skipped", "detail": "不属于 ServerPilot 登录的账号"],
+        ])
+        #expect(summary == "结束了 2 个进程。 1 个没有结束（PID 13 torchrun：不属于 ServerPilot 登录的账号），它们仍占着卡。")
+        #expect(BrokerStore.processStopSummary([]) == nil)
+    }
+
+    @Test func aProcessOnTwoOfATasksCardsIsOneProcess() throws {
+        let process: [String: Any] = ["pid": 7, "executable": "python", "process_key": "k7"]
+        let gpus = try ["a", "b", "c"].map { id in
+            try #require(GPURecord(raw: [
+                "id": id, "endpoint_id": "server", "name": "A100", "gpu_index": 0, "state": "RUNNING_MANAGED",
+                "processes": id == "c" ? [] : [process],
+            ]))
+        }
+        let lease = try #require(LeaseRecord(raw: [
+            "id": "l", "actor_id": "agent", "project_id": "p", "gpu_ids": ["a", "b"], "state": "ACTIVE",
+        ]))
+        var snapshot = BrokerSnapshot.empty
+        snapshot.gpus = gpus
+        #expect(snapshot.processes(holding: lease).map(\.pid) == [7])
+    }
+}

@@ -584,10 +584,14 @@ public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
     public let observedAt: String?
     public let message: String?
     public let gpuIDs: [String]
+    /// Load over the daemon's short window (`short_usage`): what the server
+    /// table prints and sorts by, so one collection that caught a job
+    /// mid-step does not stand for the machine.  Nil for a quiet node.
     public let gpuUtilizationFraction: Double?
     public let gpuMemoryFraction: Double?
     public let cpuUtilizationFraction: Double?
     public let memoryFraction: Double?
+    public let averageWindowSeconds: Int?
     /// The newest reading however old it is, to show greyed once `fresh` is false.
     /// Nothing may decide from it; the fractions above are nil for a quiet node.
     public let lastUsage: ResourceNodeUsage?
@@ -599,11 +603,12 @@ public struct ResourceNodeRecord: Identifiable, Equatable, Sendable {
         observedAt = raw.string("observed_at")
         message = raw.string("message")
         gpuIDs = raw["gpu_ids"] as? [String] ?? []
-        let usage = raw["usage"] as? [String: Any] ?? [:]
+        let usage = raw["short_usage"] as? [String: Any] ?? [:]
         gpuUtilizationFraction = fresh ? usage.optionalPercent("gpu_utilization_pct") : nil
         gpuMemoryFraction = fresh ? usage.optionalPercent("gpu_memory_used_pct") : nil
         cpuUtilizationFraction = fresh ? usage.optionalPercent("cpu_utilization_pct") : nil
         memoryFraction = fresh ? usage.optionalPercent("memory_used_pct") : nil
+        averageWindowSeconds = fresh ? usage.optionalInt("window_seconds") : nil
         lastUsage = (raw["last_usage"] as? [String: Any]).map(ResourceNodeUsage.init(raw:))
     }
 }
@@ -881,6 +886,9 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
     public let utilization: Int?
     public let temperature: Int?
     public let recentTelemetryAverage: GPURecentTelemetryAverage?
+    /// The card's load over the daemon's short window: what its square shows,
+    /// matching the bars beside it.
+    public let shortTelemetryAverage: GPURecentTelemetryAverage?
     public let owner: String?
     public let taskReference: String?
     public let leaseID: String?
@@ -920,6 +928,9 @@ public struct GPURecord: Identifiable, Equatable, Sendable {
         self.temperature = telemetry.optionalInt("temperature_c")
         self.recentTelemetryAverage = GPURecentTelemetryAverage(
             raw: telemetry["recent_average"] as? [String: Any] ?? [:]
+        )
+        self.shortTelemetryAverage = GPURecentTelemetryAverage(
+            raw: telemetry["short_average"] as? [String: Any] ?? [:]
         )
         let lease = raw["lease"] as? [String: Any] ?? [:]
         self.leaseID = lease.string("id")
@@ -1269,6 +1280,14 @@ public struct BrokerSnapshot: Equatable, Sendable {
 
     public func gpus(for endpoint: EndpointRecord) -> [GPURecord] {
         gpus.filter { $0.endpointID == endpoint.id }
+    }
+
+    /// The processes last seen on a task's cards: what returning it in the
+    /// App will end.  One process on two cards is one process.
+    public func processes(holding lease: LeaseRecord) -> [GPUProcessRecord] {
+        let held = Set(lease.gpuIDs)
+        var seen = Set<String>()
+        return gpus.filter { held.contains($0.id) }.flatMap(\.processes).filter { seen.insert($0.id).inserted }
     }
 
     public func endpoint(id: String) -> EndpointRecord? {

@@ -4,6 +4,16 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Returning a task in the App ends its processes.** The confirmation lists the processes running on that task's cards; once confirmed, ServerPilot checks each one is still the process it observed and belongs to the SSH login account, sends SIGTERM, sends SIGKILL to whatever is still running ten seconds later, and reports each result. Other accounts' processes are never ended.
+- **Agents can clear tasks another project abandoned.** A task whose holder has gone quiet (ten minutes by default) with nothing running on its cards appears under `abandoned` in `gpu_status()`, and any agent can return it with `gpu_release(lease_id)`; a task still in use, or on a server that does not answer, is handed to a person in the App.
+- **The MCP guides weaker agents more clearly.** The rules spell out the order of calls, more refusals carry a next step, a step only a person can take is marked `next.human`, a granted apply says what to do next, and every parameter is described.
+- **Server page load is now a 30-second average.** Bars, sorting and each card's square read the same average, so one collection that caught a job mid-step no longer makes a row jump.
+- **Squares and bars share one palette.** Green below 80%, yellow from 80% and orange from 95%; the legend gains "full".
+- **A tighter server page.** The server column no longer fills the row with blank space, and the room goes to the task column; the cards, free and metric columns centre their headers over their values. The task column's hover no longer competes with a whole-row tooltip and appears sooner.
+- **The menu bar popover is readable in Dark Mode again.**
+
 ## 5.3.0 - 2026-11-07
 
 - **Server groups can now be made and filled in the App.** The + beside the server groups heading in the sidebar opens a form where you name the group, tick its servers and confirm its working path; the group's id is generated from its name instead of being typed. Editing a group ticks members in or out, a server in another group moves over, and a server that cannot move, such as one holding a keepalive, is named with the reason while the rest still move. Right-clicking a group in the sidebar edits it or opens group management, and a group with no servers yet is listed too.

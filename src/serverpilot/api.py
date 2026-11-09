@@ -32,6 +32,7 @@ from serverpilot.config import SSH_BUDGETS, Settings, load_inventory, project_ro
 from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
+from serverpilot.process_stop import StopTarget, sealed_runner, stop_processes
 from serverpilot.provider_contract import ProviderConnectionUpdate
 from serverpilot.runtime_identity import package_build_id
 from serverpilot.schemas import (
@@ -1568,13 +1569,19 @@ def create_app(
         )
 
     @app.post("/api/v2/operator/leases/{lease_id}/release")
-    def operator_release_lease(
+    async def operator_release_lease(
         request: Request,
         lease_id: str,
         body: dict[str, str],
         idempotency_key: Annotated[str | None, Header(alias="Idempotency-Key")] = None,
     ) -> dict[str, Any]:
-        """Human correction surface for the loopback App only."""
+        """A person returning a task in the App, which ends it.
+
+        The processes last seen on its cards are stopped first (process_stop
+        says which ones and how), then the ledger lets the cards go whether or
+        not every process could be stopped: a person asked for the cards back,
+        and the answer names each process and what happened to it.
+        """
 
         if request.headers.get("x-serverpilot-client") != "desktop-app":
             raise BrokerError(
@@ -1583,15 +1590,47 @@ def create_app(
                 status_code=403,
             )
         label = request.headers.get("x-serverpilot-actor", "human").strip() or "human"
-        local = service.local_actor(label)
+        local = await service.in_domain(service.local_actor, label)
         actor = ActorContext(id=local.id, role="operator", project_ids=local.project_ids)
-        return service.release_lease(
+        key = _idempotency_key(idempotency_key)
+        targets = await service.in_domain(service.lease_process_targets, lease_id)
+        run = sealed_runner(shared_collector.control_dir)
+        stopped: list[dict[str, Any]] = []
+        endpoints = []
+        for server_id, processes in targets.items():
+            here = [item for item in processes if item["node_id"] == "self"]
+            elsewhere = [item for item in processes if item["node_id"] != "self"]
+            endpoint = await service.in_domain(service.collector_endpoint, server_id)
+            endpoints.append(endpoint)
+            outcomes = await stop_processes(
+                endpoint,
+                [
+                    StopTarget(item["pid"], item["boot_id"], item["started_at"], item["executable"])
+                    for item in here
+                ],
+                run=run,
+            )
+            # A cluster node's processes are its scheduler's to end.
+            outcomes += [
+                {"pid": item["pid"], "executable": item["executable"], "result": "skipped",
+                 "detail": "集群节点上的进程由调度器管理"}
+                for item in elsewhere
+            ]
+            stopped += [{**item, "server_id": server_id} for item in outcomes]
+        if stopped:
+            await service.in_domain(service.record_process_stop, actor, lease_id, stopped)
+        released = await service.in_domain(
+            service.release_lease,
             actor,
             lease_id,
             reason=body.get("reason", ""),
-            idempotency_key=_idempotency_key(idempotency_key),
+            idempotency_key=key,
             operator_override=True,
         )
+        if endpoints:
+            # So the App sees the cards free now, not at the next cycle.
+            await shared_collector.collect_selected(service, endpoints)
+        return {**released, "stopped_processes": stopped}
 
     async def apply_lease_gpu_reassignment(
         actor: ActorContext,

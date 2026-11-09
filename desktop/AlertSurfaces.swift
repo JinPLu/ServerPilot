@@ -357,6 +357,10 @@ final class StatusItemController: NSObject {
         item.button?.target = self
         item.button?.action = #selector(toggle(_:))
         popover.behavior = .transient
+        // A popover takes the appearance of the view it hangs from, and a
+        // status item is the menu bar's: dark in Dark Mode.  The app draws
+        // light only, so `labelColor` would turn white on these white cards.
+        popover.appearance = NSAppearance(named: .aqua)
         popover.contentViewController = NSHostingController(rootView: MenuBarPopover(
             store: store,
             openWindow: { [weak self] in

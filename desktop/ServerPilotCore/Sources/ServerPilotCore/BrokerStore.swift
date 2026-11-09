@@ -1108,7 +1108,10 @@ public final class BrokerStore: ObservableObject {
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.httpBody = body
-        request.timeoutInterval = 10
+        // Returning ends the task's processes first: a check on the server,
+        // SIGTERM, a ten-second grace, SIGKILL for what is left, then a fresh
+        // collection so the cards show free.
+        request.timeoutInterval = 90
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue(actorID, forHTTPHeaderField: "X-ServerPilot-Actor")
         request.setValue("desktop-app", forHTTPHeaderField: "X-ServerPilot-Client")
@@ -1136,12 +1139,29 @@ public final class BrokerStore: ObservableObject {
                     return
                 }
                 self.raiseMinimumRequiredSnapshotRevision(from: data)
-                self.notice = "已归还租约 \(lease.id)。"
+                let stopped = (self.apiPayload(from: data)?["stopped_processes"] as? [[String: Any]]) ?? []
+                self.notice = "已归还任务。" + (Self.processStopSummary(stopped).map { " \($0)" } ?? "")
                 self.errorMessage = nil
                 self.reload()
                 completion(true, nil)
             }
         }.resume()
+    }
+
+    /// What returning a task did to its processes, in one line: how many
+    /// ended, and each one that did not, with why.
+    static func processStopSummary(_ outcomes: [[String: Any]]) -> String? {
+        guard !outcomes.isEmpty else { return nil }
+        let ended = outcomes.filter { ["stopped", "killed", "already_gone"].contains($0.string("result") ?? "") }
+        let left = outcomes.filter { !["stopped", "killed", "already_gone"].contains($0.string("result") ?? "") }
+        var line = "结束了 \(ended.count) 个进程。"
+        if !left.isEmpty {
+            let reasons = left.map { item in
+                "PID \(item.int("pid")) \(item.string("executable") ?? "")：\(item.string("detail") ?? "未能结束")"
+            }
+            line += " \(left.count) 个没有结束（\(reasons.joined(separator: "；"))），它们仍占着卡。"
+        }
+        return line
     }
 
     public func reassignLease(

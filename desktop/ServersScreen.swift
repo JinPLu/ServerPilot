@@ -414,6 +414,8 @@ struct ResourcesDashboard: View {
                     columns: columns,
                     sort: sort,
                     direction: sortDirection,
+                    averageWindowSeconds: store.snapshot.endpoints.lazy
+                        .flatMap(\.resourceNodes).compactMap(\.averageWindowSeconds).first,
                     selectSort: selectSort
                 )
                 .padding(.trailing, EndpointTableLayout.scrollbarWidth)
@@ -780,6 +782,9 @@ enum EndpointTableLayout {
     static let scrollbarWidth = NSScroller.scrollerWidth(for: .regular, scrollerStyle: .legacy)
     /// host:port at 13 pt, and the status word beneath it.
     static let addressLane: CGFloat = 200
+    /// Past this the server column is only blank; the room goes to 任务,
+    /// whose task names are what get cut short.
+    static let addressLaneMax: CGFloat = 280
     static let cardPadding: CGFloat = 16
     /// Two lines of text; the room around them is the point.
     static let rowHeight: CGFloat = 56
@@ -802,6 +807,12 @@ enum EndpointTableLayout {
 
         var showsGPUModel: Bool { self == .wide }
         var showsAssignment: Bool { self != .compact }
+
+        /// The server column stops at `addressLaneMax` while 任务 is there to
+        /// take the rest of the row, and fills the row when it is not.
+        func addressMaxWidth(columns: Set<EndpointColumn>) -> CGFloat {
+            showsAssignment && columns.contains(.assignment) ? EndpointTableLayout.addressLaneMax : .infinity
+        }
 
         var columnSpacing: CGFloat { self == .wide ? 12 : 10 }
         var assignmentWidth: CGFloat { self == .wide ? 164 : 150 }
@@ -975,41 +986,43 @@ private struct EndpointTableHeader: View {
     let columns: Set<EndpointColumn>
     let sort: EndpointSort
     let direction: EndpointSortDirection
+    /// The window the load columns average over, to say so where they are named.
+    let averageWindowSeconds: Int?
     let selectSort: (EndpointSort) -> Void
 
     var body: some View {
         HStack(spacing: tier.columnSpacing) {
-            header(.id, trailing: false)
-                .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
+            header(.id, centered: false)
+                .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
             if tier.showsAssignment, columns.contains(.assignment) {
-                header(.assignment, trailing: false)
-                    .frame(width: tier.assignmentWidth, alignment: .leading)
+                header(.assignment, centered: false)
+                    .frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
             }
             if tier.showsGPUModel, columns.contains(.cards) {
-                header(.gpuModel, trailing: false)
-                    .frame(width: tier.gpuModelWidth, alignment: .leading)
+                header(.gpuModel, centered: true)
+                    .frame(width: tier.gpuModelWidth)
             }
-            header(.availableGPU, trailing: true)
-                .frame(width: tier.availabilityWidth, alignment: .trailing)
+            header(.availableGPU, centered: true)
+                .frame(width: tier.availabilityWidth)
             if columns.contains(.gpuUtilization) {
-                header(.gpuUtilization, trailing: false)
-                    .frame(width: tier.pressureWidth, alignment: .leading)
+                header(.gpuUtilization, centered: true)
+                    .frame(width: tier.pressureWidth)
             }
             if columns.contains(.gpuMemory) {
-                header(.gpuMemory, trailing: false)
-                    .frame(width: tier.pressureWidth, alignment: .leading)
+                header(.gpuMemory, centered: true)
+                    .frame(width: tier.pressureWidth)
             }
             if columns.contains(.cpu) {
-                header(.cpuLoad, trailing: false)
-                    .frame(width: tier.pressureWidth, alignment: .leading)
+                header(.cpuLoad, centered: true)
+                    .frame(width: tier.pressureWidth)
             }
             if columns.contains(.memory) {
-                header(.memory, trailing: false)
-                    .frame(width: tier.pressureWidth, alignment: .leading)
+                header(.memory, centered: true)
+                    .frame(width: tier.pressureWidth)
             }
             if columns.contains(.temperature) {
-                header(.temperature, trailing: false)
-                    .frame(width: tier.temperatureWidth, alignment: .leading)
+                header(.temperature, centered: true)
+                    .frame(width: tier.temperatureWidth)
             }
         }
         .padding(.horizontal, EndpointTableLayout.cardPadding)
@@ -1023,15 +1036,22 @@ private struct EndpointTableHeader: View {
         RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous)
     }
 
-    private func header(_ key: EndpointSort, trailing: Bool) -> some View {
+    private func helpText(_ key: EndpointSort) -> String {
+        guard let averageWindowSeconds, [.gpuUtilization, .gpuMemory, .cpuLoad, .memory].contains(key) else {
+            return "按\(key.label)排序"
+        }
+        return "按\(key.label)排序 · 数值为最近 \(averageWindowSeconds) 秒平均"
+    }
+
+    private func header(_ key: EndpointSort, centered: Bool) -> some View {
         EndpointColumnHeader(
             key: key,
-            trailing: trailing,
+            centered: centered,
             isSorted: key == sort,
             direction: direction,
             select: { selectSort(key) }
         )
-        .help("按\(key.label)排序")
+        .help(helpText(key))
         // The headers this table used to have were unnamed to assistive
         // technology; the sort bar that stood in for them carried these names,
         // so they come back attached to the headers themselves.
@@ -1043,7 +1063,9 @@ private struct EndpointTableHeader: View {
 /// What a column measures, its name, and how it sorts.
 private struct EndpointColumnHeader: View {
     let key: EndpointSort
-    let trailing: Bool
+    /// Text columns read from the left; a column of figures, squares or bars
+    /// has its name centred over them.
+    let centered: Bool
     let isSorted: Bool
     let direction: EndpointSortDirection
     let select: () -> Void
@@ -1076,7 +1098,7 @@ private struct EndpointColumnHeader: View {
             .frame(
                 maxWidth: .infinity,
                 maxHeight: .infinity,
-                alignment: trailing ? .trailing : .leading
+                alignment: centered ? .center : .leading
             )
             .contentShape(Rectangle())
         }
@@ -1112,7 +1134,7 @@ struct TablePressureCell: View {
                 )
             }
         }
-        .frame(width: width, alignment: .leading)
+        .frame(width: width)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(label)
         .accessibilityValue(muted ? "\(percentageLabel(fraction))，不代表当前负载" : percentageLabel(fraction))
@@ -1131,7 +1153,7 @@ struct TableTemperatureCell: View {
             .monospacedDigit()
             .foregroundStyle(celsius == nil ? DesignTokens.mutedInk : DesignTokens.ink)
             .lineLimit(1)
-            .frame(width: width, alignment: .leading)
+            .frame(width: width)
             .accessibilityLabel("GPU 最高温度")
     }
 }
@@ -1179,14 +1201,19 @@ private struct EndpointTableRow: View {
                         .foregroundStyle(checked ? DesignTokens.danger : DesignTokens.mutedInk)
                 }
                 serverCell
-                    .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
+                    .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
+                    // Everything a row cannot print about the machine — the
+                    // workspace path, per-card VRAM — is one hover away here.
+                    // It used to cover the whole row, where it fought the task
+                    // column's own hover for the same spot.
+                    .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
                 if tier.showsAssignment, columns.contains(.assignment) {
-                    assignmentCell.frame(width: tier.assignmentWidth, alignment: .leading)
+                    assignmentCell.frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
                 }
                 if tier.showsGPUModel, columns.contains(.cards) {
-                    gpuModelCell.frame(width: tier.gpuModelWidth, alignment: .leading)
+                    gpuModelCell.frame(width: tier.gpuModelWidth)
                 }
-                availabilityCell.frame(width: tier.availabilityWidth, alignment: .trailing)
+                availabilityCell.frame(width: tier.availabilityWidth)
                 if columns.contains(.gpuUtilization) {
                     TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: gpuPressure ?? lastUsage?.gpuUtilization, muted: gpuReadingsAreQuiet || gpuPressure == nil, width: tier.pressureWidth)
                 }
@@ -1211,10 +1238,6 @@ private struct EndpointTableRow: View {
         .buttonStyle(.plain)
         .onHover { hovering = $0 }
         .animation(reduceMotion ? nil : .easeOut(duration: 0.14), value: hovering)
-        // Everything a row cannot print — the workspace path, per-card VRAM,
-        // the full lease list — is one hover away, and all of it is in
-        // the detail sheet a click away.
-        .help(removalMark == nil ? tooltip : "点击勾选或取消勾选")
         .accessibilityElement(children: .ignore)
         // Without this the row reports as AXUnknown, so assistive technology
         // reads its label but cannot say it is actionable.
@@ -1283,7 +1306,7 @@ private struct EndpointTableRow: View {
     }
 
     private var gpuModelCell: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .center, spacing: 4) {
             if !gpus.isEmpty {
                 CardSquares(gpus: gpus.sorted { $0.index < $1.index }, size: 11)
                     .fixedSize()
@@ -1294,7 +1317,7 @@ private struct EndpointTableRow: View {
                 .lineLimit(1)
                 .truncationMode(.tail)
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
+        .frame(maxWidth: .infinity)
         .help(gpuModelDetail)
     }
 
@@ -1304,7 +1327,6 @@ private struct EndpointTableRow: View {
     /// capacity minus usage.
     private var availabilityCell: some View {
         HStack(alignment: .firstTextBaseline, spacing: 1) {
-            Spacer(minLength: 0)
             if let claimable = claimableLabel {
                 Text(claimable)
                     .font(Typography.rowValue.weight(.semibold))
@@ -1550,12 +1572,11 @@ private struct EndpointTableRow: View {
         if let vramSummary { lines.append("显存 \(vramSummary)") }
         lines.append(hostFacts)
         lines.append(endpoint.workspacePath ?? "工作区未设置")
-        lines.append(assignmentHelp)
         return lines.joined(separator: "\n")
     }
 
     private var accessibilityValue: String {
-        "\(status.word)，\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为节点当前值：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
+        "\(status.word)，\(assignmentHelp)，GPU 配置 \(gpuModelSummary)，\(gpuCaption)，资源指标为\(selfNode?.averageWindowSeconds.map { "最近 \($0) 秒平均" } ?? "节点当前值")：CPU 负载 \(percentageLabel(cpuLoadPressure))，内存占用率 \(percentageLabel(memoryPressure))，GPU 利用率 \(percentageLabel(gpuPressure))"
     }
 }
 

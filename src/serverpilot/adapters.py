@@ -250,6 +250,75 @@ def clear_control_sockets(control_dir: Path) -> None:
             socket_path.unlink()
 
 
+async def run_sealed_ssh(
+    endpoint: EndpointConfig,
+    *,
+    remote_command: str,
+    control_dir: Path,
+    deadline_seconds: float,
+    what: str,
+) -> RawSSHResult:
+    """Run one fixed command over the endpoint's sealed SSH options.
+
+    Output is bounded and the whole call has a wall clock. Observation and
+    stopping a returned task's processes are the two callers, and both go
+    through here so neither can drift to an unbounded or differently
+    configured connection.
+    """
+
+    process = await asyncio.create_subprocess_exec(
+        *endpoint_ssh_argv(endpoint, control_dir=control_dir, remote_command=remote_command),
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+
+    async def read_result() -> tuple[bytes, bytes, bool, bool]:
+        if getattr(process, "stdout", None) is None or getattr(process, "stderr", None) is None:
+            # Compatibility path for a deliberately minimal fake process. The
+            # production subprocess always supplies pipes, which takes the
+            # bounded streaming path below.
+            stdout, stderr = await process.communicate()
+            stdout_truncated = len(stdout) > MAX_RAW_SSH_STDOUT_BYTES
+            stderr_truncated = len(stderr) > MAX_RAW_SSH_STDERR_BYTES
+            return (
+                stdout[:MAX_RAW_SSH_STDOUT_BYTES],
+                stderr[:MAX_RAW_SSH_STDERR_BYTES],
+                stdout_truncated,
+                stderr_truncated,
+            )
+        (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.gather(
+            _read_bounded_stream(process.stdout, maximum_bytes=MAX_RAW_SSH_STDOUT_BYTES),
+            _read_bounded_stream(process.stderr, maximum_bytes=MAX_RAW_SSH_STDERR_BYTES),
+        )
+        await process.wait()
+        return stdout, stderr, stdout_truncated, stderr_truncated
+
+    try:
+        stdout, stderr, stdout_truncated, stderr_truncated = await asyncio.wait_for(
+            read_result(), timeout=deadline_seconds
+        )
+    except TimeoutError as exc:
+        # OpenSSH enforces ConnectTimeout on connection setup alone, so a
+        # session that connected can still hang on the remote work.  This is
+        # the whole call's wall clock, and because it is strictly longer than
+        # the connect budget, reaching it always means the remote command is
+        # what did not finish.
+        with contextlib.suppress(ProcessLookupError):
+            process.kill()
+        await process.wait()
+        raise TimeoutError(
+            f"SSH {what} timed out after {deadline_seconds} seconds for {endpoint.id}"
+        ) from exc
+    return RawSSHResult(
+        returncode=process.returncode or 0,
+        stdout=_decode_remote_output(stdout, stream_name="stdout"),
+        stderr=_decode_remote_output(stderr, stream_name="stderr"),
+        stdout_truncated=stdout_truncated,
+        stderr_truncated=stderr_truncated,
+    )
+
+
 class RawSSHObservationAdapter:
     id: AdapterId = "raw-ssh"
 
@@ -262,60 +331,12 @@ class RawSSHObservationAdapter:
     ) -> RawSSHResult:
         if probe != "endpoint-telemetry":
             raise ValueError(f"unknown raw SSH probe: {probe}")
-        process = await asyncio.create_subprocess_exec(
-            *endpoint_ssh_argv(
-                endpoint,
-                control_dir=control_dir,
-                remote_command=RAW_SSH_COMBINED_QUERY,
-            ),
-            stdin=asyncio.subprocess.DEVNULL,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        async def read_result() -> tuple[bytes, bytes, bool, bool]:
-            if getattr(process, "stdout", None) is None or getattr(process, "stderr", None) is None:
-                # Compatibility path for a deliberately minimal fake process. The
-                # production subprocess always supplies pipes, which takes the
-                # bounded streaming path below.
-                stdout, stderr = await process.communicate()
-                stdout_truncated = len(stdout) > MAX_RAW_SSH_STDOUT_BYTES
-                stderr_truncated = len(stderr) > MAX_RAW_SSH_STDERR_BYTES
-                return (
-                    stdout[:MAX_RAW_SSH_STDOUT_BYTES],
-                    stderr[:MAX_RAW_SSH_STDERR_BYTES],
-                    stdout_truncated,
-                    stderr_truncated,
-                )
-            (stdout, stdout_truncated), (stderr, stderr_truncated) = await asyncio.gather(
-                _read_bounded_stream(process.stdout, maximum_bytes=MAX_RAW_SSH_STDOUT_BYTES),
-                _read_bounded_stream(process.stderr, maximum_bytes=MAX_RAW_SSH_STDERR_BYTES),
-            )
-            await process.wait()
-            return stdout, stderr, stdout_truncated, stderr_truncated
-
-        try:
-            stdout, stderr, stdout_truncated, stderr_truncated = await asyncio.wait_for(
-                read_result(), timeout=SSH_BUDGETS.probe_deadline_seconds
-            )
-        except TimeoutError as exc:
-            # OpenSSH enforces ConnectTimeout on connection setup alone, so a
-            # session that connected can still hang on the remote work.  This is
-            # the whole observation's wall clock, and because it is strictly
-            # longer than the connect budget, reaching it always means the
-            # remote command is what did not finish.
-            with contextlib.suppress(ProcessLookupError):
-                process.kill()
-            await process.wait()
-            raise TimeoutError(
-                "SSH observation timed out after "
-                f"{SSH_BUDGETS.probe_deadline_seconds} seconds for {endpoint.id}"
-            ) from exc
-        return RawSSHResult(
-            returncode=process.returncode or 0,
-            stdout=_decode_remote_output(stdout, stream_name="stdout"),
-            stderr=_decode_remote_output(stderr, stream_name="stderr"),
-            stdout_truncated=stdout_truncated,
-            stderr_truncated=stderr_truncated,
+        return await run_sealed_ssh(
+            endpoint,
+            remote_command=RAW_SSH_COMBINED_QUERY,
+            control_dir=control_dir,
+            deadline_seconds=SSH_BUDGETS.probe_deadline_seconds,
+            what="observation",
         )
 
 

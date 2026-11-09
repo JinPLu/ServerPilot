@@ -455,10 +455,12 @@ struct CardPip: View {
                 shape.strokeBorder(DesignTokens.freeCardStroke, lineWidth: 1.5)
             case .nearFull:
                 // Yellow is too light to hold its own edge on white.
-                shape.fill(DesignTokens.nearFullCard)
+                shape.fill(pressureColor(.warning))
                     .overlay(shape.strokeBorder(DesignTokens.nearFullCardEdge, lineWidth: 1))
             case .low:
-                shape.fill(DesignTokens.loadBlue)
+                shape.fill(pressureColor(.normal))
+            case .full:
+                shape.fill(pressureColor(.critical))
             case .unmeasured:
                 shape.fill(DesignTokens.unmeasuredCard)
             case .fault:
@@ -527,10 +529,10 @@ struct CardSquares: View {
 
 /// The readings behind a square's colour, where there are any.
 private func cardLoadDetail(_ gpu: GPURecord) -> String {
-    guard gpu.load == .low || gpu.load == .nearFull else { return gpu.load.label }
-    let utilization = gpu.utilization.map { percentageLabel(Double($0) / 100) } ?? "—"
-    let memory = gpu.memoryUsedMiB == nil ? "—" : percentageLabel(gpu.memoryFraction)
-    return "\(gpu.load.label)（利用率 \(utilization)，显存 \(memory)）"
+    guard gpu.load.pressure != nil, let average = gpu.shortTelemetryAverage else { return gpu.load.label }
+    let utilization = average.utilizationFraction.map(percentageLabel) ?? "—"
+    let memory = average.memoryFraction.map(percentageLabel) ?? "—"
+    return "\(gpu.load.label)（最近 \(average.windowSeconds) 秒平均：利用率 \(utilization)，显存 \(memory)）"
 }
 
 /// "6 张利用率低，2 张空闲" rather than one element per square.

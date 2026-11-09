@@ -97,16 +97,16 @@ struct SchedulerNodeTableRow: View {
                         .lineLimit(1)
                 }
             }
-            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: .infinity, alignment: .leading)
+            .frame(minWidth: EndpointTableLayout.addressLane, maxWidth: tier.addressMaxWidth(columns: columns), alignment: .leading)
             if tier.showsAssignment, columns.contains(.assignment) {
                 Text(assignment ?? "—")
                     .font(Typography.rowPrimary)
                     .lineLimit(1)
                     .foregroundStyle(assignment == nil ? DesignTokens.mutedInk : DesignTokens.ink)
-                    .frame(width: tier.assignmentWidth, alignment: .leading)
+                    .frame(minWidth: tier.assignmentWidth, maxWidth: .infinity, alignment: .leading)
             }
             if tier.showsGPUModel, columns.contains(.cards) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .center, spacing: 4) {
                     HStack(spacing: 3) {
                         ForEach(0..<node.totalGPUs, id: \.self) { index in
                             CardPip(load: nodeCardLoad(allocated: index < node.allocatedGPUs), size: 11)
@@ -120,10 +120,9 @@ struct SchedulerNodeTableRow: View {
                         .lineLimit(1)
                         .truncationMode(.tail)
                 }
-                .frame(width: tier.gpuModelWidth, alignment: .leading)
+                .frame(width: tier.gpuModelWidth)
             }
             HStack(alignment: .firstTextBaseline, spacing: 1) {
-                Spacer(minLength: 0)
                 Text(isSnapshotFresh && node.schedulable ? "\(node.freeGPUs)" : "—")
                     .font(Typography.rowValue.weight(.semibold))
                     .foregroundStyle(node.freeGPUs > 0 ? DesignTokens.ink : DesignTokens.mutedInk)
@@ -131,7 +130,7 @@ struct SchedulerNodeTableRow: View {
                     .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
             }
-            .frame(width: tier.availabilityWidth, alignment: .trailing)
+            .frame(width: tier.availabilityWidth)
             if columns.contains(.gpuUtilization) {
                 TablePressureCell(label: "GPU 利用率", metric: .gpuUtilization, fraction: usage?.gpuUtilizationFraction ?? lastUsage?.gpuUtilization, muted: usage?.gpuUtilizationFraction == nil, width: tier.pressureWidth)
             }

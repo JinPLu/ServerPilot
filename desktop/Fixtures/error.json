@@ -68,7 +68,14 @@
           "telemetry": {
             "memory_used_mib": 1024,
             "gpu_utilization_pct": 4,
-            "temperature_c": 34
+            "temperature_c": 34,
+            "short_average": {
+              "window_seconds": 30,
+              "sample_count": 1,
+              "gpu_utilization_pct": 4,
+              "memory_used_mib": 1024,
+              "memory_used_pct": 1.25
+            }
           },
           "processes": [],
           "state_reason": "no fresh telemetry after service start"
