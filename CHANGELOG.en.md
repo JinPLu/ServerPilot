@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Returning a task also ends its processes on container servers.** There the GPU driver reports the host's PIDs, which the container cannot see, so ServerPilot used to report them as already gone while they kept running. It now ends the login account's processes whose `CUDA_VISIBLE_DEVICES` names only this task's cards and which started after the task did; a process it cannot place is left alone and named with the reason, never reported as gone.
+
 ## 5.4.0 - 2026-11-10
 
 - **Returning a task in the App ends its processes.** The confirmation lists the processes running on that task's cards; once confirmed, ServerPilot checks each one is still the process it observed and belongs to the SSH login account, sends SIGTERM, sends SIGKILL to whatever is still running ten seconds later, and reports each result. Other accounts' processes are never ended.

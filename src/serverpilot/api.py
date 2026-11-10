@@ -32,7 +32,7 @@ from serverpilot.config import SSH_BUDGETS, Settings, load_inventory, project_ro
 from serverpilot.database import Database
 from serverpilot.keepalive_protocol import KEEPALIVE_WORKER_MARKER
 from serverpilot.mcp_entry import mcp_entry_status
-from serverpilot.process_stop import StopTarget, sealed_runner, stop_processes
+from serverpilot.process_stop import Card, StopPlan, StopTarget, sealed_runner, stop_processes
 from serverpilot.provider_contract import ProviderConnectionUpdate
 from serverpilot.runtime_identity import package_build_id
 from serverpilot.schemas import (
@@ -1597,17 +1597,22 @@ def create_app(
         run = sealed_runner(shared_collector.control_dir)
         stopped: list[dict[str, Any]] = []
         endpoints = []
-        for server_id, processes in targets.items():
-            here = [item for item in processes if item["node_id"] == "self"]
-            elsewhere = [item for item in processes if item["node_id"] != "self"]
+        for server_id, target in targets.items():
+            here = [item for item in target["processes"] if item["node_id"] == "self"]
+            elsewhere = [item for item in target["processes"] if item["node_id"] != "self"]
             endpoint = await service.in_domain(service.collector_endpoint, server_id)
             endpoints.append(endpoint)
             outcomes = await stop_processes(
                 endpoint,
-                [
-                    StopTarget(item["pid"], item["boot_id"], item["started_at"], item["executable"])
-                    for item in here
-                ],
+                StopPlan(
+                    seen=[
+                        StopTarget(item["pid"], item["boot_id"], item["started_at"], item["executable"])
+                        for item in here if item["named"]
+                    ],
+                    unseen=[(item["pid"], item["executable"]) for item in here if not item["named"]],
+                    cards=[Card(card["index"], card["uuid"]) for card in target["cards"] if card["node_id"] == "self"],
+                    task_age_seconds=target["task_age_seconds"],
+                ),
                 run=run,
             )
             # A cluster node's processes are its scheduler's to end.

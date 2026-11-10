@@ -192,7 +192,7 @@ private struct TaskCard: View {
                         Button(store.releasingLeaseIDs.contains(lease.id) ? "归还中" : "归还", action: release)
                             .buttonStyle(SecondaryActionButtonStyle())
                             .disabled(!store.allowsMutations || store.releasingLeaseIDs.contains(lease.id))
-                            .help(store.allowsMutations ? (lease.allocations.contains { $0.releaseGranularity == "allocation" } ? "归还整个分配，提供方可能终止其中的程序" : "归还 GPU；不会停止任务") : store.mutationUnavailableReason)
+                            .help(store.allowsMutations ? (lease.allocations.contains { $0.releaseGranularity == "allocation" } ? "归还整个分配，提供方可能终止其中的程序" : "归还 GPU，并结束这个任务卡上的进程") : store.mutationUnavailableReason)
                         Button("改派") { showsReassignment = true }
                             .buttonStyle(SecondaryActionButtonStyle())
                             .disabled(

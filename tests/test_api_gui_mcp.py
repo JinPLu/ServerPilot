@@ -1078,10 +1078,10 @@ def test_returning_a_task_in_the_app_ends_its_processes_before_the_cards_go(
 
     asked: list[tuple[str, list[int]]] = []
 
-    async def fake_stop(endpoint, targets, *, run):  # type: ignore[no-untyped-def]
-        asked.append((endpoint.id, [target.pid for target in targets]))
+    async def fake_stop(endpoint, plan, *, run):  # type: ignore[no-untyped-def]
+        asked.append((endpoint.id, [target.pid for target in plan.seen]))
         return [{"pid": target.pid, "executable": target.executable, "result": "stopped", "detail": None}
-                for target in targets]
+                for target in plan.seen]
 
     monkeypatch.setattr("serverpilot.api.stop_processes", fake_stop)
     released = TestClient(app).post(
@@ -1105,3 +1105,52 @@ def test_returning_a_task_in_the_app_ends_its_processes_before_the_cards_go(
     assert [event.resource_id for event in stopped_events] == [lease_id]
     # A person's own return is not news to them.
     assert not [item for item in service.list_reminders() if item["type"] == "lease_ended"]
+
+
+def test_a_process_the_collector_could_not_name_is_looked_for_by_its_cards(build_app, monkeypatch) -> None:
+    class QuietCollector:
+        control_dir = None
+
+        async def collect_selected(self, service, endpoints):  # type: ignore[no-untyped-def]
+            return {}
+
+    app = build_app("operator-release-unseen", collector=QuietCollector())
+    service = app.state.service
+    service.ingest_observation(observation(count=1))
+    owner = service.local_actor("lease-owner")
+    claimed = service.create_request(
+        owner,
+        RequestCreate.model_validate({
+            "project_id": "project-a", "task_ref": "容器里的任务", "purpose": "容器里的任务",
+            "duration_seconds": 3600, "constraints": {"gpu_count": 1, "placement": "pack"},
+        }),
+        idempotency_key="operator-release-unseen-claim",
+    )
+    lease_id = claimed["lease"]["id"]
+    gpu = service.snapshot(owner)["data"]["gpus"][0]
+    # A container's driver reports the host's PID, which its ps cannot name.
+    unnamed = process_for_gpu(gpu["gpu_uuid"], pid=3_467_697).model_copy(
+        update={"username": None, "executable": "[Not Found]"}
+    )
+    service.ingest_observation(observation(count=1, processes=[unnamed]))
+
+    plans = []
+
+    async def fake_stop(endpoint, plan, *, run):  # type: ignore[no-untyped-def]
+        plans.append(plan)
+        return []
+
+    monkeypatch.setattr("serverpilot.api.stop_processes", fake_stop)
+    released = TestClient(app).post(
+        f"/api/v2/operator/leases/{lease_id}/release",
+        headers={"X-ServerPilot-Actor": "human", "X-ServerPilot-Client": "desktop-app",
+                 "Idempotency-Key": "operator-release-unseen"},
+        json={"reason": "desktop release"},
+    )
+
+    assert released.status_code == 200
+    [plan] = plans
+    assert plan.seen == []
+    assert plan.unseen == [(3_467_697, "[Not Found]")]
+    assert [(card.index, card.uuid) for card in plan.cards] == [(gpu["gpu_index"], gpu["gpu_uuid"])]
+    assert 0 <= plan.task_age_seconds < 60

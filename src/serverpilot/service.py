@@ -8314,34 +8314,49 @@ class BrokerService:
 
         return self._write(operation)
 
-    def lease_process_targets(self, lease_id: str) -> dict[str, list[dict[str, Any]]]:
+    def lease_process_targets(self, lease_id: str) -> dict[str, dict[str, Any]]:
         """What returning this task in the App ends, by server.
 
         The processes the collector last saw on the cards the task still
         holds, each with the identity it must still have on the server before
-        anything is sent to it. A keepalive lease is ServerPilot's own hold and
-        is never a task to end.
+        anything is sent to it, and the task's cards and age there. A process
+        the collector could not name -- no user, the driver's own placeholder
+        for a name -- is a PID from another namespace, usually the host behind
+        a container, and is found again by its cards rather than its PID. A
+        keepalive lease is ServerPilot's own hold and is never a task to end.
         """
 
-        def operation(session: Session) -> dict[str, list[dict[str, Any]]]:
+        def operation(session: Session) -> dict[str, dict[str, Any]]:
             lease = session.get(Lease, lease_id)
             if lease is None or lease.kind != "workload":
                 return {}
             now = utcnow()
-            by_server: dict[str, dict[tuple[int, str], dict[str, Any]]] = defaultdict(dict)
+            issued = _as_utc(lease.issued_at) or now
+            servers: dict[str, dict[str, Any]] = {}
             for resource in session.scalars(select(LeaseResource).where(
                 LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
             )).all():
                 gpu = session.get(GPUDevice, resource.gpu_id)
-                for process in self._current_processes(session, resource.gpu_id, now):
-                    by_server[gpu.endpoint_id][(process.pid, process.boot_id)] = {
+                processes = self._current_processes(session, resource.gpu_id, now)
+                if not processes:
+                    continue
+                here = servers.setdefault(gpu.endpoint_id, {
+                    "processes": {}, "cards": [], "task_age_seconds": (now - issued).total_seconds(),
+                })
+                here["cards"].append({"index": gpu.gpu_index, "uuid": gpu.gpu_uuid, "node_id": gpu.node_id})
+                for process in processes:
+                    here["processes"][(process.pid, process.boot_id)] = {
                         "pid": process.pid,
                         "boot_id": process.boot_id,
                         "started_at": _as_utc(process.process_started_at),
                         "executable": process.executable,
                         "node_id": gpu.node_id,
+                        "named": process.username is not None,
                     }
-            return {server: list(processes.values()) for server, processes in by_server.items()}
+            return {
+                server: {**here, "processes": list(here["processes"].values())}
+                for server, here in servers.items()
+            }
 
         return self._read(operation)
 
