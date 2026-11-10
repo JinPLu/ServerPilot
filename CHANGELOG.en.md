@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.5.0 - 2026-11-11
 
 - **Returning a task also ends its processes on container servers.** There the GPU driver reports the host's PIDs, which the container cannot see, so ServerPilot used to report them as already gone while they kept running. It now ends the login account's processes whose `CUDA_VISIBLE_DEVICES` names only this task's cards and which started after the task did; a process it cannot place is left alone and named with the reason, never reported as gone.
 - **An agent can tell "wait" from "never".** Asking for more cards than any server has (when growing, more than the task's own server has left) used to answer "nothing free, try again later", and agents retried it every minute; it now says the most any server can give and is not retryable: a new claim asks a person to change the count, a growing task is told to name another server. A misspelt server id is answered "no such server" by both apply and status instead of reading as a busy fleet.
