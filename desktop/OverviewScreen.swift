@@ -242,7 +242,12 @@ struct OverviewDashboard: View {
                 } else {
                     ForEach(problems.prefix(Self.shownAlerts)) { alert in
                         Button {
-                            navigate(alert.category == .serverAbnormal ? .resources : .leases, .all)
+                            // An ended task is no longer on the tasks page; its reminder is the record.
+                            navigate(
+                                alert.category == .serverAbnormal ? .resources
+                                    : (alert.category == .taskEnded ? .alerts : .leases),
+                                .all
+                            )
                         } label: {
                             HStack(alignment: .firstTextBaseline, spacing: 8) {
                                 Circle()

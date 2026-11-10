@@ -200,7 +200,8 @@ def _public_error_message(exc: BrokerError) -> str:
         "workload_process_not_observed": "每张已分配 GPU 都检测到新的任务进程后才能完成绑定。",
         "idempotency_key_required": "本次写操作缺少 idempotency_key。",
         "endpoint_not_found": "这台服务器已经不在本机资源池中。",
-        "endpoint_has_active_leases": "这台服务器上还有进行中的租约，请先释放后再删除。",
+        "endpoint_has_active_leases": "这台服务器上还有进行中的任务，请先在“任务”页归还后再删除。",
+        "endpoint_keepalive_active": "这台服务器正在占卡，请先结束占卡后再删除。",
         "endpoint_has_active_allocations": "这台服务器上还有进行中的资源分配，请先结束后再删除。",
         "group_selection_required": "请先选择服务器分组后再申请 GPU。",
         "ungrouped_endpoint_required": "未分组申请请选择一台未分组服务器。",
@@ -1490,6 +1491,18 @@ def create_app(
         if holding is not None:
             claimed = await redeclare_task(actor, body, holding)
         else:
+            if body.take_over:
+                # Taking over means continuing work that already holds cards.
+                # Claiming fresh cards instead would hand the caller new cards
+                # while the task it meant keeps its own.
+                elsewhere = await service.in_domain(
+                    service.task_held_elsewhere, body.project, body.task
+                )
+                if elsewhere is not None:
+                    raise BrokerError(
+                        "takeover_project_mismatch", "这个任务属于其他项目，不能接管",
+                        status_code=409, details=elsewhere,
+                    )
             constraints: dict[str, Any] = {"gpu_count": body.gpu_count, "same_host": True}
             if body.server_group_id is not None:
                 constraints["server_group_ids"] = [body.server_group_id]

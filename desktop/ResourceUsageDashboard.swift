@@ -216,7 +216,7 @@ private struct TaskCard: View {
     }
 
     private func release() {
-        guard confirmLeaseRelease(lease, processes: store.snapshot.processes(holding: lease)) else { return }
+        guard confirmLeaseRelease(lease, processes: store.snapshot.processesToStop(holding: lease)) else { return }
         store.releaseLease(lease) { _, _ in }
     }
 }

@@ -14,6 +14,14 @@ struct EndpointTelemetryHistoryPanel: View {
         store.endpointTelemetryHistory(endpointID: endpoint.id, range: range)
     }
 
+    /// A chart already on screen stays while the minute's refresh loads, or if
+    /// that one refresh fails; the cache is shorter than the refresh, so every
+    /// refresh used to swap the chart for "正在载入".
+    private var showsChart: Bool {
+        guard let history else { return false }
+        return history.endpointID == endpoint.id && !history.samples.isEmpty
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(alignment: .firstTextBaseline) {
@@ -37,7 +45,7 @@ struct EndpointTelemetryHistoryPanel: View {
                     color: DesignTokens.warning,
                     message: "当前服务不支持历史数据。"
                 )
-            } else if store.endpointTelemetryHistoryLoading.contains(endpoint.id) {
+            } else if store.endpointTelemetryHistoryLoading.contains(endpoint.id) && !showsChart {
                 Label("正在载入 \(range.rawValue)", systemImage: "arrow.clockwise")
                     .font(Typography.annotation)
                     .foregroundStyle(DesignTokens.mutedInk)
@@ -45,7 +53,7 @@ struct EndpointTelemetryHistoryPanel: View {
                     .padding(.horizontal, 12)
                     .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous))
                     .overlay(RoundedRectangle(cornerRadius: DesignTokens.Radius.panel, style: .continuous).stroke(DesignTokens.surfaceStroke, lineWidth: 1))
-            } else if let error = store.endpointTelemetryHistoryErrors[endpoint.id] {
+            } else if let error = store.endpointTelemetryHistoryErrors[endpoint.id], !showsChart {
                 DetailCallout(icon: "exclamationmark.triangle.fill", color: DesignTokens.danger, message: error)
             } else if let history, !history.samples.isEmpty {
                 if history.endpointID == endpoint.id {

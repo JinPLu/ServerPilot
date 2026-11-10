@@ -545,11 +545,14 @@ struct ManageServerGroupsSheet: View {
                     .buttonStyle(.borderless)
                     .disabled(isSubmitting)
                     .accessibilityLabel("编辑服务器组 \(group.displayName)")
+                // The control plane refuses a group that still has servers. A
+                // fixed red kept a disabled button looking pressable.
+                let canDelete = canMutateGroups && !isSubmitting && members.isEmpty
                 Button("删除…") { deleteGroup(group) }
                     .buttonStyle(.borderless)
-                    .foregroundStyle(DesignTokens.danger)
-                    .disabled(!canMutateGroups || isSubmitting)
-                    .help(groupMutationHelp)
+                    .foregroundStyle(canDelete ? DesignTokens.danger : DesignTokens.mutedInk)
+                    .disabled(!canDelete)
+                    .help(members.isEmpty ? groupMutationHelp : "组内还有 \(members.count) 台服务器；先在“编辑”里把它们移出，才能删除这个组")
                     .accessibilityLabel("删除服务器组 \(group.displayName)")
             }
         }

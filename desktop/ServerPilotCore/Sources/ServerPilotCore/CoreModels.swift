@@ -1284,10 +1284,31 @@ public struct BrokerSnapshot: Equatable, Sendable {
 
     /// The processes last seen on a task's cards: what returning it in the
     /// App will end.  One process on two cards is one process.
-    public func processes(holding lease: LeaseRecord) -> [GPUProcessRecord] {
+    /// The processes on a task's cards, split the way returning it treats
+    /// them: the SSH login account's own (and those the collector could not
+    /// name, which the server looks for itself) are ended; another account's,
+    /// or one on a cluster node, is left alone. Counting them together put a
+    /// number in the confirmation that the return would never reach.
+    public func processesToStop(holding lease: LeaseRecord) -> (ending: [GPUProcessRecord], leaving: [GPUProcessRecord]) {
         let held = Set(lease.gpuIDs)
         var seen = Set<String>()
-        return gpus.filter { held.contains($0.id) }.flatMap(\.processes).filter { seen.insert($0.id).inserted }
+        var ending: [GPUProcessRecord] = []
+        var leaving: [GPUProcessRecord] = []
+        for gpu in gpus where held.contains(gpu.id) {
+            let endpoint = endpoint(id: gpu.endpointID)
+            for process in gpu.processes where seen.insert(process.id).inserted {
+                let otherAccount = process.username.map { name in
+                    // An ssh alias may log in as someone the inventory does not name.
+                    endpoint.map { $0.sshAlias == nil && name != $0.sshUser } ?? false
+                } ?? false
+                if gpu.nodeID == "self" && !otherAccount {
+                    ending.append(process)
+                } else {
+                    leaving.append(process)
+                }
+            }
+        }
+        return (ending, leaving)
     }
 
     public func endpoint(id: String) -> EndpointRecord? {

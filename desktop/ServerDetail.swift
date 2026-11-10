@@ -11,6 +11,10 @@ struct ServerDetailSheet: View {
     let endpointID: String
     let claim: () -> Void
     let edit: () -> Void
+    /// This server's own action failures. The store's error is app-wide, and
+    /// showing it here put another server's refusal, or a settings read that
+    /// failed, under this server's name until something else succeeded.
+    @State private var actionError: String?
 
     private var endpoint: EndpointRecord? {
         store.snapshot.endpoint(id: endpointID)
@@ -161,10 +165,11 @@ struct ServerDetailSheet: View {
                                     actionTitle: isMutating ? "处理中" : "归还遗留占卡",
                                     action: {
                                         guard !isMutating, confirmEmptyKeepaliveCleanup(gpuCount: gpuCount) else { return }
+                                        actionError = nil
                                         store.clearEmptyConflictedLease(
                                             endpointID: endpoint.id,
                                             leaseID: leaseID
-                                        ) { _, _ in }
+                                        ) { _, error in actionError = error }
                                     }
                                 )
                             }
@@ -195,11 +200,14 @@ struct ServerDetailSheet: View {
                                 // same refusal, worded the same way.
                                 let clearAction: (() -> Void)? = lease.manualRelease.allowed
                                     ? {
-                                        guard confirmEmptyLeaseCleanup(lease, conflict: conflict) else { return }
+                                        guard !isMutating,
+                                              confirmEmptyLeaseCleanup(lease, conflict: conflict, unreachable: unreachable)
+                                        else { return }
+                                        actionError = nil
                                         store.clearEmptyConflictedLease(
                                             endpointID: endpoint.id,
                                             leaseID: lease.id
-                                        ) { _, _ in }
+                                        ) { _, error in actionError = error }
                                     }
                                     : nil
                                 DetailCallout(
@@ -240,8 +248,8 @@ struct ServerDetailSheet: View {
                             )
                         }
 
-                        if let error = store.errorMessage {
-                            InlineValidation(message: error)
+                        if let actionError {
+                            InlineValidation(message: actionError)
                         }
 
                         if !hostFacts(endpoint).isEmpty {
@@ -561,7 +569,10 @@ struct ServerDetailSheet: View {
             if store.supportsEndpointKeepalive {
                 Button {
                     if occupancyActionStarts || confirmKeepaliveEnd(activeGPUCount: endpoint.keepalive.activeGPUCount) {
-                        store.setEndpointKeepalive(endpoint, enabled: occupancyActionStarts) { _, _ in }
+                        actionError = nil
+                        store.setEndpointKeepalive(endpoint, enabled: occupancyActionStarts) { _, error in
+                            actionError = error
+                        }
                     }
                 } label: {
                     Label(isMutating ? "处理中" : occupancyActionTitle, systemImage: occupancyActionIcon)

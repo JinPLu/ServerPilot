@@ -544,12 +544,36 @@ public final class BrokerStore: ObservableObject {
         requestRefresh()
     }
 
+    /// Connecting runs the provider's own login, which can take a minute: one
+    /// request at a time per server, and its outcome said when it lands. A
+    /// failed connect comes back as HTTP 200 with `action_required`, which the
+    /// app used to drop without a word.
     public func setConnection(_ endpoint: EndpointRecord, enabled: Bool) {
+        guard !mutatingEndpointIDs.contains(endpoint.id) else {
+            errorMessage = "这台服务器的连接正在处理，请稍候。"
+            return
+        }
+        mutatingEndpointIDs.insert(endpoint.id)
+        notice = enabled ? "正在连接 \(endpoint.connectionAddress)…" : "正在断开 \(endpoint.connectionAddress)…"
         performMutationWithPayload(
             path: "api/v2/endpoints/\(endpoint.id)/connection", method: "PUT", payload: ["enabled": enabled]
-        ) { [weak self] _, error in
-            if let error { self?.errorMessage = error }
-            self?.reload()
+        ) { [weak self] payload, error in
+            guard let self else { return }
+            self.mutatingEndpointIDs.remove(endpoint.id)
+            self.notice = nil
+            if let error {
+                self.errorMessage = error
+            } else if let connection = payload?["data"] as? [String: Any] {
+                switch connection.string("state") {
+                case "connected":
+                    self.notice = "已连接 \(endpoint.connectionAddress)。"
+                case "disconnected":
+                    self.notice = "已断开 \(endpoint.connectionAddress)。"
+                default:
+                    self.errorMessage = connection.string("message") ?? "连接没有成功，请检查后重试。"
+                }
+            }
+            self.reload()
         }
     }
 
@@ -1104,6 +1128,13 @@ public final class BrokerStore: ObservableObject {
             completion(false, message)
             return
         }
+        // A return takes up to a minute and a half; a second one would stop
+        // the same processes again and then report the finished task as an
+        // error.
+        guard !releasingLeaseIDs.contains(lease.id) else {
+            completion(false, "这个任务正在归还，请稍候。")
+            return
+        }
         releasingLeaseIDs.insert(lease.id)
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
@@ -1573,11 +1604,25 @@ public final class BrokerStore: ObservableObject {
         return rows.compactMap(AlertRecord.init)
     }
 
+    /// The control plane takes at most this many ids per mark.
+    static let alertMarkBatch = 200
+
     public func markAlerts(_ ids: [String], notified: Bool = false, acked: Bool = false) async {
-        _ = await requestJSON(
-            path: "api/v2/alerts/mark",
-            body: ["alert_ids": ids, "notified": notified, "acked": acked]
-        )
+        // A day of reminders gathered while the app was closed can exceed one
+        // request's limit; a refused mark used to repeat the same banner every
+        // fifteen seconds.
+        var failed = false
+        for start in stride(from: 0, to: ids.count, by: Self.alertMarkBatch) {
+            let batch = Array(ids[start..<min(start + Self.alertMarkBatch, ids.count)])
+            let marked = await requestJSON(
+                path: "api/v2/alerts/mark",
+                body: ["alert_ids": batch, "notified": notified, "acked": acked]
+            )
+            failed = failed || marked == nil
+        }
+        if failed && acked {
+            errorMessage = "提醒没有确认成功，请稍后重试。"
+        }
         // The badge answers now, not at the next pulse; the pulse reloads the
         // list whenever the count it reports has moved.
         await checkPulse()
@@ -1665,12 +1710,29 @@ public final class BrokerStore: ObservableObject {
         }
     }
 
-    /// Registering a host waits out the one collection it performs; every
-    /// other mutation is a local database write. Keyed by path, the same way
-    /// the Python client budgets this call.
+    /// What the control plane may spend before answering, for the paths that
+    /// wait on a server; everything else is a local database write. Giving
+    /// every mutation ten seconds made the app report "提交失败" for a claim, a
+    /// keepalive switch or a cleanup the server went on to finish, and a
+    /// second click could then claim twice. The claim budget is the Python
+    /// client's `CONTROL_PLANE_CLAIM_TIMEOUT_SECONDS`.
+    private static let slowMutationTimeouts: [(path: String, suffix: Bool, seconds: TimeInterval)] = [
+        // Registering observes the new host once.
+        ("api/v2/endpoints", false, 60),
+        // A claim may stop a keeper, then observe the host.
+        ("api/v2/claims", false, 200),
+        // Starting or stopping keepers, then observing.
+        ("/keepalive", true, 200),
+        // Reassignment may stop a keeper on the target cards first.
+        ("/gpus", true, 200),
+        // A provider's connect or disconnect.
+        ("/connection", true, 70),
+        // One fresh collection of the host before the proof.
+        ("/release-empty", true, 60),
+    ]
+
     static func mutationTimeout(forPath path: String) -> TimeInterval {
-        if path.hasSuffix("/connection") { return 70 }
-        return path == "api/v2/endpoints" ? 60 : 10
+        slowMutationTimeouts.first { $0.suffix ? path.hasSuffix($0.path) : path == $0.path }?.seconds ?? 10
     }
 
     private func performMutationWithPayload(
@@ -1827,7 +1889,9 @@ public final class BrokerStore: ObservableObject {
         case "endpoint_not_found":
             return "这台服务器已经不在本机资源池中。"
         case "endpoint_has_active_leases":
-            return "这台服务器上还有进行中的租约，请先归还后再删除。"
+            return "这台服务器上还有进行中的任务，请先在“任务”页归还后再删除。"
+        case "endpoint_keepalive_active":
+            return "这台服务器正在占卡，请先结束占卡后再删除。"
         case "endpoint_has_active_allocations":
             return "这台服务器上还有进行中的资源分配，请先结束后再删除。"
         case "server_group_not_found":

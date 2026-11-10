@@ -113,11 +113,11 @@ struct NodeAllocationSheet: View {
                             HStack {
                                 Text("\(lease.projectID) · \(lease.taskReference ?? "未标注任务")").font(Typography.label)
                                 Spacer()
-                                Button("归还分配") {
-                                    guard confirmLeaseRelease(lease, processes: store.snapshot.processes(holding: lease)) else { return }
+                                Button(store.releasingLeaseIDs.contains(lease.id) ? "归还中" : "归还分配") {
+                                    guard confirmLeaseRelease(lease, processes: store.snapshot.processesToStop(holding: lease)) else { return }
                                     store.releaseLease(lease) { _, _ in }
                                 }
-                                .disabled(!store.allowsMutations)
+                                .disabled(!store.allowsMutations || store.releasingLeaseIDs.contains(lease.id))
                             }
                             ForEach(lease.allocations.filter { $0.endpointID == endpoint.id && $0.locations.contains { $0.node == node.name } }) { allocation in
                                 AllocationFactsView(allocation: allocation)

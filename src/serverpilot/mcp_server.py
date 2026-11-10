@@ -863,7 +863,7 @@ DOCUMENTED_REFUSALS = frozenset({
     "lease_not_found", "lease_forbidden", "lease_taken_over", "lease_ended",
     "takeover_project_mismatch", "project_required", "allocation_unconfirmed", "duration_required",
     "entry_unusable", "restart_client", "server_required", "server_group_not_found",
-    "endpoint_not_found", "keepalive_helper_unreachable",
+    "endpoint_not_found", "keepalive_helper_unreachable", "gpu_count_too_large",
     # Clearing another project's abandoned task: the App's release, refused.
     "lease_holder_recently_alive", "conflict_process_present", "conflict_observation_stale",
     "conflict_observation_incomplete", "lease_has_no_resources", "lease_endpoint_mismatch",
@@ -890,8 +890,14 @@ def _next_step(code: str, details: dict[str, Any]) -> dict[str, Any] | None:
         return {"tool": "gpu_status", "args": {}}
     if code == "no_capacity":
         return {"tool": "gpu_apply", "args": "repeat the same call after retry_after_seconds"}
-    if code == "lease_not_found":
+    if code in {"lease_not_found", "endpoint_not_found", "server_group_not_found"}:
         return {"tool": "gpu_status", "args": {}}
+    if code == "card_not_held":
+        return {"tool": "gpu_release", "args": {"gpu_ids": "<gpu_id values from details.held>"}}
+    if code == "gpu_count_too_large":
+        if details.get("grows_on"):
+            return {"tool": "gpu_apply", "args": {"change": True, "server_id": "<another server with free cards, from gpu_status()>"}}
+        return {"human": "No server can give this task that many cards; ask a person to change its card count"}
     if code == "duration_required":
         return {"tool": "gpu_apply", "args": {"duration_seconds": "<how long the job runs>"}}
     if code == "lease_holder_recently_alive":
@@ -1105,6 +1111,13 @@ async def gpu_status(
             return {"ok": True, **view}
         if server_id is not None:
             payload = await _client_call(client, "snapshot", endpoint_id=server_id)
+            if not any(item.get("id") == server_id for item in payload["data"].get("endpoints", [])):
+                # The snapshot filter answers an unknown id with nothing, which
+                # reads as a server with no nodes rather than no such server.
+                raise BrokerClientError(
+                    f"broker HTTP 404: endpoint_not_found: no server {server_id}",
+                    code="endpoint_not_found", status_code=404,
+                )
             detail = _routine_gpu_status(payload, lease_id=None)
             return {"ok": True, "nodes": [_node_view(node) for node in detail.get("resource_nodes", [])]}
         groups = (await _client_call(client, "get", "/api/v2/capacity"))["groups"]
@@ -1150,7 +1163,7 @@ async def gpu_apply(
             "within heartbeat_within_seconds; call gpu_release(task, outcome) when it ends."
         ),
     }
-    if "added_gpu_ids" in payload:
+    if payload.get("added_gpu_ids"):
         # A running process cannot see cards that were not there when it started.
         answer["restart_required"] = True
     return answer

@@ -113,10 +113,11 @@ def test_a_lease_can_reach_a_second_server_and_gives_both_entries(rest) -> None:
     agent = Agent(rest, "session-one")
     lease = agent.apply(server_id="endpoint-a")["lease"]
 
-    # By default a lease grows only where it already is.
+    # By default a lease grows only where it already is, and this one is full
+    # for good there: the refusal says so and names where it looked.
     refused = agent.post(f"/api/v2/leases/{lease['id']}/resize", {"add_count": 1}, expect=409)
-    assert refused["error"]["code"] == "no_capacity"
-    assert refused["error"]["details"]["alternatives"]
+    assert refused["error"]["code"] == "gpu_count_too_large"
+    assert refused["error"]["details"]["grows_on"] == ["endpoint-a"]
 
     grown = agent.post(f"/api/v2/leases/{lease['id']}/resize", {"add_count": 2, "server_id": "endpoint-b"})
     hosts = {item["endpoint"]["id"] for item in grown["lease"]["resources"]}

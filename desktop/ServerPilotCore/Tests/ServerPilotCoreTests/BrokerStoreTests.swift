@@ -1849,6 +1849,17 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints") > 45)
         #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints/server-a") == 10)
     }
+
+    @Test func aMutationThatWaitsOnAServerIsGivenTimeToFinish() {
+        // Ten seconds made the app call these failed while the control plane
+        // went on to finish them: a claim may stop a keeper and observe the
+        // host, a cleanup collects the host first.
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/claims") >= 200)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints/server-a/keepalive") >= 105)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/operator/leases/l1/gpus") >= 105)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/endpoints/server-a/leases/l1/release-empty") > 30)
+        #expect(BrokerStore.mutationTimeout(forPath: "api/v2/server-groups") == 10)
+    }
 }
 
 @MainActor
@@ -1876,7 +1887,31 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         ]))
         var snapshot = BrokerSnapshot.empty
         snapshot.gpus = gpus
-        #expect(snapshot.processes(holding: lease).map(\.pid) == [7])
+        #expect(snapshot.processesToStop(holding: lease).ending.map(\.pid) == [7])
+    }
+
+    @Test func anotherAccountsProcessIsNotCountedAmongThoseEnded() throws {
+        // The confirmation used to say "结束 3 个进程" while the return would
+        // never touch alice's job.
+        let gpu = try #require(GPURecord(raw: [
+            "id": "a", "endpoint_id": "server", "name": "A100", "gpu_index": 0, "state": "RUNNING_MANAGED",
+            "processes": [
+                ["pid": 7, "executable": "python", "username": "gpu", "process_key": "k7"],
+                ["pid": 8, "executable": "python", "username": "alice", "process_key": "k8"],
+                // A container's host PID: unnamed, so the server looks for it itself.
+                ["pid": 9, "executable": "[Not Found]", "process_key": "k9"],
+            ],
+        ]))
+        let endpoint = try #require(EndpointRecord(raw: ["id": "server", "host": "10.0.0.1", "ssh_user": "gpu"]))
+        let lease = try #require(LeaseRecord(raw: [
+            "id": "l", "actor_id": "agent", "project_id": "p", "gpu_ids": ["a"], "state": "ACTIVE",
+        ]))
+        var snapshot = BrokerSnapshot.empty
+        snapshot.gpus = [gpu]
+        snapshot.endpoints = [endpoint]
+        let split = snapshot.processesToStop(holding: lease)
+        #expect(split.ending.map(\.pid) == [7, 9])
+        #expect(split.leaving.map(\.pid) == [8])
     }
 }
 

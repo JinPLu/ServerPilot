@@ -34,28 +34,40 @@ enum ServiceProbeResult {
 
 @discardableResult
 
-/// Returning a task ends it: name the processes that will be stopped, and how.
-func confirmLeaseRelease(_ lease: LeaseRecord, processes: [GPUProcessRecord]) -> Bool {
+private func processLines(_ processes: [GPUProcessRecord]) -> String {
+    let listed = processes.prefix(6).map { process in
+        let memory = process.memoryMiB.map { " · \(memoryMiBLabel($0))" } ?? ""
+        return "PID \(process.pid) · \(process.executable) · \(process.username ?? "未知账号")\(memory)"
+    }
+    return listed.joined(separator: "\n") + (processes.count > 6 ? "\n另有 \(processes.count - 6) 个" : "")
+}
+
+/// Returning a task ends it: name the processes that will be stopped, and how,
+/// apart from the ones it will leave running.
+func confirmLeaseRelease(
+    _ lease: LeaseRecord,
+    processes: (ending: [GPUProcessRecord], leaving: [GPUProcessRecord])
+) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
+    let leaving = processes.leaving.isEmpty
+        ? ""
+        : "\n\n以下进程属于其他账号或集群节点，不会被结束，会继续占着卡：\n" + processLines(processes.leaving)
     if lease.allocations.contains(where: { $0.releaseGranularity == "allocation" }) {
         alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
         alert.informativeText = "将归还整个资源分配，提供方可能终止其中仍在运行的程序。请先确认任务已结束。"
         alert.addButton(withTitle: "归还")
-    } else if processes.isEmpty {
+    } else if processes.ending.isEmpty {
         alert.messageText = "归还 \(lease.gpuCount) 张 GPU？"
-        alert.informativeText = "这个任务的卡上没有看到运行中的进程。"
+        alert.informativeText = processes.leaving.isEmpty
+            ? "这个任务的卡上没有看到运行中的进程。"
+            : "ServerPilot 不会结束任何进程。" + leaving
         alert.addButton(withTitle: "归还")
     } else {
-        alert.messageText = "归还 \(lease.gpuCount) 张 GPU，并结束 \(processes.count) 个进程？"
-        let listed = processes.prefix(6).map { process in
-            let memory = process.memoryMiB.map { " · \(memoryMiBLabel($0))" } ?? ""
-            return "PID \(process.pid) · \(process.executable) · \(process.username ?? "未知账号")\(memory)"
-        }
-        let more = processes.count > 6 ? "\n另有 \(processes.count - 6) 个" : ""
-        alert.informativeText = listed.joined(separator: "\n") + more + "\n\n"
+        alert.messageText = "归还 \(lease.gpuCount) 张 GPU，并结束 \(processes.ending.count) 个进程？"
+        alert.informativeText = processLines(processes.ending) + "\n\n"
             + "ServerPilot 会先在服务器上核对每个进程仍是这个任务的、属于登录账号，"
-            + "再发送 SIGTERM；10 秒后仍在运行的发送 SIGKILL。其他账号的进程不会被结束。"
+            + "再发送 SIGTERM；10 秒后仍在运行的发送 SIGKILL。" + leaving
         alert.addButton(withTitle: "归还并结束进程")
         alert.buttons.first?.hasDestructiveAction = true
     }
@@ -107,16 +119,23 @@ private func processObservationSummary(_ isoTimestamp: String?) -> String {
 
 @discardableResult
 
-func confirmEmptyLeaseCleanup(_ lease: LeaseRecord, conflict: Bool) -> Bool {
+func confirmEmptyLeaseCleanup(_ lease: LeaseRecord, conflict: Bool, unreachable: Bool) -> Bool {
     let alert = NSAlert()
     alert.alertStyle = .warning
-    alert.messageText = conflict ? "确认任务已结束后清理记录？" : "归还这笔空闲占用？"
+    // A server that stopped answering cannot prove its cards empty, and the
+    // control plane waives that proof; saying it will check would be untrue.
+    let how = unreachable
+        ? "这台服务器已停止应答，ServerPilot 无法确认这些 GPU 上是否还有进程，会直接结清这条记录。如果任务其实还在运行，它的卡会被当作空闲重新分配。此操作不会停止远端任务。"
+        : "ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会归还。此操作不会停止远端任务。"
+    alert.messageText = conflict
+        ? "确认任务已结束后清理记录？"
+        : (unreachable ? "结清失联服务器上的这条记录？" : "归还这笔空闲占用？")
     alert.informativeText = """
-    ServerPilot 会先重新采集这台服务器；只有确认这笔租约覆盖的 GPU 都没有运行中的进程时才会归还。此操作不会停止远端任务。
+    \(how)
 
     \(processObservationSummary(lease.lastProcessObservedAt))
     """
-    alert.addButton(withTitle: conflict ? "确认任务已结束后清理" : "归还空闲占用")
+    alert.addButton(withTitle: conflict ? "确认任务已结束后清理" : (unreachable ? "结清记录" : "归还空闲占用"))
     alert.addButton(withTitle: "取消")
     return alert.runModal() == .alertFirstButtonReturn
 }
@@ -146,10 +165,15 @@ func confirmEndpointsDelete(_ endpoints: [EndpointRecord]) -> Bool {
     alert.messageText = endpoints.count == 1
         ? "从 ServerPilot 移除这台服务器？"
         : "从 ServerPilot 移除 \(endpoints.count) 台服务器？"
+    // Deleting a server that stopped answering also settles its tasks: that
+    // is how a person says the machine is gone, and the agents lose the cards.
+    let settles = endpoints.contains { $0.monitorStatus != "ONLINE" }
+        ? "\n\n已停止应答的服务器上如果还有进行中的任务，会一并结清，Agent 会失去这些卡。"
+        : ""
     alert.informativeText = """
     \(listed.joined(separator: "\n"))
 
-    这会停止对本机的监控与协调，并移除本机关联记录，不会停止远端进程。
+    ServerPilot 将不再监控和协调这台服务器，并删除它在本机的记录；不会停止远端进程。\(settles)
     """
     alert.addButton(withTitle: "取消")
     alert.addButton(withTitle: endpoints.count == 1 ? "从 ServerPilot 移除" : "移除 \(endpoints.count) 台")
@@ -163,7 +187,7 @@ func confirmServerGroupDelete(_ group: ServerGroupRecord) -> Bool {
     alert.alertStyle = .warning
     alert.messageText = "删除服务器组「\(group.displayName)」？"
     alert.informativeText = """
-    只会删除分组，不会停止远端进程，也不会移除组内服务器。组内仍有服务器时删除会失败。
+    只会删除分组，不会停止远端进程。
     """
     alert.addButton(withTitle: "取消")
     alert.addButton(withTitle: "删除服务器组")

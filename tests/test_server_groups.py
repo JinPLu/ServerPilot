@@ -426,7 +426,9 @@ def test_no_cross_group_allocation_and_within_group_best_fit(tmp_path: Path) -> 
             claim(task_ref="too-big", gpu_count=8, server_group_ids=["group-small"]),
             idempotency_key="too-big",
         )
-    assert error.value.code == "no_capacity"
+    # The 8-card server in another group does not count: no wait makes 8 fit here.
+    assert error.value.code == "gpu_count_too_large"
+    assert error.value.details == {"gpu_count": 8, "largest_server": 2}
     fitted = service.create_request(
         admin,
         claim(task_ref="one-card", gpu_count=1, server_group_ids=["group-small"]),

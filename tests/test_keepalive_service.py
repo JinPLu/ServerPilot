@@ -793,6 +793,18 @@ def test_active_keepalive_adapter_cannot_be_removed(service, admin) -> None:
     assert blocked.value.code == "keepalive_endpoint_connection_in_use"
 
 
+def test_a_server_held_only_by_keepalive_names_keepalive_when_deletion_is_refused(service, admin) -> None:
+    """A keepalive hold is not on the tasks page; "return the task first" sent people looking for nothing."""
+
+    _configure_idle_policy(service, admin)
+    _begin(service, admin)
+
+    with pytest.raises(BrokerError) as blocked:
+        service.delete_endpoint(admin, "endpoint-a", idempotency_key="delete-while-keeping")
+    assert blocked.value.code == "endpoint_keepalive_active"
+    assert "占卡" in blocked.value.message
+
+
 def test_active_keepalive_workspace_cannot_change(service, admin) -> None:
     _configure_idle_policy(service, admin)
     _begin(service, admin)

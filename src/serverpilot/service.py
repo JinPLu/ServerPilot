@@ -1138,9 +1138,16 @@ class BrokerService:
         return self._endpoint_freshness(session, endpoint_id, now).unreachable
 
     @staticmethod
-    def _endpoint_has_active_leases(session: Session, endpoint_id: str) -> bool:
-        gpu_lease_id = session.scalar(
-            select(Lease.id)
+    def _endpoint_active_lease_kinds(session: Session, endpoint_id: str) -> set[str]:
+        """The kinds of live lease that hold this endpoint: ``workload`` and/or ``keepalive``.
+
+        A keepalive hold is not on the tasks page, so the refusal to delete
+        has to name it apart from a task, or a person is sent to return
+        something they cannot find.
+        """
+
+        kinds = set(session.scalars(
+            select(Lease.kind)
             .join(LeaseResource, LeaseResource.lease_id == Lease.id)
             .join(GPUDevice, GPUDevice.id == LeaseResource.gpu_id)
             .where(
@@ -1148,26 +1155,24 @@ class BrokerService:
                 Lease.state.in_(ACTIVE_LEASE_STATES),
                 LeaseResource.active.is_(True),
             )
-            .limit(1)
-        )
-        if gpu_lease_id is not None:
-            return True
-        commitment_lease_id = session.scalar(
-            select(Lease.id)
+            .distinct()
+        ).all())
+        kinds.update(session.scalars(
+            select(Lease.kind)
             .join(LeaseEndpointCommitment, LeaseEndpointCommitment.lease_id == Lease.id)
             .where(
                 LeaseEndpointCommitment.endpoint_id == endpoint_id,
                 Lease.state.in_(ACTIVE_LEASE_STATES),
             )
-            .limit(1)
-        )
-        if commitment_lease_id is not None:
-            return True
-        return session.scalar(select(ResourceAllocation.id).where(
+            .distinct()
+        ).all())
+        if session.scalar(select(ResourceAllocation.id).where(
             ResourceAllocation.endpoint_id == endpoint_id,
             ResourceAllocation.provider_id != "builtin",
             ResourceAllocation.state.in_(["applying", "unconfirmed", "active", "release_pending"]),
-        ).limit(1)) is not None
+        ).limit(1)) is not None:
+            kinds.add("workload")
+        return kinds
 
     def _settle_leases_for_deleted_endpoint(
         self,
@@ -6492,6 +6497,21 @@ class BrokerService:
 
         return self._read(operation)
 
+    def task_held_elsewhere(self, project_id: str, task: str) -> dict[str, Any] | None:
+        """Another project's live task of this name, which take_over cannot reach."""
+
+        def operation(session: Session) -> dict[str, Any] | None:
+            lease = session.scalar(select(Lease).where(
+                Lease.kind == "workload",
+                Lease.task_ref == task,
+                Lease.released_at.is_(None),
+                Lease.project_id != project_id,
+                Lease.owner_session_id.is_not(None),
+            ).order_by(Lease.issued_at.desc()))
+            return None if lease is None else {"lease_id": lease.id, "project": lease.project_id}
+
+        return self._read(operation)
+
     def idle_card_ids(self, lease_id: str) -> list[str]:
         """Cards of a lease that are running nothing, the ones a smaller count gives up."""
 
@@ -6606,10 +6626,12 @@ class BrokerService:
                         LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
                     )).all()
                 })
-            return RequestCreate(
+            request = RequestCreate(
                 project_id=lease.project_id, task_ref=lease.task_ref, purpose=lease.purpose,
                 duration_seconds=lease.duration_seconds, constraints=constraints,
             )
+            self._require_known_scope(session, request.constraints)
+            return request
 
         return self._read(operation)
 
@@ -6647,9 +6669,12 @@ class BrokerService:
             by_gpu.update({self._gpu_uuid(session, card.gpu_id): card for card in active})
             unknown = [gpu_id for gpu_id in remove_gpu_ids if gpu_id not in by_gpu]
             if unknown:
+                # Naming the cards it does hold is what lets a caller that sent
+                # an index, not a gpu_id, correct itself.
                 raise BrokerError(
                     "card_not_held", "租约里没有这张 GPU", status_code=409,
-                    details={"gpu_ids": unknown},
+                    details={"gpu_ids": unknown,
+                             "held": sorted(self._gpu_uuid(session, card.gpu_id) for card in active)},
                 )
             busy = [
                 gpu_id
@@ -6718,6 +6743,7 @@ class BrokerService:
         candidates, excluded = self._eligible_gpus(session, constraints=constraints, now=now)
         chosen = self._select_resources_in_group_partitions(session, candidates, constraints)
         if chosen is None:
+            self._refuse_beyond_any_server(session, constraints, lease=lease)
             raise BrokerError(
                 "no_capacity",
                 f"没有足够的可用 GPU（需要 {constraints.gpu_count} 张）",
@@ -7931,6 +7957,58 @@ class BrokerService:
                 chosen_score = score
         return chosen
 
+    def _refuse_beyond_any_server(
+        self, session: Session, constraints: ResourceConstraints, *, lease: Lease | None
+    ) -> None:
+        """Refuse, for good, a count no server in reach could ever give.
+
+        ``no_capacity`` tells the caller to wait, and a claim for more cards
+        than its servers have would wait forever: an agent repeating it every
+        minute is the observed result. Growing a task is measured against what
+        its servers hold beyond the task's own cards. When the size is not
+        knowable here (a scheduler-managed server, one never observed, a claim
+        that may span servers or filters cards) the ordinary refusal stands.
+        """
+
+        if not constraints.same_host or constraints.nodes != 1 or any((
+            constraints.gpu_ids, constraints.gpu_labels, constraints.endpoint_labels,
+            constraints.min_total_vram_mib, constraints.min_free_vram_mib,
+        )):
+            return
+        endpoints = session.scalars(select(Endpoint).order_by(Endpoint.id)).all()
+        if constraints.server_group_ids:
+            reach = [item for item in endpoints if item.server_group_id in constraints.server_group_ids]
+        elif constraints.endpoint_ids:
+            reach = [item for item in endpoints if item.id in constraints.endpoint_ids]
+        else:
+            reach = list(endpoints)
+        reach = [item for item in reach if item.id not in constraints.deny_endpoint_ids]
+        if any(item.observation_profile != "linux" or item.resource_kind == "unknown" for item in reach):
+            return
+        own = set() if lease is None else set(session.scalars(select(LeaseResource.gpu_id).where(
+            LeaseResource.lease_id == lease.id, LeaseResource.active.is_(True)
+        )).all())
+        largest = max((
+            sum(1 for gpu_id in session.scalars(select(GPUDevice.id).where(
+                GPUDevice.endpoint_id == item.id, GPUDevice.present.is_(True),
+                GPUDevice.cuda_ordinal.is_not(None),
+            )).all() if gpu_id not in own)
+            for item in reach
+        ), default=0)
+        if constraints.gpu_count <= largest:
+            return
+        details: dict[str, Any] = {"gpu_count": constraints.gpu_count, "largest_server": largest}
+        if lease is None:
+            message = f"没有一台服务器能给出 {constraints.gpu_count} 张卡，最多 {largest} 张"
+        else:
+            # A task may still grow onto a server it names; only these are full.
+            details["grows_on"] = [item.id for item in reach]
+            message = (
+                f"这些服务器最多还能给这个任务加 {largest} 张卡，加不了 {constraints.gpu_count} 张；"
+                "要在别的服务器上加卡，请指明那台服务器"
+            )
+        raise BrokerError("gpu_count_too_large", message, status_code=409, details=details)
+
     def _issue_lease(
         self,
         session: Session,
@@ -7966,6 +8044,7 @@ class BrokerService:
         candidates, excluded = self._eligible_gpus(session, constraints=constraints, now=now)
         resources = self._select_resources_in_group_partitions(session, candidates, constraints)
         if resources is None:
+            self._refuse_beyond_any_server(session, constraints, lease=None)
             raise BrokerError(
                 "no_capacity",
                 f"没有满足本次申请的可用 GPU（需要 {constraints.gpu_count} 张）",
@@ -8045,6 +8124,38 @@ class BrokerService:
         )
         return lease, event
 
+    @staticmethod
+    def _require_known_scope(session: Session, constraints: ResourceConstraints) -> None:
+        """Refuse a claim naming a server or group that does not exist.
+
+        An unknown server id used to fall through to the allocator, which
+        excluded every card and answered ``no_capacity``: a retryable refusal
+        for something no wait could ever change.
+        """
+
+        missing_servers = [
+            endpoint_id for endpoint_id in constraints.endpoint_ids
+            if session.get(Endpoint, endpoint_id) is None
+        ]
+        if missing_servers:
+            raise BrokerError(
+                "endpoint_not_found",
+                f"unknown endpoint_ids: {missing_servers}",
+                status_code=404,
+                details={"server_ids": missing_servers},
+            )
+        missing_groups = [
+            group_id for group_id in constraints.server_group_ids
+            if session.get(ServerGroup, group_id) is None
+        ]
+        if missing_groups:
+            raise BrokerError(
+                "server_group_not_found",
+                f"unknown server_group_ids: {missing_groups}",
+                status_code=404,
+                details={"server_group_ids": missing_groups},
+            )
+
     def _enforce_direct_group_selection(
         self,
         session: Session,
@@ -8054,20 +8165,7 @@ class BrokerService:
     ) -> None:
         if constraints.gpu_count <= 0:
             return
-        selected_groups = list(constraints.server_group_ids)
-        if selected_groups:
-            missing = [
-                group_id
-                for group_id in selected_groups
-                if session.get(ServerGroup, group_id) is None
-            ]
-            if missing:
-                raise BrokerError(
-                    "server_group_not_found",
-                    f"unknown server_group_ids: {missing}",
-                    status_code=404,
-                    details={"server_group_ids": missing},
-                )
+        if constraints.server_group_ids:
             return
         groups = self._server_groups_by_id(session)
         if not groups:
@@ -8079,8 +8177,6 @@ class BrokerService:
             grouped_pins: list[str] = []
             for endpoint_id in pinned_ids:
                 endpoint = session.get(Endpoint, endpoint_id)
-                if endpoint is None:
-                    continue
                 if is_plugin_profile(endpoint.observation_profile):
                     continue
                 if endpoint.server_group_id is not None:
@@ -8171,6 +8267,7 @@ class BrokerService:
         project = self._ensure_claim_project(session, request_data.project_id, now)
         if not project.enabled:
             raise BrokerError("project_disabled", "project is disabled", status_code=409)
+        self._require_known_scope(session, request_data.constraints)
         self._enforce_direct_group_selection(
             session,
             request_data.constraints,
@@ -9977,10 +10074,17 @@ class BrokerService:
             if unresolved is not None:
                 raise BrokerError("endpoint_has_active_allocations", "仍有未确认归还的远端分配，不能删除其连接信息。", status_code=409)
             unreachable = self._endpoint_is_unreachable(session, endpoint.id, now)
-            if not unreachable and self._endpoint_has_active_leases(session, endpoint.id):
+            held_by = set() if unreachable else self._endpoint_active_lease_kinds(session, endpoint.id)
+            if "workload" in held_by:
                 raise BrokerError(
                     "endpoint_has_active_leases",
-                    "这台服务器上还有进行中的租约，请先释放后再删除。",
+                    "这台服务器上还有进行中的任务，请先在“任务”页归还后再删除。",
+                    status_code=409,
+                )
+            if held_by:
+                raise BrokerError(
+                    "endpoint_keepalive_active",
+                    "这台服务器正在占卡，请先结束占卡后再删除。",
                     status_code=409,
                 )
             # Deleting a server that stopped answering is how an operator says

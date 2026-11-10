@@ -13,6 +13,7 @@ import pytest
 from sqlalchemy import select
 
 from serverpilot.models import GPUDevice, Lease, LeaseResource
+from serverpilot.schemas import RequestCreate
 from serverpilot.service import ActorContext, BrokerError
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation, process_for_gpu, tools
@@ -139,9 +140,84 @@ def test_releasing_one_of_two_leases_does_not_touch_the_other(routine) -> None: 
     assert _free(tools.gpu_status()) == 2
 
 
-def test_status_of_an_unknown_server_is_empty(routine) -> None:  # type: ignore[no-untyped-def]
+def test_an_unknown_server_is_named_rather_than_waited_for(routine) -> None:  # type: ignore[no-untyped-def]
+    """A misspelt server id used to read as a busy fleet, retried every minute."""
+
     routine.ingest_observation(observation(count=2))
-    assert tools.gpu_status(server_id="no-such-server")["nodes"] == []
+
+    looked = tools.gpu_status(server_id="no-such-server")["error"]
+    applied = tools.gpu_apply(task="拼错的服务器", server_id="no-such-server")["error"]
+
+    for error in (looked, applied):
+        assert error["code"] == "endpoint_not_found"
+        assert error["retryable"] is False
+        assert error["next"] == {"tool": "gpu_status", "args": {}}
+    assert applied["details"] == {"server_ids": ["no-such-server"]}
+
+
+def test_more_cards_than_any_server_holds_is_refused_for_good(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation("endpoint-a", count=2))
+    routine.ingest_observation(observation("endpoint-b", count=2))
+
+    refused = tools.gpu_apply(task="三张卡", gpu_count=3)["error"]
+
+    assert refused["code"] == "gpu_count_too_large"
+    assert refused["retryable"] is False
+    assert "retry_after_seconds" not in refused
+    assert refused["details"] == {"gpu_count": 3, "largest_server": 2}
+    assert "human" in refused["next"]
+
+
+def test_growing_past_the_tasks_own_server_is_refused_for_good(routine) -> None:  # type: ignore[no-untyped-def]
+    """Added cards stay on the task's server, so the other server's free cards do not count."""
+
+    routine.ingest_observation(observation("endpoint-a", count=2))
+    routine.ingest_observation(observation("endpoint-b", count=2))
+    tools.gpu_apply(task="满机任务", gpu_count=2)
+
+    refused = tools.gpu_apply(task="满机任务", gpu_count=3, change=True)["error"]
+
+    assert refused["code"] == "gpu_count_too_large"
+    assert refused["details"]["largest_server"] == 0
+    # Naming another server is how a task grows past its own.
+    assert refused["next"]["args"]["change"] is True
+    assert "server_id" in refused["next"]["args"]
+
+
+def test_cards_held_by_others_still_mean_wait(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation("endpoint-a", count=2))
+    routine.ingest_observation(observation("endpoint-b", count=2))
+    tools.gpu_apply(task="占满 a", gpu_count=2)
+    tools.gpu_apply(task="占满 b", gpu_count=2)
+
+    refused = tools.gpu_apply(task="等一等", gpu_count=2)["error"]
+
+    assert refused["code"] == "no_capacity"
+    assert refused["retryable"] is True
+
+
+def test_only_added_cards_ask_for_a_restart(routine) -> None:  # type: ignore[no-untyped-def]
+    """A running process keeps the cards it has; it only misses cards added after it started."""
+
+    routine.ingest_observation(observation(count=2))
+    tools.gpu_apply(task="伸缩", gpu_count=2)
+
+    shrunk = tools.gpu_apply(task="伸缩", gpu_count=1, change=True)
+    grown = tools.gpu_apply(task="伸缩", gpu_count=2, change=True)
+
+    assert "restart_required" not in shrunk
+    assert grown["restart_required"] is True
+
+
+def test_returning_a_card_by_index_names_the_cards_the_task_holds(routine) -> None:  # type: ignore[no-untyped-def]
+    routine.ingest_observation(observation(count=2))
+    tools.gpu_apply(task="按序号归还", gpu_count=2)
+
+    refused = tools.gpu_release(task="按序号归还", gpu_ids=["0"])["error"]
+
+    assert refused["code"] == "card_not_held"
+    assert refused["details"]["held"] == ["GPU-endpoint-a-0", "GPU-endpoint-a-1"]
+    assert refused["next"]["tool"] == "gpu_release"
 
 
 def test_asking_about_your_own_lease_keeps_it_from_being_reclaimed(routine) -> None:  # type: ignore[no-untyped-def]
@@ -382,3 +458,30 @@ def test_a_task_that_runs_out_its_time_is_reported_too(routine) -> None:  # type
     routine.ingest_observation(observation(count=1))
 
     assert ["到期结束" in item["message"] for item in _ended(routine)] == [True]
+
+
+def test_take_over_never_claims_fresh_cards_for_another_projects_task(routine) -> None:  # type: ignore[no-untyped-def]
+    """Taking over means continuing work that holds cards, not starting it again elsewhere."""
+
+    routine.ingest_observation(observation(count=1))
+    routine.ingest_observation(observation("endpoint-b", count=1))
+    routine.local_actor("codex")
+    routine.register_agent_session(
+        OTHER_AGENT, session_id="other-session", client="codex", client_version=None,
+        project_id="other-project",
+    )
+    theirs = routine.create_request(
+        OTHER_AGENT,
+        RequestCreate(project_id="other-project", task_ref="同名任务", purpose="同名任务",
+                      duration_seconds=3600, constraints={"gpu_count": 1, "same_host": True}),
+        idempotency_key=None, persistent_lease=True,
+    )["lease"]["id"]
+
+    refused = tools.gpu_apply(task="同名任务", take_over=True)["error"]
+
+    assert refused["code"] == "takeover_project_mismatch"
+    assert refused["details"] == {"lease_id": theirs, "project": "other-project"}
+    assert "human" in refused["next"]
+    assert _free(tools.gpu_status()) == 1
+    # Without take_over the name is simply this project's own new task.
+    assert tools.gpu_apply(task="同名任务")["ok"] is True
