@@ -5,6 +5,22 @@
 当前包装版本为 `5.5.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
 
+## 每台服务器可设置占卡负载（2026-11-11，Unreleased）
+
+另一会话在新接入的 8 卡 B20Z 上开占卡，用户要求利用率达到 90%，实测约 43%（A800 约 65%）。用户随后要求：“我想Serverpilot可以实现自定义占卡利用率他做不到，帮我升级一下”，并选定未设置时默认 85%。决定与取舍见[记录](teamwork/records/keepalive-target-utilization.md)。
+
+根因：`server_keepalive.py` 的节奏是固定常量（`ACTIVE_DUTY_FRACTION = 0.80`，每次一个 2048 矩阵乘法后同步），快卡在启动间隙空转；请求只接受开关，没有可调项。
+
+改动：
+- 持久化：`endpoints.keepalive_target_utilization_pct`（迁移 `20261111_0044`，NOT NULL 默认 85，检查 10–100；初始迁移把它列入后来新增的列）。`EndpointConfig`、两处行到配置的映射、端点投影与占卡汇总都带上它。
+- 接口：`POST /api/v2/endpoints/{id}/keepalive` 的请求体为 `enabled` 与必填的 `target_utilization_pct`。`set_keepalive_target` 保存并回答是否有正在运行的占卡；有且仍开启时，路由先按“结束占卡”的路径停掉并对账，再按新负载启动。
+- 协议：v3 请求新增 `target_utilization_pct`，旧 helper 忽略；新 helper 收到不带字段的请求按默认 85。`--protocol-info` 追加 `target_utilization` 能力，不进必需集合。
+- helper：worker 参数 `--target-utilization-pct`；新的 `hold_utilization` 按每批约 4 毫秒 GPU 时间排队、双批在途、按实测忙碌时长修正预算；矩阵改为 4096，等待用阻塞事件；显存余量改为 256 MiB。
+- App：服务器详情“结束占卡”旁新增“占卡负载 N%”菜单（30%–100%），占卡开关一并提交当前负载。
+
+验证：helper 控制回路的仿真测试（30/50/85/90% × 0.5/4/11 毫秒批次，误差 ±2%；100% 不留空闲）；协议、helper、路由（改负载先停后起、同值不动、关闭时只保存、越界 422）测试；全部 Python 测试、Ruff、Swift 测试、App 构建；夹具截图核对菜单位置。
+未验证：真实 GPU 上的实际利用率与功耗；各服务器上的 helper 尚未升级，升级前设置不生效。
+
 ## Agent 调度与 App 交互的一轮测试与修复（2026-11-11，5.5.0）
 
 用户要求：“现在Serverpilot在一些agent调度管理和用户交互上都存在一些，你可以去尝试测试一下，把相关的bug和不合理的地方都修复一下”。

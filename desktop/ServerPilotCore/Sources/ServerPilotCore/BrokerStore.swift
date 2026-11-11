@@ -883,6 +883,7 @@ public final class BrokerStore: ObservableObject {
     public func setEndpointKeepalive(
         _ endpoint: EndpointRecord,
         enabled: Bool,
+        targetUtilizationPct: Int,
         completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
     ) {
         guard supportsEndpointKeepalive else {
@@ -895,10 +896,14 @@ public final class BrokerStore: ObservableObject {
             endpoint,
             path: "api/v2/endpoints/\(endpoint.id)/keepalive",
             method: "POST",
-            payload: ["enabled": enabled],
-            successMessage: enabled
-                ? "已开启 \(endpoint.displayName) 的空闲自动占卡策略。"
-                : "已关闭 \(endpoint.displayName) 的空闲自动占卡策略。",
+            payload: ["enabled": enabled, "target_utilization_pct": targetUtilizationPct],
+            successMessage: targetUtilizationPct != endpoint.keepalive.targetUtilizationPct
+                ? (enabled && endpoint.keepalive.isActive
+                    ? "已把 \(endpoint.displayName) 的占卡负载设为 \(targetUtilizationPct)%，正在占卡的卡已按新负载重新占上。"
+                    : "已把 \(endpoint.displayName) 的占卡负载设为 \(targetUtilizationPct)%，下次占卡时生效。")
+                : (enabled
+                    ? "已开启 \(endpoint.displayName) 的空闲自动占卡策略。"
+                    : "已关闭 \(endpoint.displayName) 的空闲自动占卡策略。"),
             completion: completion
         )
     }

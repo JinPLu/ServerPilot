@@ -479,7 +479,11 @@ class ServerScriptKeepaliveAdapter:
         if endpoint.workspace_path is None:
             raise AdapterCommandError("endpoint workspace_path is required for keepalive")
         await self._probe_helper(endpoint)
-        payload = KeepaliveRequest(enabled=enabled, gpu_uuids=requested).encode()
+        payload = KeepaliveRequest(
+            enabled=enabled,
+            gpu_uuids=requested,
+            target_utilization_pct=endpoint.keepalive_target_utilization_pct,
+        ).encode()
         remote_command = (
             f"cd -- {shlex.quote(endpoint.workspace_path)} && {KEEPALIVE_REMOTE_COMMAND}"
         )

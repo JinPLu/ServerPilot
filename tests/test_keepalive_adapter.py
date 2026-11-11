@@ -37,7 +37,6 @@ from serverpilot.keepalive_protocol import (
     keepalive_protocol_info,
 )
 from serverpilot.server_keepalive import (
-    ACTIVE_DUTY_FRACTION,
     DUTY_PERIOD_SECONDS,
     TARGET_MEMORY_FRACTION,
     WORKER_PROCESS_MARKER,
@@ -47,6 +46,7 @@ from serverpilot.server_keepalive import (
     default_state_directory,
     handle_attestation,
     handle_request,
+    hold_utilization,
     keepalive_target_bytes,
 )
 
@@ -110,10 +110,12 @@ def test_torch_provider_sets_pci_order_and_derived_ordinal(
     provider = TorchSubprocessProvider()
     provider._gpu_ordinals = {GPU_A: "4"}
 
-    assert provider.start(GPU_A) == identity
+    assert provider.start(GPU_A, 90) == identity
     assert captured["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "4"
-    assert captured["command"][-2:] == ["--worker-marker", WORKER_PROCESS_MARKER]
+    assert captured["command"][-4:] == [
+        "--worker-marker", WORKER_PROCESS_MARKER, "--target-utilization-pct", "90",
+    ]
 
 
 def test_torch_provider_reports_unknown_uuid_in_pci_mapping() -> None:
@@ -175,7 +177,7 @@ def _result(
 
 
 def test_protocol_uses_only_the_per_gpu_request() -> None:
-    request = KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B))
+    request = KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90)
     decoded = KeepaliveRequest.decode(request.encode())
 
     assert decoded == request
@@ -184,9 +186,16 @@ def test_protocol_uses_only_the_per_gpu_request() -> None:
         KeepaliveRequest.decode('{"schema_version":2,"enabled":true}')
     with pytest.raises(KeepaliveProtocolError, match="malformed"):
         KeepaliveRequest.decode('{"schema_version":3,"enabled":true,"gpu_uuids":["0;touch /tmp/x"]}')
+    # A control plane from before the target still drives this helper: its
+    # request means the default load.
     assert KeepaliveRequest.decode(
         '{"schema_version":3,"enabled":true,"gpu_uuids":["' + GPU_A + '"],"note":"unused"}'
-    ) == KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A,))
+    ) == KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A,), target_utilization_pct=85)
+    for out_of_range in (9, 101, "90", 90.5, True):
+        with pytest.raises(KeepaliveProtocolError, match="target_utilization_pct"):
+            KeepaliveRequest(
+                enabled=True, gpu_uuids=(GPU_A,), target_utilization_pct=out_of_range  # type: ignore[arg-type]
+            ).encode()
 
 
 def test_protocol_info_publishes_v3_helper_capabilities() -> None:
@@ -201,6 +210,8 @@ def test_protocol_info_publishes_v3_helper_capabilities() -> None:
             "pidfd_identity",
             "pci_bus_id",
             "worker_attestation",
+            # Advertised, not required: an older helper still works, at its old fixed load.
+            "target_utilization",
         ],
     }
 
@@ -347,6 +358,8 @@ def test_adapter_uses_fixed_ssh_command_and_exact_json_stdin(
         "schema_version": 3,
         "enabled": False,
         "gpu_uuids": [GPU_A],
+        # The server's own target, the default here; a stop ignores it.
+        "target_utilization_pct": 85,
     }
     assert {"shell", "env", "pid", "path", "argv", "command", "cuda_visible_devices"}.isdisjoint(
         json.loads(calls[1][2])
@@ -673,6 +686,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.running: set[int] = set()
         self.started: list[tuple[str, int]] = []
+        self.targets: list[int] = []
         self.stopped: list[int] = []
 
     @staticmethod
@@ -684,9 +698,10 @@ class FakeProvider:
             worker_marker=WORKER_PROCESS_MARKER,
         )
 
-    def start(self, gpu_uuid: str) -> KeepaliveProcessIdentity:
+    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
         pid = 100 + len(self.started) + 1
         self.started.append((gpu_uuid, pid))
+        self.targets.append(target_utilization_pct)
         self.running.add(pid)
         return self.identity(pid)
 
@@ -699,10 +714,10 @@ class FakeProvider:
 
 
 class FailingSecondProvider(FakeProvider):
-    def start(self, gpu_uuid: str) -> KeepaliveProcessIdentity:
+    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
         if self.started:
             raise RuntimeError("second worker failed")
-        return super().start(gpu_uuid)
+        return super().start(gpu_uuid, target_utilization_pct)
 
 
 def test_local_controller_manages_each_gpu_independently_and_only_stops_own_state(
@@ -716,10 +731,10 @@ def test_local_controller_manages_each_gpu_independently_and_only_stops_own_stat
         driver_pid_resolver=lambda gpu_uuid: {GPU_A: 50_101, GPU_B: 50_102}[gpu_uuid],
     )
 
-    started = controller.set_enabled(True, [GPU_A, GPU_B])
-    disabled_a = controller.set_enabled(False, [GPU_A])
-    repeated_b = controller.set_enabled(True, [GPU_B])
-    disabled_missing = controller.set_enabled(False, [GPU_C])
+    started = controller.set_enabled(True, [GPU_A, GPU_B], 85)
+    disabled_a = controller.set_enabled(False, [GPU_A], 85)
+    repeated_b = controller.set_enabled(True, [GPU_B], 85)
+    disabled_missing = controller.set_enabled(False, [GPU_C], 85)
 
     pid_a = provider.started[0][1]
     pid_b = provider.started[1][1]
@@ -750,7 +765,7 @@ def test_local_controller_attests_only_its_live_v3_workers(tmp_path: Path) -> No
         known_gpu_uuids_resolver=lambda: KNOWN_GPUS,
         driver_pid_resolver=lambda gpu_uuid: {GPU_A: 50_101, GPU_B: 50_102}[gpu_uuid],
     )
-    controller.set_enabled(True, [GPU_A, GPU_B])
+    controller.set_enabled(True, [GPU_A, GPU_B], 85)
 
     response = handle_attestation(
         KeepaliveAttestationRequest(gpu_uuids=(GPU_B, GPU_A)).encode(), controller=controller
@@ -813,7 +828,7 @@ def test_local_controller_starts_each_gpu_directly_without_batch_rollback(tmp_pa
     )
 
     with pytest.raises(RuntimeError, match="second worker failed"):
-        controller.set_enabled(True, [GPU_A, GPU_B])
+        controller.set_enabled(True, [GPU_A, GPU_B], 85)
 
     pid_a = provider.started[0][1]
     assert provider.running == {pid_a}
@@ -834,9 +849,9 @@ def test_local_controller_starts_batch_workers_concurrently(tmp_path: Path) -> N
     barrier = threading.Barrier(2)
 
     class ConcurrentProvider(FakeProvider):
-        def start(self, gpu_uuid: str) -> KeepaliveProcessIdentity:
+        def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
             barrier.wait(timeout=1)
-            return super().start(gpu_uuid)
+            return super().start(gpu_uuid, target_utilization_pct)
 
     provider = ConcurrentProvider()
     controller = LocalKeepaliveController(
@@ -845,7 +860,7 @@ def test_local_controller_starts_batch_workers_concurrently(tmp_path: Path) -> N
         known_gpu_uuids_resolver=lambda: KNOWN_GPUS,
     )
 
-    started = controller.set_enabled(True, [GPU_A, GPU_B])
+    started = controller.set_enabled(True, [GPU_A, GPU_B], 85)
 
     assert [result.gpu_uuid for result in started.results] == [GPU_A, GPU_B]
     assert {gpu_uuid for gpu_uuid, _pid in provider.started} == {GPU_A, GPU_B}
@@ -860,7 +875,7 @@ def test_local_controller_rejects_a_valid_but_unknown_gpu_before_mutation(tmp_pa
     )
 
     with pytest.raises(ValueError, match="unknown"):
-        controller.set_enabled(True, [GPU_B])
+        controller.set_enabled(True, [GPU_B], 85)
 
     assert provider.started == []
 
@@ -886,7 +901,7 @@ def test_local_controller_rejects_legacy_v2_worker_state(tmp_path: Path) -> None
     )
 
     with pytest.raises(RuntimeError, match="legacy keepalive worker state"):
-        controller.set_enabled(False, [GPU_A])
+        controller.set_enabled(False, [GPU_A], 85)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v2.json").exists()
@@ -914,7 +929,7 @@ def test_local_controller_rejects_a_pid_only_worker_state_in_v3_container(tmp_pa
     )
 
     with pytest.raises(RuntimeError, match="invalid worker identity"):
-        controller.set_enabled(False, [GPU_A])
+        controller.set_enabled(False, [GPU_A], 85)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v3.json").exists()
@@ -935,7 +950,7 @@ def test_local_controller_rejects_v2_payload_in_v3_state_path(tmp_path: Path) ->
     )
 
     with pytest.raises(RuntimeError, match="schema version mismatch.*expected 3"):
-        controller.set_enabled(False, [GPU_A])
+        controller.set_enabled(False, [GPU_A], 85)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v3.json").exists()
@@ -1148,7 +1163,8 @@ def test_handle_request_returns_each_requested_gpu(tmp_path: Path) -> None:
     )
 
     response = handle_request(
-        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B)).encode(), controller=controller
+        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90).encode(),
+        controller=controller,
     )
 
     assert [(result.gpu_uuid, result.outcome) for result in response.results] == [
@@ -1161,7 +1177,6 @@ def test_handle_request_returns_each_requested_gpu(tmp_path: Path) -> None:
 
 def test_server_policy_holds_eighty_percent_of_cuda_visible_memory() -> None:
     assert TARGET_MEMORY_FRACTION == 0.80
-    assert ACTIVE_DUTY_FRACTION == 0.80
     assert DUTY_PERIOD_SECONDS == 0.1
     eighty_gib = 80 * 1024 * 1024 * 1024
     ninety_six_gib = 96 * 1024 * 1024 * 1024
@@ -1190,3 +1205,91 @@ def test_default_state_directory_is_persistent(
 
     monkeypatch.setenv("XDG_STATE_HOME", "relative-state")
     assert default_state_directory() == Path("relative-state/serverpilot/keepalive")
+
+
+class _SimulatedCard:
+    """One GPU queue and a host clock: kernels run in order, the host waits or sleeps.
+
+    ``launch_cost`` is the host time to queue a batch; the card starts a
+    batch when both it and the batch are ready.
+    """
+
+    def __init__(self, *, batch_seconds: float, launch_cost: float = 0.0002) -> None:
+        self.now = 0.0
+        self.free_at = 0.0
+        self.batch_seconds = batch_seconds
+        self.launch_cost = launch_cost
+        self.busy: list[tuple[float, float]] = []
+
+    def clock(self) -> float:
+        return self.now
+
+    def launch(self):  # type: ignore[no-untyped-def]
+        self.now += self.launch_cost
+        start = max(self.now, self.free_at)
+        self.free_at = start + self.batch_seconds
+        self.busy.append((start, self.free_at))
+        finished = self.free_at
+
+        def wait() -> None:
+            self.now = max(self.now, finished)
+
+        return wait
+
+    def pause(self, seconds: float) -> None:
+        self.now += seconds
+
+    def utilization(self, since: float, until: float) -> float:
+        covered = sum(max(0.0, min(end, until) - max(start, since)) for start, end in self.busy)
+        return covered / (until - since)
+
+
+@pytest.mark.parametrize("target", [0.30, 0.50, 0.85, 0.90])
+@pytest.mark.parametrize("batch_seconds", [0.0005, 0.004, 0.011])
+def test_held_card_settles_on_its_target_load(target: float, batch_seconds: float) -> None:
+    """The old loop ran one kernel and synchronized each time, so a fast card sat idle
+    between launches and a card meant to hold 80% held 43%. Measured over the
+    later seconds, the busy share sits at the target whatever a batch costs."""
+
+    card = _SimulatedCard(batch_seconds=batch_seconds)
+    hold_utilization(
+        target,
+        launch_batch=card.launch,
+        batch_seconds=batch_seconds,
+        stopped=lambda: card.now >= 20.0,
+        pause=card.pause,
+        clock=card.clock,
+    )
+
+    assert card.utilization(5.0, 20.0) == pytest.approx(target, abs=0.02)
+
+
+def test_a_full_target_never_lets_the_card_idle() -> None:
+    card = _SimulatedCard(batch_seconds=0.004)
+    hold_utilization(
+        1.0,
+        launch_batch=card.launch,
+        batch_seconds=0.004,
+        stopped=lambda: card.now >= 5.0,
+        pause=card.pause,
+        clock=card.clock,
+    )
+
+    assert card.utilization(1.0, 5.0) > 0.99
+
+
+def test_a_started_worker_is_given_the_requested_load(tmp_path: Path) -> None:
+    provider = FakeProvider()
+    controller = LocalKeepaliveController(
+        provider=provider,
+        state_directory=tmp_path / "keepalive",
+        known_gpu_uuids_resolver=lambda: KNOWN_GPUS,
+        driver_pid_resolver=lambda gpu_uuid: 50_101,
+    )
+
+    handle_request(
+        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90).encode(),
+        controller=controller,
+    )
+
+    assert provider.targets == [90, 90]

@@ -271,9 +271,18 @@ public struct EndpointKeepaliveSummary: Equatable, Sendable {
     public let eligibleIdleGPUCount: Int
     public let reasons: [String]
     public let message: String?
+    /// How hard each held card works, in percent of time computing. A worker
+    /// keeps the load it started with; changing this restarts the server's.
+    public let targetUtilizationPct: Int
+
+    /// The loads offered in the app; the control plane accepts 10 to 100.
+    public static let targetUtilizationChoices = [30, 50, 60, 70, 80, 85, 90, 95, 100]
+    /// The control plane's own default, for a server that has not set one.
+    public static let defaultTargetUtilizationPct = 85
 
     public init?(raw: [String: Any], fallbackConfigured: Bool) {
         configured = raw.bool("configured", default: fallbackConfigured)
+        targetUtilizationPct = raw.int("target_utilization_pct", default: Self.defaultTargetUtilizationPct)
         let suppliedState = (raw.string("actual") ?? raw.string("state") ?? "OFF").uppercased()
         guard ["OFF", "ON", "ERROR"].contains(suppliedState) else { return nil }
         state = suppliedState

@@ -60,8 +60,10 @@ _RETIRED_COLUMNS = (("endpoints", "enabled"), ("gpu_devices", "enabled"))
 _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_seconds")
 
 
-# 20261030_0041 adds these, and 20261104_0042 adds idle_checked_at. The indexes
-# go first: one of them names task_ref, which _create_retired_request_tables removes.
+# 20261030_0041 adds these, 20261104_0042 adds idle_checked_at, and
+# 20261111_0044 the keepalive target with its check. The indexes go first: one
+# of them names task_ref, which _create_retired_request_tables removes; a check
+# goes before the column it names.
 _LATER_INDEXES = (
     ("leases", "uq_active_owned_task"),
     ("audit_events", "ix_audit_resource"),
@@ -73,7 +75,9 @@ _LATER_COLUMNS = {
     "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows", "idle_checked_at"),
     "alerts": ("category", "dedupe_key", "state", "pending_since", "notified_at", "lease_id",
                "project_id", "task_ref", "payload_json"),
+    "endpoints": ("keepalive_target_utilization_pct",),
 }
+_LATER_CHECKS = {"endpoints": ("ck_endpoint_keepalive_target_utilization",)}
 
 
 def _drop_later_additions() -> None:
@@ -81,6 +85,8 @@ def _drop_later_additions() -> None:
         op.drop_index(index, table_name=table)
     for table, columns in _LATER_COLUMNS.items():
         with op.batch_alter_table(table) as batch:
+            for check in _LATER_CHECKS.get(table, ()):
+                batch.drop_constraint(check, type_="check")
             for column in columns:
                 batch.drop_column(column)
 

@@ -113,6 +113,10 @@ class Endpoint(Base):
             name="ck_endpoint_keepalive_policy",
         ),
         CheckConstraint(
+            "keepalive_target_utilization_pct >= 10 AND keepalive_target_utilization_pct <= 100",
+            name="ck_endpoint_keepalive_target_utilization",
+        ),
+        CheckConstraint(
             "resource_kind IN ('unknown', 'cpu_only', 'gpu')",
             name="ck_endpoint_resource_kind",
         ),
@@ -134,6 +138,11 @@ class Endpoint(Base):
     # policy changes never silently start, stop, or reclassify a remote worker.
     keepalive_policy: Mapped[KeepalivePolicy] = mapped_column(
         String(32), nullable=False, default="disabled"
+    )
+    # Desired load of a held card. A running worker keeps the load it started
+    # with; changing this restarts the endpoint's workers.
+    keepalive_target_utilization_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=85, server_default="85"
     )
     labels_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")
     storage_group: Mapped[str | None] = mapped_column(String(120))

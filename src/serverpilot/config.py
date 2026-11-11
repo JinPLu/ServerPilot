@@ -11,6 +11,12 @@ from typing import Literal
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from serverpilot.keepalive_protocol import (
+    KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT,
+    KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
+    KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
+)
+
 
 class ConfigurationError(ValueError):
     """Raised when a config is incomplete or has unknown/invalid values."""
@@ -295,6 +301,12 @@ class EndpointConfig(BaseModel):
     # Desired policy only; actual ownership remains a per-GPU lease and starts
     # disabled for both new and migrated endpoints.
     keepalive_policy: KeepalivePolicy = "disabled"
+    # How hard each held card works, in percent of time computing.
+    keepalive_target_utilization_pct: int = Field(
+        default=KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT,
+        ge=KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
+        le=KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
+    )
     labels: list[str] = Field(default_factory=list)
     storage_group: str | None = Field(default=None, max_length=120)
     server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")

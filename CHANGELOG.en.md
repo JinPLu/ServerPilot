@@ -4,6 +4,10 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Each server sets its own keepalive load.** A "占卡负载" menu next to the keepalive button in a server's details offers 30% to 100%, 85% by default. The keepalive pace used to be fixed in code and measured about 65% on an A800 and only about 43% on a B20Z, with no way to raise it. A held card now computes for the target share of each period, corrected every period from the busy time actually measured; changing the load while cards are held stops them, confirms, and holds them again at the new load. The server's keepalive helper must be upgraded to this release for the setting to apply; an older helper keeps holding cards and ignores it.
+
 ## 5.5.0 - 2026-11-11
 
 - **Returning a task also ends its processes on container servers.** There the GPU driver reports the host's PIDs, which the container cannot see, so ServerPilot used to report them as already gone while they kept running. It now ends the login account's processes whose `CUDA_VISIBLE_DEVICES` names only this task's cards and which started after the task did; a process it cannot place is left alone and named with the reason, never reported as gone.

@@ -759,7 +759,7 @@ import Testing
         #expect(updatePayload["observation_profile"] as? String == "linux")
 
         let keepaliveRecorder = CompletionRecorder()
-        store.setEndpointKeepalive(endpoint, enabled: true) { success, message in
+        store.setEndpointKeepalive(endpoint, enabled: true, targetUtilizationPct: 90) { success, message in
             keepaliveRecorder.success = success
             keepaliveRecorder.message = message
         }
@@ -770,7 +770,8 @@ import Testing
         let keepaliveBody = try #require(StateRouteURLProtocol.lastBody)
         let keepalivePayload = try #require(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
         #expect(keepalivePayload["enabled"] as? Bool == true)
-        #expect(Set(keepalivePayload.keys) == Set(["enabled"]))
+        #expect(keepalivePayload["target_utilization_pct"] as? Int == 90)
+        #expect(Set(keepalivePayload.keys) == Set(["enabled", "target_utilization_pct"]))
 
         let conflictRecorder = CompletionRecorder()
         store.clearEmptyConflictedLease(
@@ -1290,6 +1291,20 @@ import Testing
             ]
         ])
         #expect(defensiveSnapshot.leases.isEmpty)
+    }
+
+    @Test func aServersKeepaliveLoadIsReadAndDefaultsToTheControlPlanes() throws {
+        let set = try #require(EndpointKeepaliveSummary(
+            raw: ["configured": true, "policy": "idle_keepalive", "state": "ON", "target_utilization_pct": 90],
+            fallbackConfigured: true
+        ))
+        #expect(set.targetUtilizationPct == 90)
+        let unset = try #require(EndpointKeepaliveSummary(
+            raw: ["configured": true, "policy": "disabled", "state": "OFF"],
+            fallbackConfigured: true
+        ))
+        #expect(unset.targetUtilizationPct == 85)
+        #expect(EndpointKeepaliveSummary.targetUtilizationChoices.contains(85))
     }
 
     @Test func testKeepaliveProtocolRejectsUnknownPolicyAndState() {

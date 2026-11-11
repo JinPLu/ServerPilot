@@ -570,7 +570,11 @@ struct ServerDetailSheet: View {
                 Button {
                     if occupancyActionStarts || confirmKeepaliveEnd(activeGPUCount: endpoint.keepalive.activeGPUCount) {
                         actionError = nil
-                        store.setEndpointKeepalive(endpoint, enabled: occupancyActionStarts) { _, error in
+                        store.setEndpointKeepalive(
+                            endpoint,
+                            enabled: occupancyActionStarts,
+                            targetUtilizationPct: endpoint.keepalive.targetUtilizationPct
+                        ) { _, error in
                             actionError = error
                         }
                     }
@@ -585,8 +589,48 @@ struct ServerDetailSheet: View {
                         || isMutating
                 )
                 .help(occupancyActionHelp)
+
+                keepaliveLoadMenu(endpoint)
             }
         }
+    }
+
+    /// How hard held cards work. A running worker keeps the load it started
+    /// with, so a change while cards are held stops and restarts them.
+    private func keepaliveLoadMenu(_ endpoint: EndpointRecord) -> some View {
+        let current = endpoint.keepalive.targetUtilizationPct
+        let help = endpoint.keepalive.isActive
+            ? "占卡时每张卡的 GPU 利用率目标。改动后，正在占卡的卡会先停下再按新负载占上。"
+            : "占卡时每张卡的 GPU 利用率目标，下次占卡时生效。"
+        return Menu {
+            ForEach(EndpointKeepaliveSummary.targetUtilizationChoices, id: \.self) { pct in
+                Button {
+                    guard pct != current else { return }
+                    actionError = nil
+                    store.setEndpointKeepalive(
+                        endpoint, enabled: endpoint.keepalive.isEnabled, targetUtilizationPct: pct
+                    ) { _, error in
+                        actionError = error
+                    }
+                } label: {
+                    if pct == current {
+                        Label("\(pct)%", systemImage: "checkmark")
+                    } else {
+                        Text("\(pct)%")
+                    }
+                }
+            }
+        } label: {
+            Label("占卡负载 \(current)%", systemImage: "gauge.with.dots.needle.67percent")
+                .font(Typography.identity.weight(.semibold))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .disabled(gpus.isEmpty || !store.allowsEndpointLifecycleMutations || isMutating)
+        .accessibilityIdentifier("endpoint-keepalive-load")
+        .accessibilityLabel("占卡负载")
+        .accessibilityValue("\(current)%")
+        .help(help)
     }
 
     @ViewBuilder

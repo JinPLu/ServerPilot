@@ -27,6 +27,14 @@ KEEPALIVE_INSPECT_COMMAND = (
     f"{KEEPALIVE_ENTRYPOINT} --inspect --schema-version {KEEPALIVE_SCHEMA_VERSION}"
 )
 KEEPALIVE_WORKER_MARKER = "serverpilot-keepalive-worker-v3"
+# How hard a held card works, as the percentage of time a kernel runs. A
+# server sets its own; this is the value until it does. Advertised apart from
+# the required capabilities: a helper deployed before it ignores the field
+# and keeps its old fixed load, which `--protocol-info` lets a person see.
+KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT = 85
+KEEPALIVE_MIN_TARGET_UTILIZATION_PCT = 10
+KEEPALIVE_MAX_TARGET_UTILIZATION_PCT = 100
+KEEPALIVE_TARGET_UTILIZATION_CAPABILITY = "target_utilization"
 
 GPU_UUID_PATTERN = re.compile(
     r"GPU-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -53,12 +61,27 @@ def _validate_gpu_uuids(value: object, *, allow_empty: bool = False) -> tuple[st
     return tuple(validate_gpu_uuid(item) for item in value)
 
 
+def validate_target_utilization_pct(value: object) -> int:
+    """Return a keepalive load target in whole percent, or reject it."""
+
+    if (
+        type(value) is not int
+        or not KEEPALIVE_MIN_TARGET_UTILIZATION_PCT <= value <= KEEPALIVE_MAX_TARGET_UTILIZATION_PCT
+    ):
+        raise KeepaliveProtocolError(
+            "keepalive target_utilization_pct must be an integer from "
+            f"{KEEPALIVE_MIN_TARGET_UTILIZATION_PCT} to {KEEPALIVE_MAX_TARGET_UTILIZATION_PCT}"
+        )
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class KeepaliveRequest:
-    """A v3 per-GPU request."""
+    """A v3 per-GPU request, with the load a started worker holds."""
 
     enabled: bool
     gpu_uuids: tuple[str, ...]
+    target_utilization_pct: int
 
     def encode(self) -> bytes:
         if type(self.enabled) is not bool:
@@ -69,6 +92,9 @@ class KeepaliveRequest:
                 "schema_version": KEEPALIVE_SCHEMA_VERSION,
                 "enabled": self.enabled,
                 "gpu_uuids": list(gpu_uuids),
+                "target_utilization_pct": validate_target_utilization_pct(
+                    self.target_utilization_pct
+                ),
             }
         )
 
@@ -87,7 +113,14 @@ class KeepaliveRequest:
             raise KeepaliveProtocolError("keepalive request is missing a required field") from exc
         if type(enabled) is not bool:
             raise KeepaliveProtocolError("keepalive enabled must be a boolean")
-        return cls(enabled=enabled, gpu_uuids=_validate_gpu_uuids(raw_gpu_uuids))
+        # A control plane from before the field still drives this helper, so
+        # its requests mean the default load rather than a refusal.
+        target = value.get("target_utilization_pct", KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT)
+        return cls(
+            enabled=enabled,
+            gpu_uuids=_validate_gpu_uuids(raw_gpu_uuids),
+            target_utilization_pct=validate_target_utilization_pct(target),
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -298,7 +331,9 @@ def keepalive_protocol_info() -> dict[str, Any]:
         "kind": "serverpilot-keepalive",
         "schema_version": KEEPALIVE_SCHEMA_VERSION,
         "implementation_version": KEEPALIVE_IMPLEMENTATION_VERSION,
-        "capabilities": list(KEEPALIVE_PROTOCOL_INFO_CAPABILITIES),
+        "capabilities": [
+            *KEEPALIVE_PROTOCOL_INFO_CAPABILITIES, KEEPALIVE_TARGET_UTILIZATION_CAPABILITY
+        ],
     }
 
 

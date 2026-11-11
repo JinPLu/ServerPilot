@@ -13,6 +13,10 @@ from serverpilot.config import (
     absolute_single_line_path,
     plain_text,
 )
+from serverpilot.keepalive_protocol import (
+    KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
+    KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
+)
 from serverpilot.provider_contract import AllocationFact
 
 
@@ -371,9 +375,12 @@ class EndpointUpdate(StrictModel):
 
 
 class EndpointKeepaliveRequest(StrictModel):
-    """The endpoint control accepts one explicit boolean, never a GPU target."""
+    """The endpoint control: on or off, and how hard held cards work; never a GPU target."""
 
     enabled: bool
+    target_utilization_pct: int = Field(
+        ge=KEEPALIVE_MIN_TARGET_UTILIZATION_PCT, le=KEEPALIVE_MAX_TARGET_UTILIZATION_PCT
+    )
 
 
 class CollectorSettingsUpdate(StrictModel):

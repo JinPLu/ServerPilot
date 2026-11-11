@@ -1880,6 +1880,20 @@ def create_app(
 
         mutation_key = _idempotency_key(idempotency_key)
         policy = "idle_keepalive" if state.enabled else "disabled"
+        restart = await service.in_domain(
+            service.set_keepalive_target, actor, endpoint_id, state.target_utilization_pct
+        )
+        if restart and state.enabled:
+            # A running worker keeps the load it started with. Stop them through
+            # the path that turns occupancy off, so each stop is observed and
+            # its lease released, then the reconcile below starts them again.
+            await service.in_domain(
+                service.configure_keepalive_policy, actor, endpoint_id, "disabled",
+                idempotency_key=f"{mutation_key}:retarget",
+            )
+            await reconcile_endpoint_keepalive(
+                actor, endpoint_id, idempotency_key=f"{mutation_key}:retarget"
+            )
         configured = await service.in_domain(
             service.configure_keepalive_policy,
             actor,

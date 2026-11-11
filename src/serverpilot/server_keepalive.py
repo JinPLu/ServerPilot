@@ -43,17 +43,23 @@ from serverpilot.keepalive_protocol import (
     KeepaliveWorkerAttestation,
     keepalive_protocol_info,
     validate_gpu_uuid,
+    validate_target_utilization_pct,
 )
 
-# These values are fixed server policy, never request inputs.  The worker has
-# no steady-state filesystem or network activity: state is read/written only
+# These values are fixed server policy, never request inputs; the one request
+# input is the load target, a validated whole percent.  The worker has no
+# steady-state filesystem or network activity: state is read/written only
 # during a reconciliation call and runtime CUDA work is fully resident.
 TARGET_MEMORY_FRACTION = 0.80
-ACTIVE_DUTY_FRACTION = 0.80
 DUTY_PERIOD_SECONDS = 0.1
+# Work goes to the card in batches of about this much GPU time, sized once
+# from a measured kernel, so a fast card and a slow one are fed alike.
+BATCH_SECONDS = 0.004
+CALIBRATION_KERNELS = 20
+MAX_BATCH_KERNELS = 10_000
 ALLOCATION_CHUNK_BYTES = 256 * 1024 * 1024
-COMPUTE_MATRIX_SIZE = 2048
-WORKER_MEMORY_SLACK_BYTES = 128 * 1024 * 1024
+COMPUTE_MATRIX_SIZE = 4096
+WORKER_MEMORY_SLACK_BYTES = 256 * 1024 * 1024
 WORKER_READY_TIMEOUT_SECONDS = 35
 WORKER_STOP_TIMEOUT_SECONDS = 10
 NVIDIA_SMI_TIMEOUT_SECONDS = 10
@@ -93,7 +99,7 @@ def default_state_directory() -> Path:
 class KeepaliveProcessProvider(Protocol):
     """Local implementation boundary; no Broker/API value reaches this layer."""
 
-    def start(self, gpu_uuid: str) -> KeepaliveProcessIdentity: ...
+    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity: ...
 
     def is_running(self, identity: KeepaliveProcessIdentity) -> bool: ...
 
@@ -177,8 +183,9 @@ class TorchSubprocessProvider:
                 "keepalive CUDA PCI ordinal mapping does not contain requested GPU UUID"
             ) from exc
 
-    def start(self, gpu_uuid: str) -> KeepaliveProcessIdentity:
+    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
         gpu_uuid = validate_gpu_uuid(gpu_uuid)
+        target_utilization_pct = validate_target_utilization_pct(target_utilization_pct)
         cuda_visible_device = self._cuda_visible_device(gpu_uuid)
         read_fd, write_fd = os.pipe()
         try:
@@ -192,6 +199,8 @@ class TorchSubprocessProvider:
                     str(write_fd),
                     "--worker-marker",
                     WORKER_PROCESS_MARKER,
+                    "--target-utilization-pct",
+                    str(target_utilization_pct),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -297,8 +306,18 @@ class LocalKeepaliveController:
         self.known_gpu_uuids_resolver = known_gpu_uuids_resolver or _resolve_known_gpu_uuids
         self.driver_pid_resolver = driver_pid_resolver or _resolve_keepalive_driver_pid
 
-    def set_enabled(self, enabled: bool, gpu_uuids: list[str] | tuple[str, ...]) -> KeepaliveResponse:
-        """Start or stop one occupancy worker for each supplied GPU UUID."""
+    def set_enabled(
+        self,
+        enabled: bool,
+        gpu_uuids: list[str] | tuple[str, ...],
+        target_utilization_pct: int,
+    ) -> KeepaliveResponse:
+        """Start or stop one occupancy worker for each supplied GPU UUID.
+
+        A started worker holds ``target_utilization_pct``; a running one keeps
+        the load it started with, so a new target reaches a card only through
+        a stop and a start, which the control plane drives and observes.
+        """
 
         if type(enabled) is not bool:
             raise ValueError("enabled must be a boolean")
@@ -315,7 +334,9 @@ class LocalKeepaliveController:
         with self._lock():
             identities = self._read_identities()
             if enabled:
-                return self._enable(requested, identities)
+                return self._enable(
+                    requested, identities, validate_target_utilization_pct(target_utilization_pct)
+                )
             return self._disable(requested, identities)
 
     def attest_workers(
@@ -368,6 +389,7 @@ class LocalKeepaliveController:
         self,
         requested: tuple[str, ...],
         identities: dict[str, KeepaliveProcessIdentity],
+        target_utilization_pct: int,
     ) -> KeepaliveResponse:
         results_by_uuid: dict[str, KeepaliveGPUResult] = {}
         pending: list[str] = []
@@ -389,7 +411,7 @@ class LocalKeepaliveController:
         if pending:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending)) as executor:
                 started = {
-                    gpu_uuid: executor.submit(self.provider.start, gpu_uuid)
+                    gpu_uuid: executor.submit(self.provider.start, gpu_uuid, target_utilization_pct)
                     for gpu_uuid in pending
                 }
                 for gpu_uuid in pending:
@@ -585,7 +607,9 @@ def handle_request(
     controller: LocalKeepaliveController | None = None,
 ) -> KeepaliveResponse:
     request = KeepaliveRequest.decode(payload)
-    return (controller or LocalKeepaliveController()).set_enabled(request.enabled, request.gpu_uuids)
+    return (controller or LocalKeepaliveController()).set_enabled(
+        request.enabled, request.gpu_uuids, request.target_utilization_pct
+    )
 
 
 def handle_attestation(
@@ -813,8 +837,45 @@ def _resolve_gpu_ordinals() -> dict[str, str]:
     }
 
 
-def _run_cuda_worker(ready_fd: int) -> None:
-    """Run one fixed worker against the single GPU made visible by its provider."""
+def hold_utilization(
+    target_fraction: float,
+    *,
+    launch_batch: Callable[[], Callable[[], None]],
+    batch_seconds: float,
+    stopped: Callable[[], bool],
+    pause: Callable[[float], object],
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Keep one GPU computing for ``target_fraction`` of every period until stopped.
+
+    ``launch_batch`` queues one batch of kernels and returns the call that
+    waits for it. One batch always waits behind the one running, so inside the
+    busy part of a period the card never idles on the host: the old loop ran
+    one small kernel and synchronized each time, which left a fast card idle
+    half of that time (about 43% on a card it meant to hold at 80%). The busy
+    span actually measured, from first launch to last finish, corrects the
+    next period's budget, so the last batch's overrun does not accumulate.
+    """
+
+    period = DUTY_PERIOD_SECONDS
+    wanted = target_fraction * period
+    budget = wanted
+    while not stopped():
+        started = clock()
+        deadline = started + budget
+        running = launch_batch()
+        while not stopped() and (target_fraction >= 1 or clock() + batch_seconds <= deadline):
+            queued = launch_batch()
+            running()
+            running = queued
+        running()
+        busy = clock() - started
+        budget = min(period, max(0.0, budget + wanted - busy))
+        pause(max(0.0, started + period - clock()))
+
+
+def _run_cuda_worker(ready_fd: int, target_utilization_pct: int) -> None:
+    """Hold one GPU, made visible by its provider, at the requested load."""
 
     ready = os.fdopen(ready_fd, "wb", buffering=0)
     try:
@@ -856,7 +917,20 @@ def _run_cuda_worker(ready_fd: int) -> None:
             torch.randn((COMPUTE_MATRIX_SIZE, COMPUTE_MATRIX_SIZE), dtype=torch.float16, device=device),
             torch.empty((COMPUTE_MATRIX_SIZE, COMPUTE_MATRIX_SIZE), dtype=torch.float16, device=device),
         )
+        left, right, output = resident_compute_buffers
+        # Size a batch from one measured kernel, so it is about BATCH_SECONDS
+        # of GPU time on whatever card this is.
+        torch.mm(left, right, out=output)
         torch.cuda.synchronize(device)
+        timing_start = torch.cuda.Event(enable_timing=True)
+        timing_end = torch.cuda.Event(enable_timing=True)
+        timing_start.record()
+        for _ in range(CALIBRATION_KERNELS):
+            torch.mm(left, right, out=output)
+        timing_end.record()
+        timing_end.synchronize()
+        kernel_seconds = max(timing_start.elapsed_time(timing_end) / 1000 / CALIBRATION_KERNELS, 1e-6)
+        batch_kernels = min(MAX_BATCH_KERNELS, max(1, round(BATCH_SECONDS / kernel_seconds)))
         ready.write(b"READY\n")
     except Exception as exc:
         ready.write(f"ERROR:{type(exc).__name__}: {exc}\n".encode("utf-8", errors="replace")[:500])
@@ -873,16 +947,23 @@ def _run_cuda_worker(ready_fd: int) -> None:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    left, right, output = resident_compute_buffers
-    while not stop_event.is_set():
-        period_started = time.monotonic()
-        active_until = period_started + DUTY_PERIOD_SECONDS * ACTIVE_DUTY_FRACTION
-        while time.monotonic() < active_until and not stop_event.is_set():
+
+    def launch_batch() -> Callable[[], None]:
+        for _ in range(batch_kernels):
             torch.mm(left, right, out=output)
-            torch.cuda.synchronize(device)
-        # A 100ms duty cycle avoids busy spin during the remaining idle slice
-        # and caps host scheduling pressure without disk/network polling.
-        stop_event.wait(max(0.0, period_started + DUTY_PERIOD_SECONDS - time.monotonic()))
+        # A blocking event lets the host thread sleep while it waits instead
+        # of spinning a core for every second the card is held.
+        done = torch.cuda.Event(blocking=True)
+        done.record()
+        return done.synchronize
+
+    hold_utilization(
+        target_utilization_pct / 100,
+        launch_batch=launch_batch,
+        batch_seconds=batch_kernels * kernel_seconds,
+        stopped=stop_event.is_set,
+        pause=stop_event.wait,
+    )
     del held_allocations, resident_compute_buffers
 
 
@@ -894,6 +975,7 @@ def main() -> None:
     parser.add_argument("--internal-worker", action="store_true", help=argparse.SUPPRESS)
     parser.add_argument("--ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--worker-marker", help=argparse.SUPPRESS)
+    parser.add_argument("--target-utilization-pct", type=int, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
     if arguments.protocol_info:
         if (
@@ -902,6 +984,7 @@ def main() -> None:
             or arguments.internal_worker
             or arguments.ready_fd is not None
             or arguments.worker_marker is not None
+            or arguments.target_utilization_pct is not None
         ):
             parser.error("invalid protocol-info invocation")
         sys.stdout.buffer.write(
@@ -915,6 +998,7 @@ def main() -> None:
             or arguments.internal_worker
             or arguments.ready_fd is not None
             or arguments.worker_marker is not None
+            or arguments.target_utilization_pct is not None
         ):
             parser.error("invalid keepalive inspection invocation")
         try:
@@ -931,15 +1015,19 @@ def main() -> None:
             or arguments.inspect
             or arguments.ready_fd is None
             or arguments.worker_marker != WORKER_PROCESS_MARKER
+            or arguments.target_utilization_pct is None
         ):
             parser.error("invalid internal worker invocation")
-        _run_cuda_worker(arguments.ready_fd)
+        _run_cuda_worker(
+            arguments.ready_fd, validate_target_utilization_pct(arguments.target_utilization_pct)
+        )
         return
     if (
         arguments.schema_version != KEEPALIVE_SCHEMA_VERSION
         or arguments.inspect
         or arguments.ready_fd is not None
         or arguments.worker_marker is not None
+        or arguments.target_utilization_pct is not None
     ):
         parser.error(
             "keepalive schema version mismatch: "

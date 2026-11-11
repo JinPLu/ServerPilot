@@ -134,6 +134,7 @@ def test_one_gpu_keepalive_does_not_block_sibling_gpu_or_hide_public_state(servi
     assert endpoint["keepalive"] == {
         "configured": True,
         "policy": "idle_keepalive",
+        "target_utilization_pct": 85,
         "desired": "ON",
         "actual": "ON",
         "state": "ON",

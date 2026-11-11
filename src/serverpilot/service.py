@@ -540,6 +540,7 @@ class BrokerService:
                     observation_profile=configured_endpoint.observation_profile,
                     keepalive_adapter_id=configured_endpoint.keepalive_adapter_id,
                     keepalive_policy=configured_endpoint.keepalive_policy,
+                    keepalive_target_utilization_pct=configured_endpoint.keepalive_target_utilization_pct,
                     labels_json=json_dump(configured_endpoint.labels),
                     storage_group=configured_endpoint.storage_group,
                     server_group_id=assigned_group_id,
@@ -816,6 +817,7 @@ class BrokerService:
                         observation_profile=endpoint.observation_profile,
                         keepalive_adapter_id=endpoint.keepalive_adapter_id,
                         keepalive_policy=endpoint.keepalive_policy,
+                        keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
                         labels=json_load(endpoint.labels_json),
                         storage_group=endpoint.storage_group,
                         server_group_id=endpoint.server_group_id,
@@ -860,6 +862,7 @@ class BrokerService:
                 observation_profile=endpoint.observation_profile,
                 keepalive_adapter_id=endpoint.keepalive_adapter_id,
                 keepalive_policy=endpoint.keepalive_policy,
+                keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
                 labels=json_load(endpoint.labels_json),
                 storage_group=endpoint.storage_group,
                 server_group_id=endpoint.server_group_id,
@@ -2092,6 +2095,7 @@ class BrokerService:
             "observation_profile": endpoint.observation_profile,
             "keepalive_adapter_id": endpoint.keepalive_adapter_id,
             "keepalive_policy": endpoint.keepalive_policy,
+            "keepalive_target_utilization_pct": endpoint.keepalive_target_utilization_pct,
             "labels": json_load(endpoint.labels_json),
             "storage_group": endpoint.storage_group,
             "expected_gpu_count": endpoint.expected_gpu_count,
@@ -3162,6 +3166,7 @@ class BrokerService:
         return {
             "configured": endpoint.keepalive_adapter_id is not None,
             "policy": endpoint.keepalive_policy,
+            "target_utilization_pct": endpoint.keepalive_target_utilization_pct,
             "desired": desired,
             "actual": state,
             "state": state,
@@ -3213,6 +3218,50 @@ class BrokerService:
             statuses,
             eligible_idle_gpu_count=eligible_idle_gpu_count,
         )
+
+    def set_keepalive_target(
+        self, actor: ActorContext, endpoint_id: str, target_utilization_pct: int
+    ) -> bool:
+        """Store how hard this server's held cards work; True when running workers hold another load.
+
+        A worker keeps the load it started with, so a changed target reaches a
+        card only when its worker is stopped and started again. The answer says
+        whether that has to happen now: the target moved and workers are up.
+        """
+
+        self._require_role(actor, MUTATING_ROLES)
+
+        def operation(session: Session) -> bool:
+            endpoint = session.get(Endpoint, endpoint_id)
+            if endpoint is None:
+                raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
+            self._require_endpoint_manager(actor, endpoint)
+            before = endpoint.keepalive_target_utilization_pct
+            if before == target_utilization_pct:
+                return False
+            now = utcnow()
+            endpoint.keepalive_target_utilization_pct = target_utilization_pct
+            endpoint.updated_at = now
+            self._bump_revision(session, now)
+            self._audit(
+                session, actor_id=actor.id, action="keepalive.target.configure",
+                resource_type="endpoint", resource_id=endpoint.id, result="success",
+                summary={"before": before, "after": target_utilization_pct}, now=now,
+            )
+            return session.scalar(
+                select(Lease.id)
+                .join(LeaseResource, LeaseResource.lease_id == Lease.id)
+                .join(GPUDevice, GPUDevice.id == LeaseResource.gpu_id)
+                .where(
+                    GPUDevice.endpoint_id == endpoint.id,
+                    Lease.kind == "keepalive",
+                    Lease.state.in_(ACTIVE_LEASE_STATES),
+                    LeaseResource.active.is_(True),
+                )
+                .limit(1)
+            ) is not None
+
+        return self._write(operation)
 
     def configure_keepalive_policy(
         self,
