@@ -5,6 +5,22 @@
 当前包装版本为 `5.5.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
 
+## 占卡把显存与内存也拉到目标（2026-11-11，Unreleased）
+
+用户要求：“占卡需要把内存，算力利用率，显存利用率都给拉上去”。用户选定三项分开设置、内存按占住的卡分摊。决定与取舍见[记录](teamwork/records/keepalive-target-utilization.md)。
+
+起点：上一条只让 GPU 利用率可调；显存固定占 CUDA 可见总量的 80%（`TARGET_MEMORY_FRACTION`），主机内存完全不占，App 服务器表里“内存占用率”一列在占卡时不动。
+
+改动：
+- 协议：`keepalive_protocol.KEEPALIVE_TARGET_LIMITS` 一张表管三项目标（名称、下限、默认 85、能力名），`KeepaliveTargets` 在请求、接口、汇总里共用同一组名字：`target_utilization_pct`、`target_gpu_memory_pct`（10–100）、`target_memory_pct`（0–100，0 不占）。v3 请求带三项，缺的按默认；`--protocol-info` 追加 `target_gpu_memory`、`target_memory`。
+- 持久化：迁移 `20261111_0045` 给 `endpoints` 加 `keepalive_target_gpu_memory_pct`、`keepalive_target_memory_pct`（NOT NULL 默认 85，各带检查）；初始迁移把它们列入后来新增的列。
+- 接口：`POST /api/v2/endpoints/{id}/keepalive` 必须带三项；`set_keepalive_targets` 任一项变化且有 worker 在跑时，沿用“先停、确认、再按新目标起”的路径。
+- helper：显存在建好计算缓冲、跑过一次矩阵乘法后按剩余量补到目标（`gpu_memory_hold_bytes`，留 256 MiB）；内存由 worker 里一个线程每 5 秒按 `next_host_memory_hold` 调整：每卡上限为目标 × 可用内存 ÷ 主机 GPU 数，步长为距目标余量 ÷ 主机 GPU 数，主机视图与 cgroup v2 容器视图取更紧者，读不到全部放掉；worker 启动时设 `oom_score_adj=1000`。controller 把主机 GPU 数（nvidia-smi 看到的物理卡数）传给每个 worker。
+- App：服务器详情的“占卡负载”菜单改为“占卡目标”，含 GPU 利用率、显存占用率、内存占用率三个子菜单。
+
+验证：全部 Python 测试（867）、Ruff、Agent 规则检查、Swift 测试（100）、App 构建与包检查、夹具截图核对菜单位置。新增仿真测试：8 张卡同时按步调整时内存收敛到 85%±0.5% 且任何一步不越过目标；只占 2/8 张卡时各自停在自己那一份；其他程序增长 200 GiB 后回落到目标、其他程序独占超过目标时各卡全部放掉；128 GiB 容器在 512 GiB 主机上按容器到目标、主机已到 90% 时不再占；读不到内存时全部放掉；显存补齐量计入 worker 自身占用、100% 只留驱动余量；接口改任一项都先停后起。
+未验证：真实服务器上的三项实际读数、内存补齐速度与 GIL 对 GPU 利用率的短暂影响、内存吃紧时内核是否按预期先结束占卡程序；各服务器 helper 尚未升级。
+
 ## 每台服务器可设置占卡负载（2026-11-11，Unreleased）
 
 另一会话在新接入的 8 卡 B20Z 上开占卡，用户要求利用率达到 90%，实测约 43%（A800 约 65%）。用户随后要求：“我想Serverpilot可以实现自定义占卡利用率他做不到，帮我升级一下”，并选定未设置时默认 85%。决定与取舍见[记录](teamwork/records/keepalive-target-utilization.md)。

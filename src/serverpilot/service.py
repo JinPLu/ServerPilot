@@ -32,6 +32,7 @@ from serverpilot.config import (
 )
 from serverpilot.database import Database
 from serverpilot.freshness import Freshness, freshness_of
+from serverpilot.keepalive_protocol import KeepaliveTargets
 from serverpilot.models import (
     Actor,
     ActorProject,
@@ -541,6 +542,8 @@ class BrokerService:
                     keepalive_adapter_id=configured_endpoint.keepalive_adapter_id,
                     keepalive_policy=configured_endpoint.keepalive_policy,
                     keepalive_target_utilization_pct=configured_endpoint.keepalive_target_utilization_pct,
+                    keepalive_target_gpu_memory_pct=configured_endpoint.keepalive_target_gpu_memory_pct,
+                    keepalive_target_memory_pct=configured_endpoint.keepalive_target_memory_pct,
                     labels_json=json_dump(configured_endpoint.labels),
                     storage_group=configured_endpoint.storage_group,
                     server_group_id=assigned_group_id,
@@ -818,6 +821,8 @@ class BrokerService:
                         keepalive_adapter_id=endpoint.keepalive_adapter_id,
                         keepalive_policy=endpoint.keepalive_policy,
                         keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
+                        keepalive_target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+                        keepalive_target_memory_pct=endpoint.keepalive_target_memory_pct,
                         labels=json_load(endpoint.labels_json),
                         storage_group=endpoint.storage_group,
                         server_group_id=endpoint.server_group_id,
@@ -863,6 +868,8 @@ class BrokerService:
                 keepalive_adapter_id=endpoint.keepalive_adapter_id,
                 keepalive_policy=endpoint.keepalive_policy,
                 keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
+                keepalive_target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+                keepalive_target_memory_pct=endpoint.keepalive_target_memory_pct,
                 labels=json_load(endpoint.labels_json),
                 storage_group=endpoint.storage_group,
                 server_group_id=endpoint.server_group_id,
@@ -2096,6 +2103,8 @@ class BrokerService:
             "keepalive_adapter_id": endpoint.keepalive_adapter_id,
             "keepalive_policy": endpoint.keepalive_policy,
             "keepalive_target_utilization_pct": endpoint.keepalive_target_utilization_pct,
+            "keepalive_target_gpu_memory_pct": endpoint.keepalive_target_gpu_memory_pct,
+            "keepalive_target_memory_pct": endpoint.keepalive_target_memory_pct,
             "labels": json_load(endpoint.labels_json),
             "storage_group": endpoint.storage_group,
             "expected_gpu_count": endpoint.expected_gpu_count,
@@ -3166,7 +3175,7 @@ class BrokerService:
         return {
             "configured": endpoint.keepalive_adapter_id is not None,
             "policy": endpoint.keepalive_policy,
-            "target_utilization_pct": endpoint.keepalive_target_utilization_pct,
+            **BrokerService._endpoint_keepalive_targets(endpoint).as_dict(),
             "desired": desired,
             "actual": state,
             "state": state,
@@ -3219,14 +3228,22 @@ class BrokerService:
             eligible_idle_gpu_count=eligible_idle_gpu_count,
         )
 
-    def set_keepalive_target(
-        self, actor: ActorContext, endpoint_id: str, target_utilization_pct: int
-    ) -> bool:
-        """Store how hard this server's held cards work; True when running workers hold another load.
+    @staticmethod
+    def _endpoint_keepalive_targets(endpoint: Endpoint) -> KeepaliveTargets:
+        return KeepaliveTargets(
+            target_utilization_pct=endpoint.keepalive_target_utilization_pct,
+            target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+            target_memory_pct=endpoint.keepalive_target_memory_pct,
+        )
 
-        A worker keeps the load it started with, so a changed target reaches a
-        card only when its worker is stopped and started again. The answer says
-        whether that has to happen now: the target moved and workers are up.
+    def set_keepalive_targets(
+        self, actor: ActorContext, endpoint_id: str, targets: KeepaliveTargets
+    ) -> bool:
+        """Store what this server's held cards are driven to; True when running workers hold other targets.
+
+        A worker keeps the targets it started with, so a changed target reaches
+        a card only when its worker is stopped and started again. The answer
+        says whether that has to happen now: a target moved and workers are up.
         """
 
         self._require_role(actor, MUTATING_ROLES)
@@ -3236,17 +3253,19 @@ class BrokerService:
             if endpoint is None:
                 raise BrokerError("endpoint_not_found", "endpoint does not exist", status_code=404)
             self._require_endpoint_manager(actor, endpoint)
-            before = endpoint.keepalive_target_utilization_pct
-            if before == target_utilization_pct:
+            before = self._endpoint_keepalive_targets(endpoint)
+            if before == targets:
                 return False
             now = utcnow()
-            endpoint.keepalive_target_utilization_pct = target_utilization_pct
+            endpoint.keepalive_target_utilization_pct = targets.target_utilization_pct
+            endpoint.keepalive_target_gpu_memory_pct = targets.target_gpu_memory_pct
+            endpoint.keepalive_target_memory_pct = targets.target_memory_pct
             endpoint.updated_at = now
             self._bump_revision(session, now)
             self._audit(
                 session, actor_id=actor.id, action="keepalive.target.configure",
                 resource_type="endpoint", resource_id=endpoint.id, result="success",
-                summary={"before": before, "after": target_utilization_pct}, now=now,
+                summary={"before": before.as_dict(), "after": targets.as_dict()}, now=now,
             )
             return session.scalar(
                 select(Lease.id)
@@ -3552,7 +3571,7 @@ class BrokerService:
                         # The previous holder let this card go moments ago, and
                         # a gap between two batches of its work looks the same
                         # as the end of it.  Occupancy waits the cooldown out
-                        # rather than taking 80% of the VRAM on top of a job
+                        # rather than taking most of the VRAM on top of a job
                         # that is about to continue.
                         transitions.append(
                             {
@@ -8886,7 +8905,7 @@ class BrokerService:
           holder itself, so waiting for that holder to go quiet is waiting for
           nobody. It skips the liveness window and nothing else: a keepalive
           worker that is still observed running is still a running process,
-          and clearing the lease that owns it would leave 80% of the card's
+          and clearing the lease that owns it would leave most of the card's
           VRAM held by a worker no lease points at any more.
         * An endpoint that has stopped answering carries the waiver this path
           already documents for the observation proof. A machine that is gone
@@ -9616,7 +9635,7 @@ class BrokerService:
         by a sighting on its own cards or by asking about its own hold.  While
         it was, none of its cards are taken, because taking them walks back
         into p8908: the cards leave the claim, the cooldown lapses, and
-        keepalive puts 80% of their VRAM under a job that is about to use them
+        keepalive puts most of their VRAM under a job that is about to use them
         again.  The gate covers every card, not just the last one -- streaks
         desynchronise whenever a card's telemetry blips or a phase used a
         subset of the claim, and a gate that only fires when *all* cards happen

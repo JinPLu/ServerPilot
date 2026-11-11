@@ -573,7 +573,7 @@ struct ServerDetailSheet: View {
                         store.setEndpointKeepalive(
                             endpoint,
                             enabled: occupancyActionStarts,
-                            targetUtilizationPct: endpoint.keepalive.targetUtilizationPct
+                            targets: endpoint.keepalive.targets
                         ) { _, error in
                             actionError = error
                         }
@@ -590,46 +590,57 @@ struct ServerDetailSheet: View {
                 )
                 .help(occupancyActionHelp)
 
-                keepaliveLoadMenu(endpoint)
+                keepaliveTargetsMenu(endpoint)
             }
         }
     }
 
-    /// How hard held cards work. A running worker keeps the load it started
+    /// What held cards are driven to: GPU utilization, VRAM and host memory,
+    /// each its own submenu. A running worker keeps the targets it started
     /// with, so a change while cards are held stops and restarts them.
-    private func keepaliveLoadMenu(_ endpoint: EndpointRecord) -> some View {
-        let current = endpoint.keepalive.targetUtilizationPct
-        let help = endpoint.keepalive.isActive
-            ? "占卡时每张卡的 GPU 利用率目标。改动后，正在占卡的卡会先停下再按新负载占上。"
-            : "占卡时每张卡的 GPU 利用率目标，下次占卡时生效。"
+    private func keepaliveTargetsMenu(_ endpoint: EndpointRecord) -> some View {
+        let current = endpoint.keepalive.targets
+        let when = endpoint.keepalive.isActive
+            ? "改动后，正在占卡的卡会先停下再按新目标占上。"
+            : "下次占卡时生效。"
+        let help = "占卡时把这台服务器拉到的目标：\(current.describe())。\(when)"
         return Menu {
-            ForEach(EndpointKeepaliveSummary.targetUtilizationChoices, id: \.self) { pct in
-                Button {
-                    guard pct != current else { return }
-                    actionError = nil
-                    store.setEndpointKeepalive(
-                        endpoint, enabled: endpoint.keepalive.isEnabled, targetUtilizationPct: pct
-                    ) { _, error in
-                        actionError = error
+            ForEach(KeepaliveTarget.allCases, id: \.self) { target in
+                Menu {
+                    ForEach(target.choices, id: \.self) { pct in
+                        Button {
+                            guard pct != current[target] else { return }
+                            actionError = nil
+                            store.setEndpointKeepalive(
+                                endpoint,
+                                enabled: endpoint.keepalive.isEnabled,
+                                targets: current.setting(target, to: pct)
+                            ) { _, error in
+                                actionError = error
+                            }
+                        } label: {
+                            if pct == current[target] {
+                                Label("\(pct)%", systemImage: "checkmark")
+                            } else {
+                                Text("\(pct)%")
+                            }
+                        }
                     }
                 } label: {
-                    if pct == current {
-                        Label("\(pct)%", systemImage: "checkmark")
-                    } else {
-                        Text("\(pct)%")
-                    }
+                    Text("\(target.label) \(current[target])%")
                 }
+                .help(target.help)
             }
         } label: {
-            Label("占卡负载 \(current)%", systemImage: "gauge.with.dots.needle.67percent")
+            Label("占卡目标", systemImage: "gauge.with.dots.needle.67percent")
                 .font(Typography.identity.weight(.semibold))
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
         .disabled(gpus.isEmpty || !store.allowsEndpointLifecycleMutations || isMutating)
-        .accessibilityIdentifier("endpoint-keepalive-load")
-        .accessibilityLabel("占卡负载")
-        .accessibilityValue("\(current)%")
+        .accessibilityIdentifier("endpoint-keepalive-targets")
+        .accessibilityLabel("占卡目标")
+        .accessibilityValue(current.describe())
         .help(help)
     }
 

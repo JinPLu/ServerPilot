@@ -883,7 +883,7 @@ public final class BrokerStore: ObservableObject {
     public func setEndpointKeepalive(
         _ endpoint: EndpointRecord,
         enabled: Bool,
-        targetUtilizationPct: Int,
+        targets: KeepaliveTargets,
         completion: @escaping @MainActor @Sendable (Bool, String?) -> Void
     ) {
         guard supportsEndpointKeepalive else {
@@ -892,18 +892,19 @@ public final class BrokerStore: ObservableObject {
             completion(false, message)
             return
         }
+        let changed = KeepaliveTarget.allCases.filter { targets[$0] != endpoint.keepalive.targets[$0] }
         performEndpointMutation(
             endpoint,
             path: "api/v2/endpoints/\(endpoint.id)/keepalive",
             method: "POST",
-            payload: ["enabled": enabled, "target_utilization_pct": targetUtilizationPct],
-            successMessage: targetUtilizationPct != endpoint.keepalive.targetUtilizationPct
-                ? (enabled && endpoint.keepalive.isActive
-                    ? "已把 \(endpoint.displayName) 的占卡负载设为 \(targetUtilizationPct)%，正在占卡的卡已按新负载重新占上。"
-                    : "已把 \(endpoint.displayName) 的占卡负载设为 \(targetUtilizationPct)%，下次占卡时生效。")
-                : (enabled
+            payload: (["enabled": enabled] as [String: Any]).merging(targets.payload) { _, target in target },
+            successMessage: changed.isEmpty
+                ? (enabled
                     ? "已开启 \(endpoint.displayName) 的空闲自动占卡策略。"
-                    : "已关闭 \(endpoint.displayName) 的空闲自动占卡策略。"),
+                    : "已关闭 \(endpoint.displayName) 的空闲自动占卡策略。")
+                : (enabled && endpoint.keepalive.isActive
+                    ? "已把 \(endpoint.displayName) 的占卡目标改为\(targets.describe(changed))，正在占卡的卡已按新目标重新占上。"
+                    : "已把 \(endpoint.displayName) 的占卡目标改为\(targets.describe(changed))，下次占卡时生效。"),
             completion: completion
         )
     }

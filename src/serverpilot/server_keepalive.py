@@ -40,17 +40,17 @@ from serverpilot.keepalive_protocol import (
     KeepaliveProtocolError,
     KeepaliveRequest,
     KeepaliveResponse,
+    KeepaliveTargets,
     KeepaliveWorkerAttestation,
     keepalive_protocol_info,
     validate_gpu_uuid,
-    validate_target_utilization_pct,
 )
 
-# These values are fixed server policy, never request inputs; the one request
-# input is the load target, a validated whole percent.  The worker has no
-# steady-state filesystem or network activity: state is read/written only
-# during a reconciliation call and runtime CUDA work is fully resident.
-TARGET_MEMORY_FRACTION = 0.80
+# These values are fixed server policy, never request inputs; the request's
+# only inputs are its targets, validated whole percents.  The worker has no
+# steady-state disk or network activity: state is read/written only during a
+# reconciliation call, runtime CUDA work is fully resident, and the one
+# recurring read is the kernel's own memory figures every few seconds.
 DUTY_PERIOD_SECONDS = 0.1
 # Work goes to the card in batches of about this much GPU time, sized once
 # from a measured kernel, so a fast card and a slow one are fed alike.
@@ -60,6 +60,10 @@ MAX_BATCH_KERNELS = 10_000
 ALLOCATION_CHUNK_BYTES = 256 * 1024 * 1024
 COMPUTE_MATRIX_SIZE = 4096
 WORKER_MEMORY_SLACK_BYTES = 256 * 1024 * 1024
+# Host memory moves in pieces this size, each written through so every page
+# is resident; small enough that filling one holds the GIL only briefly.
+HOST_MEMORY_CHUNK_BYTES = 64 * 1024 * 1024
+HOST_MEMORY_ADJUST_SECONDS = 5.0
 WORKER_READY_TIMEOUT_SECONDS = 35
 WORKER_STOP_TIMEOUT_SECONDS = 10
 NVIDIA_SMI_TIMEOUT_SECONDS = 10
@@ -79,12 +83,108 @@ class KeepaliveProcessIdentity:
     worker_marker: str
 
 
-def keepalive_target_bytes(total_bytes: int) -> int:
-    """Return the fixed VRAM hold for one GPU from its CUDA-visible total."""
+def gpu_memory_hold_bytes(total_bytes: int, free_bytes: int, target_pct: int) -> int:
+    """VRAM to allocate so the card's memory in use reaches ``target_pct`` of it.
 
-    if total_bytes <= 0:
-        raise RuntimeError("keepalive CUDA visible total memory is invalid")
-    return math.ceil(total_bytes * TARGET_MEMORY_FRACTION)
+    Measured after the worker's own context and buffers exist, so what it
+    already uses counts toward the target; a little is always left free for
+    the driver, which is all a 100% target falls short by.
+    """
+
+    if total_bytes <= 0 or not 0 <= free_bytes <= total_bytes:
+        raise RuntimeError("keepalive CUDA visible memory is invalid")
+    wanted = math.ceil(total_bytes * target_pct / 100) - (total_bytes - free_bytes)
+    return max(0, min(wanted, free_bytes - WORKER_MEMORY_SLACK_BYTES))
+
+
+def read_memory_views(root: Path = Path("/")) -> list[tuple[int, int]]:
+    """Return (total, used) bytes for each memory view a held card counts against.
+
+    The host's view is MemTotal and MemTotal - MemAvailable; inside a cgroup v2
+    memory limit the container's limit and usage come too. These are the
+    readings the observation probe takes, so the container's is the one the
+    App shows as 内存占用率 there, and the host's keeps a crowded host from
+    being pushed past the target by a container whose limit it cannot honour.
+    """
+
+    meminfo: dict[str, int] = {}
+    for line in (root / "proc" / "meminfo").read_text(encoding="ascii").splitlines():
+        key, _, rest = line.partition(":")
+        if key in ("MemTotal", "MemAvailable"):
+            meminfo[key] = int(rest.split()[0]) * 1024
+    total = meminfo["MemTotal"]
+    views = [(total, max(total - meminfo["MemAvailable"], 0))]
+    cgroup = root / "sys" / "fs" / "cgroup"
+    try:
+        limit = (cgroup / "memory.max").read_text(encoding="ascii").strip()
+        current = int((cgroup / "memory.current").read_text(encoding="ascii").strip())
+    except OSError:
+        return views
+    if limit != "max":
+        views.append((int(limit), min(current, int(limit))))
+    return views
+
+
+def next_host_memory_hold(
+    held: int, views: list[tuple[int, int]], target_pct: int, host_gpu_count: int
+) -> int:
+    """Host memory one held card should hold next, in bytes.
+
+    A card's share is the target times the memory it may use, over the
+    server's GPU count, so memory reaches the target only when every card is
+    held and a card handed to a task takes its share with it. Each step moves
+    by the room left under the target in the tightest view over that same
+    count: workers on every card together close the gap without overshooting
+    it, and give memory back when something else grows into it.
+    """
+
+    target = target_pct / 100
+    share = min(total for total, _used in views) * target / host_gpu_count
+    room = min(total * target - used for total, used in views)
+    return int(max(0.0, min(share, held + room / host_gpu_count)))
+
+
+def hold_host_memory(
+    target_pct: int,
+    host_gpu_count: int,
+    *,
+    read_views: Callable[[], list[tuple[int, int]]],
+    stop_event: threading.Event,
+    chunk_bytes: int = HOST_MEMORY_CHUNK_BYTES,
+    adjust_seconds: float = HOST_MEMORY_ADJUST_SECONDS,
+) -> None:
+    """Hold this card's share of host memory until stopped, re-sized every few seconds.
+
+    Memory that cannot be read is memory not held: every piece is let go.
+    """
+
+    chunks: list[bytes] = []
+    while True:
+        try:
+            views = read_views()
+        except (OSError, UnicodeError, ValueError, KeyError, IndexError):
+            views = []
+        wanted = (
+            next_host_memory_hold(len(chunks) * chunk_bytes, views, target_pct, host_gpu_count)
+            // chunk_bytes
+            if views
+            else 0
+        )
+        del chunks[wanted:]
+        while len(chunks) < wanted and not stop_event.is_set():
+            # A repeated non-zero byte is written through, so every page is resident.
+            chunks.append(b"\x01" * chunk_bytes)
+        if stop_event.wait(adjust_seconds):
+            return
+
+
+def _prefer_worker_for_oom_kill() -> None:
+    """Be the first process the kernel kills when memory runs out, never a workload."""
+
+    try:
+        Path("/proc/self/oom_score_adj").write_text("1000\n", encoding="ascii")
+    except OSError as exc:
+        raise RuntimeError("keepalive worker could not put itself first for the OOM killer") from exc
 
 
 def default_state_directory() -> Path:
@@ -99,7 +199,9 @@ def default_state_directory() -> Path:
 class KeepaliveProcessProvider(Protocol):
     """Local implementation boundary; no Broker/API value reaches this layer."""
 
-    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity: ...
+    def start(
+        self, gpu_uuid: str, targets: KeepaliveTargets, host_gpu_count: int
+    ) -> KeepaliveProcessIdentity: ...
 
     def is_running(self, identity: KeepaliveProcessIdentity) -> bool: ...
 
@@ -183,9 +285,11 @@ class TorchSubprocessProvider:
                 "keepalive CUDA PCI ordinal mapping does not contain requested GPU UUID"
             ) from exc
 
-    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
+    def start(
+        self, gpu_uuid: str, targets: KeepaliveTargets, host_gpu_count: int
+    ) -> KeepaliveProcessIdentity:
         gpu_uuid = validate_gpu_uuid(gpu_uuid)
-        target_utilization_pct = validate_target_utilization_pct(target_utilization_pct)
+        host_gpu_count = _validate_host_gpu_count(host_gpu_count)
         cuda_visible_device = self._cuda_visible_device(gpu_uuid)
         read_fd, write_fd = os.pipe()
         try:
@@ -200,7 +304,13 @@ class TorchSubprocessProvider:
                     "--worker-marker",
                     WORKER_PROCESS_MARKER,
                     "--target-utilization-pct",
-                    str(target_utilization_pct),
+                    str(targets.target_utilization_pct),
+                    "--target-gpu-memory-pct",
+                    str(targets.target_gpu_memory_pct),
+                    "--target-memory-pct",
+                    str(targets.target_memory_pct),
+                    "--host-gpu-count",
+                    str(host_gpu_count),
                 ],
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL,
@@ -310,13 +420,13 @@ class LocalKeepaliveController:
         self,
         enabled: bool,
         gpu_uuids: list[str] | tuple[str, ...],
-        target_utilization_pct: int,
+        targets: KeepaliveTargets,
     ) -> KeepaliveResponse:
         """Start or stop one occupancy worker for each supplied GPU UUID.
 
-        A started worker holds ``target_utilization_pct``; a running one keeps
-        the load it started with, so a new target reaches a card only through
-        a stop and a start, which the control plane drives and observes.
+        A started worker holds ``targets``; a running one keeps the targets it
+        started with, so a new target reaches a card only through a stop and a
+        start, which the control plane drives and observes.
         """
 
         if type(enabled) is not bool:
@@ -334,9 +444,7 @@ class LocalKeepaliveController:
         with self._lock():
             identities = self._read_identities()
             if enabled:
-                return self._enable(
-                    requested, identities, validate_target_utilization_pct(target_utilization_pct)
-                )
+                return self._enable(requested, identities, targets, len(known_gpu_uuids))
             return self._disable(requested, identities)
 
     def attest_workers(
@@ -389,7 +497,8 @@ class LocalKeepaliveController:
         self,
         requested: tuple[str, ...],
         identities: dict[str, KeepaliveProcessIdentity],
-        target_utilization_pct: int,
+        targets: KeepaliveTargets,
+        host_gpu_count: int,
     ) -> KeepaliveResponse:
         results_by_uuid: dict[str, KeepaliveGPUResult] = {}
         pending: list[str] = []
@@ -411,7 +520,9 @@ class LocalKeepaliveController:
         if pending:
             with concurrent.futures.ThreadPoolExecutor(max_workers=len(pending)) as executor:
                 started = {
-                    gpu_uuid: executor.submit(self.provider.start, gpu_uuid, target_utilization_pct)
+                    gpu_uuid: executor.submit(
+                        self.provider.start, gpu_uuid, targets, host_gpu_count
+                    )
                     for gpu_uuid in pending
                 }
                 for gpu_uuid in pending:
@@ -608,7 +719,7 @@ def handle_request(
 ) -> KeepaliveResponse:
     request = KeepaliveRequest.decode(payload)
     return (controller or LocalKeepaliveController()).set_enabled(
-        request.enabled, request.gpu_uuids, request.target_utilization_pct
+        request.enabled, request.gpu_uuids, request.targets
     )
 
 
@@ -621,6 +732,12 @@ def handle_attestation(
 
     request = KeepaliveAttestationRequest.decode(payload)
     return (controller or LocalKeepaliveController()).attest_workers(request.gpu_uuids)
+
+
+def _validate_host_gpu_count(value: object) -> int:
+    if type(value) is not int or not 1 <= value <= 1024:
+        raise ValueError("keepalive host GPU count must be an integer from 1 to 1024")
+    return value
 
 
 def _terminate_started_process(process: subprocess.Popen[bytes]) -> None:
@@ -874,8 +991,8 @@ def hold_utilization(
         pause(max(0.0, started + period - clock()))
 
 
-def _run_cuda_worker(ready_fd: int, target_utilization_pct: int) -> None:
-    """Hold one GPU, made visible by its provider, at the requested load."""
+def _run_cuda_worker(ready_fd: int, targets: KeepaliveTargets, host_gpu_count: int) -> None:
+    """Hold one GPU, made visible by its provider, at the requested targets."""
 
     ready = os.fdopen(ready_fd, "wb", buffering=0)
     try:
@@ -899,29 +1016,29 @@ def _run_cuda_worker(ready_fd: int, target_utilization_pct: int) -> None:
         if not torch.cuda.is_available():
             raise RuntimeError("PyTorch CUDA runtime could not initialize the selected GPU")
 
+        _prefer_worker_for_oom_kill()
         device = torch.device("cuda:0")
-        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
-        target_bytes = keepalive_target_bytes(total_bytes)
-        # Reserve fixed VRAM separately from the resident compute buffers so
-        # the duty loop itself does not allocate or write/cache on each tick.
-        if free_bytes < target_bytes + WORKER_MEMORY_SLACK_BYTES:
-            raise RuntimeError("target GPU lacks memory for fixed keepalive target")
-        held_allocations: list[Any] = []
-        remaining = target_bytes
-        while remaining > 0:
-            size = min(remaining, ALLOCATION_CHUNK_BYTES)
-            held_allocations.append(torch.empty(size, dtype=torch.uint8, device=device))
-            remaining -= size
         resident_compute_buffers = (
             torch.randn((COMPUTE_MATRIX_SIZE, COMPUTE_MATRIX_SIZE), dtype=torch.float16, device=device),
             torch.randn((COMPUTE_MATRIX_SIZE, COMPUTE_MATRIX_SIZE), dtype=torch.float16, device=device),
             torch.empty((COMPUTE_MATRIX_SIZE, COMPUTE_MATRIX_SIZE), dtype=torch.float16, device=device),
         )
         left, right, output = resident_compute_buffers
-        # Size a batch from one measured kernel, so it is about BATCH_SECONDS
-        # of GPU time on whatever card this is.
+        # The first kernel creates the math library's workspace, so what the
+        # card reports free next already counts everything this worker uses.
         torch.mm(left, right, out=output)
         torch.cuda.synchronize(device)
+        free_bytes, total_bytes = torch.cuda.mem_get_info(device)
+        # Hold VRAM apart from the compute buffers so the duty loop itself
+        # never allocates or writes/caches on a tick.
+        held_allocations: list[Any] = []
+        remaining = gpu_memory_hold_bytes(total_bytes, free_bytes, targets.target_gpu_memory_pct)
+        while remaining > 0:
+            size = min(remaining, ALLOCATION_CHUNK_BYTES)
+            held_allocations.append(torch.empty(size, dtype=torch.uint8, device=device))
+            remaining -= size
+        # Size a batch from one measured kernel, so it is about BATCH_SECONDS
+        # of GPU time on whatever card this is.
         timing_start = torch.cuda.Event(enable_timing=True)
         timing_end = torch.cuda.Event(enable_timing=True)
         timing_start.record()
@@ -947,6 +1064,14 @@ def _run_cuda_worker(ready_fd: int, target_utilization_pct: int) -> None:
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
+    # Host memory has its own pace and never touches CUDA, so it runs beside
+    # the duty loop and goes when the process does.
+    threading.Thread(
+        target=hold_host_memory,
+        args=(targets.target_memory_pct, host_gpu_count),
+        kwargs={"read_views": read_memory_views, "stop_event": stop_event},
+        daemon=True,
+    ).start()
 
     def launch_batch() -> Callable[[], None]:
         for _ in range(batch_kernels):
@@ -958,7 +1083,7 @@ def _run_cuda_worker(ready_fd: int, target_utilization_pct: int) -> None:
         return done.synchronize
 
     hold_utilization(
-        target_utilization_pct / 100,
+        targets.target_utilization_pct / 100,
         launch_batch=launch_batch,
         batch_seconds=batch_kernels * kernel_seconds,
         stopped=stop_event.is_set,
@@ -976,15 +1101,25 @@ def main() -> None:
     parser.add_argument("--ready-fd", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--worker-marker", help=argparse.SUPPRESS)
     parser.add_argument("--target-utilization-pct", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--target-gpu-memory-pct", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--target-memory-pct", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--host-gpu-count", type=int, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
+    worker_arguments = (
+        arguments.ready_fd,
+        arguments.worker_marker,
+        arguments.target_utilization_pct,
+        arguments.target_gpu_memory_pct,
+        arguments.target_memory_pct,
+        arguments.host_gpu_count,
+    )
+    has_worker_argument = any(value is not None for value in worker_arguments)
     if arguments.protocol_info:
         if (
             arguments.schema_version is not None
             or arguments.inspect
             or arguments.internal_worker
-            or arguments.ready_fd is not None
-            or arguments.worker_marker is not None
-            or arguments.target_utilization_pct is not None
+            or has_worker_argument
         ):
             parser.error("invalid protocol-info invocation")
         sys.stdout.buffer.write(
@@ -996,9 +1131,7 @@ def main() -> None:
         if (
             arguments.schema_version != KEEPALIVE_SCHEMA_VERSION
             or arguments.internal_worker
-            or arguments.ready_fd is not None
-            or arguments.worker_marker is not None
-            or arguments.target_utilization_pct is not None
+            or has_worker_argument
         ):
             parser.error("invalid keepalive inspection invocation")
         try:
@@ -1013,22 +1146,22 @@ def main() -> None:
         if (
             arguments.schema_version is not None
             or arguments.inspect
-            or arguments.ready_fd is None
+            or any(value is None for value in worker_arguments)
             or arguments.worker_marker != WORKER_PROCESS_MARKER
-            or arguments.target_utilization_pct is None
         ):
             parser.error("invalid internal worker invocation")
-        _run_cuda_worker(
-            arguments.ready_fd, validate_target_utilization_pct(arguments.target_utilization_pct)
-        )
+        try:
+            targets = KeepaliveTargets(
+                target_utilization_pct=arguments.target_utilization_pct,
+                target_gpu_memory_pct=arguments.target_gpu_memory_pct,
+                target_memory_pct=arguments.target_memory_pct,
+            )
+            host_gpu_count = _validate_host_gpu_count(arguments.host_gpu_count)
+        except ValueError as exc:
+            parser.error(f"invalid internal worker invocation: {exc}")
+        _run_cuda_worker(arguments.ready_fd, targets, host_gpu_count)
         return
-    if (
-        arguments.schema_version != KEEPALIVE_SCHEMA_VERSION
-        or arguments.inspect
-        or arguments.ready_fd is not None
-        or arguments.worker_marker is not None
-        or arguments.target_utilization_pct is not None
-    ):
+    if arguments.schema_version != KEEPALIVE_SCHEMA_VERSION or arguments.inspect or has_worker_argument:
         parser.error(
             "keepalive schema version mismatch: "
             f"expected {KEEPALIVE_SCHEMA_VERSION}"

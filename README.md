@@ -285,9 +285,10 @@ new selector.
   in the App and confirm: after checking each one, it stops the processes on
   that task's cards that belong to the SSH login account (SIGTERM, then
   SIGKILL ten seconds later). Keepalive starts and stops a per-GPU CUDA process on the remote
-  host holding about 80% of that card's VRAM and computing at the server's
-  keepalive load (85% of the time by default, set per server in the App), and
-  `gpu_apply` stops it before handing the card over. A plugin that declares `apply` / `release` performs the
+  host that keeps that card's GPU utilization and VRAM use, and its share of the
+  server's host memory, at the targets set per server in the App (85% each by
+  default; host memory is shared out per card and given back when other
+  programs need it), and `gpu_apply` stops it before handing the card over. A plugin that declares `apply` / `release` performs the
   matching cluster allocation on request and release.
 - Server state comes from fixed collection: the built-in `linux` SSH probe (a
   fixed read-only query, nothing installed on the remote), or a local plugin's

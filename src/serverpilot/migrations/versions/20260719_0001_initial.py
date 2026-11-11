@@ -60,8 +60,9 @@ _RETIRED_COLUMNS = (("endpoints", "enabled"), ("gpu_devices", "enabled"))
 _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_seconds")
 
 
-# 20261030_0041 adds these, 20261104_0042 adds idle_checked_at, and
-# 20261111_0044 the keepalive target with its check. The indexes go first: one
+# 20261030_0041 adds these, 20261104_0042 adds idle_checked_at, 20261111_0044
+# the keepalive utilization target and 20261111_0045 the two memory targets,
+# each with its check. The indexes go first: one
 # of them names task_ref, which _create_retired_request_tables removes; a check
 # goes before the column it names.
 _LATER_INDEXES = (
@@ -75,9 +76,19 @@ _LATER_COLUMNS = {
     "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows", "idle_checked_at"),
     "alerts": ("category", "dedupe_key", "state", "pending_since", "notified_at", "lease_id",
                "project_id", "task_ref", "payload_json"),
-    "endpoints": ("keepalive_target_utilization_pct",),
+    "endpoints": (
+        "keepalive_target_utilization_pct",
+        "keepalive_target_gpu_memory_pct",
+        "keepalive_target_memory_pct",
+    ),
 }
-_LATER_CHECKS = {"endpoints": ("ck_endpoint_keepalive_target_utilization",)}
+_LATER_CHECKS = {
+    "endpoints": (
+        "ck_endpoint_keepalive_target_utilization",
+        "ck_endpoint_keepalive_target_gpu_memory",
+        "ck_endpoint_keepalive_target_memory",
+    ),
+}
 
 
 def _drop_later_additions() -> None:

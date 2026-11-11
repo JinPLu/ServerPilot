@@ -33,27 +33,32 @@ from serverpilot.keepalive_protocol import (
     KeepaliveProtocolError,
     KeepaliveRequest,
     KeepaliveResponse,
+    KeepaliveTargets,
     KeepaliveWorkerAttestation,
     keepalive_protocol_info,
 )
 from serverpilot.server_keepalive import (
     DUTY_PERIOD_SECONDS,
-    TARGET_MEMORY_FRACTION,
+    WORKER_MEMORY_SLACK_BYTES,
     WORKER_PROCESS_MARKER,
     KeepaliveProcessIdentity,
     LocalKeepaliveController,
     TorchSubprocessProvider,
     default_state_directory,
+    gpu_memory_hold_bytes,
     handle_attestation,
     handle_request,
+    hold_host_memory,
     hold_utilization,
-    keepalive_target_bytes,
+    next_host_memory_hold,
 )
 
 GPU_A = "GPU-00000000-0000-0000-0000-000000000001"
 GPU_B = "GPU-00000000-0000-0000-0000-000000000002"
 GPU_C = "GPU-00000000-0000-0000-0000-000000000003"
 KNOWN_GPUS = {GPU_A, GPU_B, GPU_C}
+DEFAULT_TARGETS = KeepaliveTargets()
+GIB = 1024 * 1024 * 1024
 
 
 def test_torch_provider_resolves_uuid_to_pci_ordered_cuda_ordinal_once(
@@ -110,11 +115,18 @@ def test_torch_provider_sets_pci_order_and_derived_ordinal(
     provider = TorchSubprocessProvider()
     provider._gpu_ordinals = {GPU_A: "4"}
 
-    assert provider.start(GPU_A, 90) == identity
+    targets = KeepaliveTargets(
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=0
+    )
+    assert provider.start(GPU_A, targets, 8) == identity
     assert captured["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "4"
-    assert captured["command"][-4:] == [
-        "--worker-marker", WORKER_PROCESS_MARKER, "--target-utilization-pct", "90",
+    assert captured["command"][-10:] == [
+        "--worker-marker", WORKER_PROCESS_MARKER,
+        "--target-utilization-pct", "90",
+        "--target-gpu-memory-pct", "95",
+        "--target-memory-pct", "0",
+        "--host-gpu-count", "8",
     ]
 
 
@@ -177,25 +189,53 @@ def _result(
 
 
 def test_protocol_uses_only_the_per_gpu_request() -> None:
-    request = KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90)
+    targets = KeepaliveTargets(
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=0
+    )
+    request = KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), targets=targets)
     decoded = KeepaliveRequest.decode(request.encode())
 
     assert decoded == request
+    assert json.loads(request.encode()) == {
+        "schema_version": 3,
+        "enabled": True,
+        "gpu_uuids": [GPU_A, GPU_B],
+        "target_utilization_pct": 90,
+        "target_gpu_memory_pct": 95,
+        "target_memory_pct": 0,
+    }
     assert KEEPALIVE_SCHEMA_VERSION == 3
     with pytest.raises(KeepaliveProtocolError, match="expected 3"):
         KeepaliveRequest.decode('{"schema_version":2,"enabled":true}')
     with pytest.raises(KeepaliveProtocolError, match="malformed"):
         KeepaliveRequest.decode('{"schema_version":3,"enabled":true,"gpu_uuids":["0;touch /tmp/x"]}')
-    # A control plane from before the target still drives this helper: its
-    # request means the default load.
+    # A control plane from before a target still drives this helper: a target
+    # its request leaves out means the default.
     assert KeepaliveRequest.decode(
-        '{"schema_version":3,"enabled":true,"gpu_uuids":["' + GPU_A + '"],"note":"unused"}'
-    ) == KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A,), target_utilization_pct=85)
-    for out_of_range in (9, 101, "90", 90.5, True):
-        with pytest.raises(KeepaliveProtocolError, match="target_utilization_pct"):
-            KeepaliveRequest(
-                enabled=True, gpu_uuids=(GPU_A,), target_utilization_pct=out_of_range  # type: ignore[arg-type]
-            ).encode()
+        '{"schema_version":3,"enabled":true,"gpu_uuids":["' + GPU_A + '"],"note":"unused",'
+        '"target_utilization_pct":90}'
+    ) == KeepaliveRequest(
+        enabled=True,
+        gpu_uuids=(GPU_A,),
+        targets=KeepaliveTargets(
+            target_utilization_pct=90, target_gpu_memory_pct=85, target_memory_pct=85
+        ),
+    )
+    for name, out_of_range in (
+        *(("target_utilization_pct", value) for value in (9, 101, "90", 90.5, True)),
+        *(("target_gpu_memory_pct", value) for value in (9, 101)),
+        *(("target_memory_pct", value) for value in (-1, 101)),
+    ):
+        with pytest.raises(KeepaliveProtocolError, match=name):
+            KeepaliveTargets(**{name: out_of_range})
+        with pytest.raises(KeepaliveProtocolError, match=name):
+            KeepaliveRequest.decode(
+                json.dumps(
+                    {"schema_version": 3, "enabled": True, "gpu_uuids": [GPU_A], name: out_of_range}
+                )
+            )
+    # Holding no host memory is a choice; a held card always holds some VRAM.
+    assert KeepaliveTargets(target_memory_pct=0).target_memory_pct == 0
 
 
 def test_protocol_info_publishes_v3_helper_capabilities() -> None:
@@ -210,8 +250,11 @@ def test_protocol_info_publishes_v3_helper_capabilities() -> None:
             "pidfd_identity",
             "pci_bus_id",
             "worker_attestation",
-            # Advertised, not required: an older helper still works, at its old fixed load.
+            # Advertised, not required: an older helper still works, at its
+            # old fixed load and VRAM and without holding host memory.
             "target_utilization",
+            "target_gpu_memory",
+            "target_memory",
         ],
     }
 
@@ -358,8 +401,10 @@ def test_adapter_uses_fixed_ssh_command_and_exact_json_stdin(
         "schema_version": 3,
         "enabled": False,
         "gpu_uuids": [GPU_A],
-        # The server's own target, the default here; a stop ignores it.
+        # The server's own targets, the defaults here; a stop ignores them.
         "target_utilization_pct": 85,
+        "target_gpu_memory_pct": 85,
+        "target_memory_pct": 85,
     }
     assert {"shell", "env", "pid", "path", "argv", "command", "cuda_visible_devices"}.isdisjoint(
         json.loads(calls[1][2])
@@ -686,7 +731,7 @@ class FakeProvider:
     def __init__(self) -> None:
         self.running: set[int] = set()
         self.started: list[tuple[str, int]] = []
-        self.targets: list[int] = []
+        self.targets: list[tuple[KeepaliveTargets, int]] = []
         self.stopped: list[int] = []
 
     @staticmethod
@@ -698,10 +743,12 @@ class FakeProvider:
             worker_marker=WORKER_PROCESS_MARKER,
         )
 
-    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
+    def start(
+        self, gpu_uuid: str, targets: KeepaliveTargets, host_gpu_count: int
+    ) -> KeepaliveProcessIdentity:
         pid = 100 + len(self.started) + 1
         self.started.append((gpu_uuid, pid))
-        self.targets.append(target_utilization_pct)
+        self.targets.append((targets, host_gpu_count))
         self.running.add(pid)
         return self.identity(pid)
 
@@ -714,10 +761,12 @@ class FakeProvider:
 
 
 class FailingSecondProvider(FakeProvider):
-    def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
+    def start(
+        self, gpu_uuid: str, targets: KeepaliveTargets, host_gpu_count: int
+    ) -> KeepaliveProcessIdentity:
         if self.started:
             raise RuntimeError("second worker failed")
-        return super().start(gpu_uuid, target_utilization_pct)
+        return super().start(gpu_uuid, targets, host_gpu_count)
 
 
 def test_local_controller_manages_each_gpu_independently_and_only_stops_own_state(
@@ -731,10 +780,10 @@ def test_local_controller_manages_each_gpu_independently_and_only_stops_own_stat
         driver_pid_resolver=lambda gpu_uuid: {GPU_A: 50_101, GPU_B: 50_102}[gpu_uuid],
     )
 
-    started = controller.set_enabled(True, [GPU_A, GPU_B], 85)
-    disabled_a = controller.set_enabled(False, [GPU_A], 85)
-    repeated_b = controller.set_enabled(True, [GPU_B], 85)
-    disabled_missing = controller.set_enabled(False, [GPU_C], 85)
+    started = controller.set_enabled(True, [GPU_A, GPU_B], DEFAULT_TARGETS)
+    disabled_a = controller.set_enabled(False, [GPU_A], DEFAULT_TARGETS)
+    repeated_b = controller.set_enabled(True, [GPU_B], DEFAULT_TARGETS)
+    disabled_missing = controller.set_enabled(False, [GPU_C], DEFAULT_TARGETS)
 
     pid_a = provider.started[0][1]
     pid_b = provider.started[1][1]
@@ -765,7 +814,7 @@ def test_local_controller_attests_only_its_live_v3_workers(tmp_path: Path) -> No
         known_gpu_uuids_resolver=lambda: KNOWN_GPUS,
         driver_pid_resolver=lambda gpu_uuid: {GPU_A: 50_101, GPU_B: 50_102}[gpu_uuid],
     )
-    controller.set_enabled(True, [GPU_A, GPU_B], 85)
+    controller.set_enabled(True, [GPU_A, GPU_B], DEFAULT_TARGETS)
 
     response = handle_attestation(
         KeepaliveAttestationRequest(gpu_uuids=(GPU_B, GPU_A)).encode(), controller=controller
@@ -828,7 +877,7 @@ def test_local_controller_starts_each_gpu_directly_without_batch_rollback(tmp_pa
     )
 
     with pytest.raises(RuntimeError, match="second worker failed"):
-        controller.set_enabled(True, [GPU_A, GPU_B], 85)
+        controller.set_enabled(True, [GPU_A, GPU_B], DEFAULT_TARGETS)
 
     pid_a = provider.started[0][1]
     assert provider.running == {pid_a}
@@ -849,9 +898,11 @@ def test_local_controller_starts_batch_workers_concurrently(tmp_path: Path) -> N
     barrier = threading.Barrier(2)
 
     class ConcurrentProvider(FakeProvider):
-        def start(self, gpu_uuid: str, target_utilization_pct: int) -> KeepaliveProcessIdentity:
+        def start(
+            self, gpu_uuid: str, targets: KeepaliveTargets, host_gpu_count: int
+        ) -> KeepaliveProcessIdentity:
             barrier.wait(timeout=1)
-            return super().start(gpu_uuid, target_utilization_pct)
+            return super().start(gpu_uuid, targets, host_gpu_count)
 
     provider = ConcurrentProvider()
     controller = LocalKeepaliveController(
@@ -860,7 +911,7 @@ def test_local_controller_starts_batch_workers_concurrently(tmp_path: Path) -> N
         known_gpu_uuids_resolver=lambda: KNOWN_GPUS,
     )
 
-    started = controller.set_enabled(True, [GPU_A, GPU_B], 85)
+    started = controller.set_enabled(True, [GPU_A, GPU_B], DEFAULT_TARGETS)
 
     assert [result.gpu_uuid for result in started.results] == [GPU_A, GPU_B]
     assert {gpu_uuid for gpu_uuid, _pid in provider.started} == {GPU_A, GPU_B}
@@ -875,7 +926,7 @@ def test_local_controller_rejects_a_valid_but_unknown_gpu_before_mutation(tmp_pa
     )
 
     with pytest.raises(ValueError, match="unknown"):
-        controller.set_enabled(True, [GPU_B], 85)
+        controller.set_enabled(True, [GPU_B], DEFAULT_TARGETS)
 
     assert provider.started == []
 
@@ -901,7 +952,7 @@ def test_local_controller_rejects_legacy_v2_worker_state(tmp_path: Path) -> None
     )
 
     with pytest.raises(RuntimeError, match="legacy keepalive worker state"):
-        controller.set_enabled(False, [GPU_A], 85)
+        controller.set_enabled(False, [GPU_A], DEFAULT_TARGETS)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v2.json").exists()
@@ -929,7 +980,7 @@ def test_local_controller_rejects_a_pid_only_worker_state_in_v3_container(tmp_pa
     )
 
     with pytest.raises(RuntimeError, match="invalid worker identity"):
-        controller.set_enabled(False, [GPU_A], 85)
+        controller.set_enabled(False, [GPU_A], DEFAULT_TARGETS)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v3.json").exists()
@@ -950,7 +1001,7 @@ def test_local_controller_rejects_v2_payload_in_v3_state_path(tmp_path: Path) ->
     )
 
     with pytest.raises(RuntimeError, match="schema version mismatch.*expected 3"):
-        controller.set_enabled(False, [GPU_A], 85)
+        controller.set_enabled(False, [GPU_A], DEFAULT_TARGETS)
 
     assert provider.stopped == []
     assert (state_directory / "workers.v3.json").exists()
@@ -1163,7 +1214,7 @@ def test_handle_request_returns_each_requested_gpu(tmp_path: Path) -> None:
     )
 
     response = handle_request(
-        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90).encode(),
+        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), targets=DEFAULT_TARGETS).encode(),
         controller=controller,
     )
 
@@ -1175,13 +1226,146 @@ def test_handle_request_returns_each_requested_gpu(tmp_path: Path) -> None:
         handle_request(b'{"schema_version":2,"enabled":true}', controller=controller)
 
 
-def test_server_policy_holds_eighty_percent_of_cuda_visible_memory() -> None:
-    assert TARGET_MEMORY_FRACTION == 0.80
+def test_a_held_card_fills_its_vram_to_the_target_counting_what_the_worker_already_uses() -> None:
     assert DUTY_PERIOD_SECONDS == 0.1
-    eighty_gib = 80 * 1024 * 1024 * 1024
-    ninety_six_gib = 96 * 1024 * 1024 * 1024
-    assert keepalive_target_bytes(eighty_gib) == 64 * 1024 * 1024 * 1024
-    assert keepalive_target_bytes(ninety_six_gib) == math.ceil(ninety_six_gib * 0.80)
+    total = 80 * GIB
+    # The worker's context and buffers already use 1 GiB of the card.
+    free = total - GIB
+    assert gpu_memory_hold_bytes(total, free, 85) == math.ceil(total * 0.85) - GIB
+    assert gpu_memory_hold_bytes(total, free, 50) == math.ceil(total * 0.50) - GIB
+    # 100% leaves only the driver's slack free.
+    assert gpu_memory_hold_bytes(total, free, 100) == free - WORKER_MEMORY_SLACK_BYTES
+    # A card already past the target gets nothing more.
+    assert gpu_memory_hold_bytes(total, total // 10, 85) == 0
+    with pytest.raises(RuntimeError, match="memory is invalid"):
+        gpu_memory_hold_bytes(total, total + 1, 85)
+
+
+def _settle_host_memory(
+    *,
+    host_gpu_count: int,
+    held_cards: int,
+    others: int,
+    target_pct: int,
+    views: list[int],
+    steps: int = 40,
+) -> tuple[list[int], list[float]]:
+    """Run every held card's host memory step together, as their workers would.
+
+    ``views`` gives each view's total; every view sees the same usage, which is
+    ``others`` plus what the cards hold. Returns the holds and each step's peak
+    use as a fraction of the tightest view.
+    """
+
+    holds = [0] * held_cards
+    peaks: list[float] = []
+    for _ in range(steps):
+        used = others + sum(holds)
+        observed = [(total, used) for total in views]
+        holds = [
+            next_host_memory_hold(held, observed, target_pct, host_gpu_count) for held in holds
+        ]
+        peaks.append((others + sum(holds)) / min(views))
+    return holds, peaks
+
+
+def test_every_held_card_together_brings_host_memory_to_the_target_without_overshooting() -> None:
+    total = 512 * GIB
+    holds, peaks = _settle_host_memory(
+        host_gpu_count=8, held_cards=8, others=40 * GIB, target_pct=85, views=[total]
+    )
+    assert max(peaks) <= 0.85 + 1e-9
+    assert (40 * GIB + sum(holds)) / total == pytest.approx(0.85, abs=0.005)
+
+
+def test_each_held_card_holds_only_its_share_of_host_memory() -> None:
+    total = 512 * GIB
+    holds, _peaks = _settle_host_memory(
+        host_gpu_count=8, held_cards=2, others=40 * GIB, target_pct=85, views=[total]
+    )
+    share = total * 0.85 / 8
+    assert holds == [int(share), int(share)]
+
+
+def test_host_memory_comes_back_when_something_else_grows_into_it() -> None:
+    total = 512 * GIB
+    holds, _peaks = _settle_host_memory(
+        host_gpu_count=8, held_cards=8, others=40 * GIB, target_pct=85, views=[total]
+    )
+    # A workload on the server grows by 200 GiB after the cards were filled.
+    grown = 240 * GIB
+    for _ in range(40):
+        used = grown + sum(holds)
+        holds = [next_host_memory_hold(held, [(total, used)], 85, 8) for held in holds]
+    assert (grown + sum(holds)) / total == pytest.approx(0.85, abs=0.005)
+    # Something else alone past the target leaves the cards holding nothing.
+    holds = [10 * GIB] * 8
+    others = int(total * 0.95)
+    for _ in range(40):
+        used = others + sum(holds)
+        holds = [next_host_memory_hold(held, [(total, used)], 85, 8) for held in holds]
+    assert holds == [0] * 8
+
+
+def test_host_memory_respects_the_tightest_of_container_and_host() -> None:
+    # A container limited to 128 GiB on a 512 GiB host: the App shows the
+    # container's figure, and the cards fill it to the target.
+    holds, peaks = _settle_host_memory(
+        host_gpu_count=4, held_cards=4, others=8 * GIB, target_pct=85, views=[512 * GIB, 128 * GIB]
+    )
+    assert max(peaks) <= 0.85 + 1e-9
+    assert (8 * GIB + sum(holds)) / (128 * GIB) == pytest.approx(0.85, abs=0.005)
+    # A host already at 90% from other tenants holds back the container's cards.
+    crowded = [(512 * GIB, int(512 * GIB * 0.90)), (128 * GIB, 8 * GIB)]
+    assert next_host_memory_hold(0, crowded, 85, 4) == 0
+
+
+def test_host_memory_target_zero_holds_nothing() -> None:
+    assert next_host_memory_hold(0, [(512 * GIB, 0)], 0, 8) == 0
+
+
+def test_host_memory_hold_keeps_its_pieces_and_lets_go_when_memory_cannot_be_read(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    chunk = 1024 * 1024
+    readings: list[list[tuple[int, int]] | None] = [
+        [(64 * chunk, 0)],
+        [(64 * chunk, 16 * chunk)],
+        None,
+        [(64 * chunk, 0)],
+    ]
+    held_before_each_step: list[int] = []
+    original = keepalive_module.next_host_memory_hold
+
+    def recording_next(held: int, views: list[tuple[int, int]], target_pct: int, count: int) -> int:
+        held_before_each_step.append(held // chunk)
+        return original(held, views, target_pct, count)
+
+    def read_views() -> list[tuple[int, int]]:
+        reading = readings.pop(0)
+        if reading is None:
+            raise OSError("meminfo is unreadable")
+        return reading
+
+    class StopAfterFourPauses(threading.Event):
+        pauses: list[float] = []
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.pauses.append(timeout or 0.0)
+            if len(self.pauses) == 4:
+                self.set()
+            return self.is_set()
+
+    monkeypatch.setattr(keepalive_module, "next_host_memory_hold", recording_next)
+    stop = StopAfterFourPauses()
+    hold_host_memory(
+        50, 2, read_views=read_views, stop_event=stop, chunk_bytes=chunk, adjust_seconds=0.25
+    )
+    # 50% of 64 pieces over two cards is 16 for this one; it keeps them while
+    # the reading includes them, lets all go when memory cannot be read, and
+    # starts again from nothing.
+    assert held_before_each_step == [0, 16, 0]
+    assert stop.pauses == [0.25] * 4
 
 
 def test_default_state_directory_is_persistent(
@@ -1278,7 +1462,10 @@ def test_a_full_target_never_lets_the_card_idle() -> None:
     assert card.utilization(1.0, 5.0) > 0.99
 
 
-def test_a_started_worker_is_given_the_requested_load(tmp_path: Path) -> None:
+def test_a_started_worker_is_given_the_requested_targets(tmp_path: Path) -> None:
+    targets = KeepaliveTargets(
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=60
+    )
     provider = FakeProvider()
     controller = LocalKeepaliveController(
         provider=provider,
@@ -1288,8 +1475,28 @@ def test_a_started_worker_is_given_the_requested_load(tmp_path: Path) -> None:
     )
 
     handle_request(
-        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), target_utilization_pct=90).encode(),
+        KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), targets=targets).encode(),
         controller=controller,
     )
 
-    assert provider.targets == [90, 90]
+    # Each worker learns the server's GPU count, which its host memory share divides by.
+    assert provider.targets == [(targets, len(KNOWN_GPUS)), (targets, len(KNOWN_GPUS))]
+
+
+def test_memory_views_read_the_host_and_a_limited_container_like_the_probe(tmp_path: Path) -> None:
+    (tmp_path / "proc").mkdir()
+    (tmp_path / "proc" / "meminfo").write_text(
+        "MemTotal:       536870912 kB\nMemFree:  1 kB\nMemAvailable:   402653184 kB\n",
+        encoding="ascii",
+    )
+    host = (512 * GIB, 128 * GIB)
+    assert keepalive_module.read_memory_views(tmp_path) == [host]
+
+    cgroup = tmp_path / "sys" / "fs" / "cgroup"
+    cgroup.mkdir(parents=True)
+    (cgroup / "memory.max").write_text("max\n", encoding="ascii")
+    (cgroup / "memory.current").write_text(f"{8 * GIB}\n", encoding="ascii")
+    assert keepalive_module.read_memory_views(tmp_path) == [host]
+
+    (cgroup / "memory.max").write_text(f"{64 * GIB}\n", encoding="ascii")
+    assert keepalive_module.read_memory_views(tmp_path) == [host, (64 * GIB, 8 * GIB)]

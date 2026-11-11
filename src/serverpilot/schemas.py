@@ -11,12 +11,10 @@ from serverpilot.config import (
     KeepaliveAdapterId,
     KeepalivePolicy,
     absolute_single_line_path,
+    keepalive_target_field,
     plain_text,
 )
-from serverpilot.keepalive_protocol import (
-    KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
-    KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
-)
+from serverpilot.keepalive_protocol import KeepaliveTargets
 from serverpilot.provider_contract import AllocationFact
 
 
@@ -375,12 +373,20 @@ class EndpointUpdate(StrictModel):
 
 
 class EndpointKeepaliveRequest(StrictModel):
-    """The endpoint control: on or off, and how hard held cards work; never a GPU target."""
+    """The endpoint control: on or off, and what held cards are driven to; never a GPU target."""
 
     enabled: bool
-    target_utilization_pct: int = Field(
-        ge=KEEPALIVE_MIN_TARGET_UTILIZATION_PCT, le=KEEPALIVE_MAX_TARGET_UTILIZATION_PCT
-    )
+    target_utilization_pct: int = keepalive_target_field("target_utilization_pct", required=True)
+    target_gpu_memory_pct: int = keepalive_target_field("target_gpu_memory_pct", required=True)
+    target_memory_pct: int = keepalive_target_field("target_memory_pct", required=True)
+
+    @property
+    def targets(self) -> KeepaliveTargets:
+        return KeepaliveTargets(
+            target_utilization_pct=self.target_utilization_pct,
+            target_gpu_memory_pct=self.target_gpu_memory_pct,
+            target_memory_pct=self.target_memory_pct,
+        )
 
 
 class CollectorSettingsUpdate(StrictModel):

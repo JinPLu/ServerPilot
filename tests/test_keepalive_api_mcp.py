@@ -26,6 +26,7 @@ from serverpilot.keepalive_protocol import (
     KeepaliveAttestationResponse,
     KeepaliveGPUResult,
     KeepaliveResponse,
+    KeepaliveTargets,
     KeepaliveWorkerAttestation,
 )
 from serverpilot.mcp_server import _refusal, mcp
@@ -73,11 +74,17 @@ def _assert_sku_capacity(status, *, available_count: int, total_count: int):  # 
     return sku
 
 
+def _keepalive(enabled: bool, **targets: int) -> dict[str, object]:
+    """A keepalive request body: the server's targets, the defaults unless given."""
+
+    return {"enabled": enabled, **{**KeepaliveTargets().as_dict(), **targets}}
+
+
 class FakeKeepaliveAdapter:
     def __init__(self, *, failure: Exception | None = None) -> None:
         self.failure = failure
         self.calls: list[tuple[str, bool, tuple[str, ...]]] = []
-        self.targets: list[int] = []
+        self.targets: list[KeepaliveTargets] = []
         self.attest_calls: list[tuple[str, tuple[str, ...]]] = []
         self.active_pids: dict[str, int] = {}
         self.attested_pids: dict[str, int] = {}
@@ -87,7 +94,7 @@ class FakeKeepaliveAdapter:
     async def set_enabled(self, endpoint, enabled: bool, gpu_uuids: list[str]) -> KeepaliveResponse:  # type: ignore[no-untyped-def]
         requested = tuple(gpu_uuids)
         self.calls.append((endpoint.id, enabled, requested))
-        self.targets.append(endpoint.keepalive_target_utilization_pct)
+        self.targets.append(endpoint.keepalive_targets)
         if self.failure is not None:
             raise self.failure
         results: list[KeepaliveGPUResult] = []
@@ -458,7 +465,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("keep-on"),
     )
 
@@ -485,7 +492,7 @@ def test_keepalive_api_sets_desired_policy_and_reconciles_each_eligible_gpu(
 
     disabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("keep-off"),
     )
     assert disabled.status_code == 200, disabled.text
@@ -561,7 +568,7 @@ def test_routine_claim_waits_for_inflight_keeper_start_on_same_endpoint(
             toggle_task = asyncio.create_task(
                 client.post(
                     "/api/v2/endpoints/endpoint-a/keepalive",
-                    json={"enabled": True, "target_utilization_pct": 85},
+                    json=_keepalive(True),
                     headers=_headers("blocked-start-race"),
                 )
             )
@@ -664,7 +671,7 @@ def test_pinned_claims_on_different_endpoints_do_not_block_each_other(
             toggle_task = asyncio.create_task(
                 client.post(
                     "/api/v2/endpoints/endpoint-a/keepalive",
-                    json={"enabled": True, "target_utilization_pct": 85},
+                    json=_keepalive(True),
                     headers=_headers("blocked-a-other-b"),
                 )
             )
@@ -753,7 +760,7 @@ def test_claims_on_different_server_groups_do_not_block_each_other(
             toggle_task = asyncio.create_task(
                 client.post(
                     "/api/v2/endpoints/endpoint-a/keepalive",
-                    json={"enabled": True, "target_utilization_pct": 85},
+                    json=_keepalive(True),
                     headers=_headers("blocked-group-a"),
                 )
             )
@@ -906,7 +913,7 @@ def test_keepalive_api_starts_sibling_when_one_gpu_has_workload_conflict(
 
     enabled = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("conflict-sibling-keepalive"),
     )
 
@@ -924,7 +931,7 @@ def test_keepalive_api_disable_without_managed_coverage_never_targets_foreign_gp
 
     response = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("stop-foreign"),
     )
 
@@ -993,14 +1000,14 @@ def test_keepalive_stop_releases_empty_sibling_when_another_gpu_stop_is_uncertai
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("partial-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     disabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("partial-stop-off"),
     )
     assert disabled.status_code == 409, disabled.text
@@ -1026,7 +1033,7 @@ def test_keepalive_api_missing_endpoint_does_not_resolve_adapter_or_collect(
 
     response = TestClient(app).post(
         "/api/v2/endpoints/missing/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("missing-stop"),
     )
 
@@ -1043,10 +1050,11 @@ def test_keepalive_api_strict_body_and_mutation_headers(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     path = "/api/v2/endpoints/endpoint-a/keepalive"
-    assert client.post(path, json={"enabled": True, "target_utilization_pct": 85}).status_code == 422
+    assert client.post(path, json=_keepalive(True)).status_code == 422
+    assert client.post(path, json={"enabled": True}, headers=_headers("bare")).status_code == 422
     invalid = client.post(
         path,
-        json={"enabled": True, "target_utilization_pct": 85, "gpu_uuids": [GPU_UUIDS[0]]},
+        json={**_keepalive(True), "gpu_uuids": [GPU_UUIDS[0]]},
         headers=_headers("strict"),
     )
     assert invalid.status_code == 422
@@ -1077,7 +1085,7 @@ def test_keepalive_api_failures_are_reported_as_errors(
 
     response = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers(failure_kind),
     )
 
@@ -1109,7 +1117,7 @@ def test_incompatible_helper_is_reported_without_cleanup_mutation(
 
     response = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("incompatible-helper"),
     )
 
@@ -1145,14 +1153,14 @@ def test_incompatible_helper_on_stop_is_not_collapsed_to_partial_stop(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("incompatible-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
 
     disabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("incompatible-stop-off"),
     )
     assert disabled.status_code == 503, disabled.text
@@ -1187,7 +1195,7 @@ def test_keepalive_api_reports_known_cuda_worker_failure_in_chinese_without_remo
 
     response = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("known-cuda-worker-failure"),
     )
 
@@ -1477,7 +1485,7 @@ def test_immediate_claim_reclaims_only_the_selected_verified_keeper_gpu(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("claim-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1567,7 +1575,7 @@ def test_immediate_claim_stop_failure_does_not_create_workload_lease(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("failed-claim-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1610,7 +1618,7 @@ def test_claim_with_unreachable_helper_is_retryable_not_an_upgrade_request(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("unreachable-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1665,7 +1673,7 @@ def test_a_worker_left_by_a_failed_cleanup_is_stopped_on_a_later_reconcile(
 
     started = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("orphan-start"),
     )
 
@@ -1686,7 +1694,7 @@ def test_a_worker_left_by_a_failed_cleanup_is_stopped_on_a_later_reconcile(
     adapter.reachable = True
     stopped = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("orphan-cleanup"),
     )
 
@@ -1718,7 +1726,7 @@ def test_a_start_that_never_mutated_does_not_leave_a_cleanup_mark(
 
     response = TestClient(app).post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("preflight-only-failure"),
     )
 
@@ -1737,7 +1745,7 @@ def test_eight_gpu_reclaim_stops_once_and_collects_the_host_once(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("eight-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1777,7 +1785,7 @@ def test_eight_gpu_reclaim_stop_failure_does_not_allocate(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("eight-fail-stop-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1819,7 +1827,7 @@ def test_reclaim_stop_reports_failure_after_empty_observation(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("empty-then-fail-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1862,7 +1870,7 @@ def test_reclaim_residual_process_does_not_allocate(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("residual-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1900,7 +1908,7 @@ def test_missing_keeper_is_still_publicly_available_and_claimable(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("missing-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -1962,7 +1970,7 @@ def test_quick_claim_uses_the_same_selected_keeper_handoff(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("quick-claim-keeper-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2000,7 +2008,7 @@ def test_release_restores_the_selected_keeper_on_the_next_collection(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("restore-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2080,7 +2088,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
 
     enabled = rest.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("agent-path-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2174,7 +2182,7 @@ def test_routine_agent_path_handles_keepalive_on_and_off(
     assert adapter.driver_pids[selected_uuid] == adapter.active_pids[selected_uuid]
     disabled = rest.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": False, "target_utilization_pct": 85},
+        json=_keepalive(False),
         headers=_headers("agent-path-off"),
     )
     assert disabled.status_code == 200, disabled.text
@@ -2204,7 +2212,7 @@ def test_keepalive_recovery_rejects_mismatched_helper_attestation(
     client = TestClient(app)
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("attestation-mismatch-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2247,7 +2255,7 @@ def test_keepalive_recovery_never_adopts_additional_foreign_processes(
     client = TestClient(app)
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("foreign-process-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2288,7 +2296,7 @@ def test_restart_preserves_keepalive_ownership_without_remote_churn(
 
     enabled = first_client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("restart-recovery-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2335,7 +2343,7 @@ def test_app_reassignment_stops_the_selected_keeper_before_moving_the_task(
 
     enabled = client.post(
         "/api/v2/endpoints/endpoint-a/keepalive",
-        json={"enabled": True, "target_utilization_pct": 85},
+        json=_keepalive(True),
         headers=_headers("reassign-keepers-on"),
     )
     assert enabled.status_code == 200, enabled.text
@@ -2395,44 +2403,48 @@ def _detailed_status(server, client):  # type: ignore[no-untyped-def]
     return server._routine_gpu_status(client.snapshot(), lease_id=None)
 
 
-def test_a_new_target_restarts_the_running_workers_at_that_load(
-    build_app, inventory: InventoryConfig
+@pytest.mark.parametrize(
+    "changed",
+    [
+        {"target_utilization_pct": 95},
+        {"target_gpu_memory_pct": 95},
+        {"target_memory_pct": 0},
+    ],
+)
+def test_a_new_target_restarts_the_running_workers_at_it(
+    build_app, inventory: InventoryConfig, changed: dict[str, int]
 ) -> None:
-    """A worker keeps the load it started with, so a new target means stop, observe, start."""
+    """A worker keeps the targets it started with, so a new one means stop, observe, start."""
 
     adapter = FakeKeepaliveAdapter()
     collector = FakeTargetedCollector(adapter)
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     path = "/api/v2/endpoints/endpoint-a/keepalive"
-    assert client.post(
-        path, json={"enabled": True, "target_utilization_pct": 85}, headers=_headers("on")
-    ).status_code == 200
+    assert client.post(path, json=_keepalive(True), headers=_headers("on")).status_code == 200
     running = {uuid for _endpoint, enabled, uuids in adapter.calls if enabled for uuid in uuids}
-    assert running and set(adapter.targets) == {85}
+    assert running and set(adapter.targets) == {KeepaliveTargets()}
     adapter.calls.clear()
     adapter.targets.clear()
 
-    retargeted = client.post(
-        path, json={"enabled": True, "target_utilization_pct": 95}, headers=_headers("retarget")
-    )
+    retargeted = client.post(path, json=_keepalive(True, **changed), headers=_headers("retarget"))
 
     assert retargeted.status_code == 200, retargeted.text
     assert retargeted.json()["keepalive"]["actual"] == "ON"
     # Every running worker is stopped before any is started again, and the
-    # starts carry the new load.
+    # starts carry the new targets.
     actions = [enabled for _endpoint, enabled, _uuids in adapter.calls]
     assert actions == sorted(actions)
     stopped = {uuid for _e, enabled, uuids in adapter.calls if not enabled for uuid in uuids}
     started = {uuid for _e, enabled, uuids in adapter.calls if enabled for uuid in uuids}
     assert stopped == started == running
     assert {target for (_e, enabled, _u), target in zip(adapter.calls, adapter.targets, strict=True)
-            if enabled} == {95}
+            if enabled} == {KeepaliveTargets(**changed)}
 
-    # The same target again changes nothing on the server.
+    # The same targets again change nothing on the server.
     adapter.calls.clear()
     assert client.post(
-        path, json={"enabled": True, "target_utilization_pct": 95}, headers=_headers("again")
+        path, json=_keepalive(True, **changed), headers=_headers("again")
     ).status_code == 200
     assert adapter.calls == []
 
@@ -2445,28 +2457,41 @@ def test_a_target_set_while_off_waits_for_the_next_start(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     path = "/api/v2/endpoints/endpoint-a/keepalive"
+    chosen = {"target_utilization_pct": 60, "target_gpu_memory_pct": 95, "target_memory_pct": 50}
 
     assert client.post(
-        path, json={"enabled": False, "target_utilization_pct": 60}, headers=_headers("off-60")
+        path, json=_keepalive(False, **chosen), headers=_headers("off-chosen")
     ).status_code == 200
     assert adapter.calls == []
     assert client.post(
-        path, json={"enabled": True, "target_utilization_pct": 60}, headers=_headers("on-60")
+        path, json=_keepalive(True, **chosen), headers=_headers("on-chosen")
     ).status_code == 200
-    assert adapter.targets and set(adapter.targets) == {60}
+    assert adapter.targets and set(adapter.targets) == {KeepaliveTargets(**chosen)}
 
 
-def test_a_target_outside_ten_to_a_hundred_is_refused(build_app, inventory: InventoryConfig) -> None:
+@pytest.mark.parametrize(
+    ("name", "value"),
+    [
+        ("target_utilization_pct", 5),
+        ("target_utilization_pct", 101),
+        ("target_gpu_memory_pct", 9),
+        ("target_gpu_memory_pct", 101),
+        ("target_memory_pct", -1),
+        ("target_memory_pct", 101),
+    ],
+)
+def test_a_target_out_of_range_is_refused(
+    build_app, inventory: InventoryConfig, name: str, value: int
+) -> None:
     adapter = FakeKeepaliveAdapter()
     app, _ = _keepalive_app(
         build_app, inventory, adapter=adapter, collector=FakeTargetedCollector(adapter)
     )
     client = TestClient(app)
-    for value in (5, 101):
-        refused = client.post(
-            "/api/v2/endpoints/endpoint-a/keepalive",
-            json={"enabled": True, "target_utilization_pct": value},
-            headers=_headers(f"bad-{value}"),
-        )
-        assert refused.status_code == 422
+    refused = client.post(
+        "/api/v2/endpoints/endpoint-a/keepalive",
+        json=_keepalive(True, **{name: value}),
+        headers=_headers(f"bad-{name}-{value}"),
+    )
+    assert refused.status_code == 422
     assert adapter.calls == []

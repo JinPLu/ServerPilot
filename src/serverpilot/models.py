@@ -117,6 +117,14 @@ class Endpoint(Base):
             name="ck_endpoint_keepalive_target_utilization",
         ),
         CheckConstraint(
+            "keepalive_target_gpu_memory_pct >= 10 AND keepalive_target_gpu_memory_pct <= 100",
+            name="ck_endpoint_keepalive_target_gpu_memory",
+        ),
+        CheckConstraint(
+            "keepalive_target_memory_pct >= 0 AND keepalive_target_memory_pct <= 100",
+            name="ck_endpoint_keepalive_target_memory",
+        ),
+        CheckConstraint(
             "resource_kind IN ('unknown', 'cpu_only', 'gpu')",
             name="ck_endpoint_resource_kind",
         ),
@@ -139,9 +147,16 @@ class Endpoint(Base):
     keepalive_policy: Mapped[KeepalivePolicy] = mapped_column(
         String(32), nullable=False, default="disabled"
     )
-    # Desired load of a held card. A running worker keeps the load it started
-    # with; changing this restarts the endpoint's workers.
+    # What a held card is driven to (KEEPALIVE_TARGET_LIMITS). A running
+    # worker keeps the targets it started with; changing one restarts the
+    # endpoint's workers.
     keepalive_target_utilization_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=85, server_default="85"
+    )
+    keepalive_target_gpu_memory_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=85, server_default="85"
+    )
+    keepalive_target_memory_pct: Mapped[int] = mapped_column(
         Integer, nullable=False, default=85, server_default="85"
     )
     labels_json: Mapped[str] = mapped_column(Text, nullable=False, default="[]")

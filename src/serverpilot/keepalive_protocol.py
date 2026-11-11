@@ -27,14 +27,31 @@ KEEPALIVE_INSPECT_COMMAND = (
     f"{KEEPALIVE_ENTRYPOINT} --inspect --schema-version {KEEPALIVE_SCHEMA_VERSION}"
 )
 KEEPALIVE_WORKER_MARKER = "serverpilot-keepalive-worker-v3"
-# How hard a held card works, as the percentage of time a kernel runs. A
-# server sets its own; this is the value until it does. Advertised apart from
-# the required capabilities: a helper deployed before it ignores the field
-# and keeps its old fixed load, which `--protocol-info` lets a person see.
-KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT = 85
-KEEPALIVE_MIN_TARGET_UTILIZATION_PCT = 10
-KEEPALIVE_MAX_TARGET_UTILIZATION_PCT = 100
-KEEPALIVE_TARGET_UTILIZATION_CAPABILITY = "target_utilization"
+# What a held card is driven to, each in whole percent of a reading the App
+# shows for the server: GPU utilization (time a kernel runs), GPU memory
+# (each held card's VRAM in use) and host memory (the server's memory in use,
+# split evenly across its GPUs, so it reaches the target only when every card
+# is held). One name per target on the wire, in the API and in the summary;
+# the endpoint column adds a `keepalive_` prefix. A server sets its own; the
+# default holds until it does. Host memory alone may be 0, which holds none.
+# Each target is advertised apart from the required capabilities: a helper
+# deployed before it ignores the field, which `--protocol-info` lets a person
+# see.
+KEEPALIVE_MAX_TARGET_PCT = 100
+
+
+@dataclass(frozen=True, slots=True)
+class KeepaliveTargetLimit:
+    minimum: int
+    default: int
+    capability: str
+
+
+KEEPALIVE_TARGET_LIMITS: dict[str, KeepaliveTargetLimit] = {
+    "target_utilization_pct": KeepaliveTargetLimit(10, 85, "target_utilization"),
+    "target_gpu_memory_pct": KeepaliveTargetLimit(10, 85, "target_gpu_memory"),
+    "target_memory_pct": KeepaliveTargetLimit(0, 85, "target_memory"),
+}
 
 GPU_UUID_PATTERN = re.compile(
     r"GPU-[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
@@ -61,27 +78,52 @@ def _validate_gpu_uuids(value: object, *, allow_empty: bool = False) -> tuple[st
     return tuple(validate_gpu_uuid(item) for item in value)
 
 
-def validate_target_utilization_pct(value: object) -> int:
-    """Return a keepalive load target in whole percent, or reject it."""
+def validate_target_pct(name: str, value: object) -> int:
+    """Return one keepalive target in whole percent, or reject it."""
 
-    if (
-        type(value) is not int
-        or not KEEPALIVE_MIN_TARGET_UTILIZATION_PCT <= value <= KEEPALIVE_MAX_TARGET_UTILIZATION_PCT
-    ):
+    limit = KEEPALIVE_TARGET_LIMITS[name]
+    if type(value) is not int or not limit.minimum <= value <= KEEPALIVE_MAX_TARGET_PCT:
         raise KeepaliveProtocolError(
-            "keepalive target_utilization_pct must be an integer from "
-            f"{KEEPALIVE_MIN_TARGET_UTILIZATION_PCT} to {KEEPALIVE_MAX_TARGET_UTILIZATION_PCT}"
+            f"keepalive {name} must be an integer from {limit.minimum} to {KEEPALIVE_MAX_TARGET_PCT}"
         )
     return value
 
 
 @dataclass(frozen=True, slots=True)
+class KeepaliveTargets:
+    """What a started worker holds; a running one keeps what it started with."""
+
+    target_utilization_pct: int = KEEPALIVE_TARGET_LIMITS["target_utilization_pct"].default
+    target_gpu_memory_pct: int = KEEPALIVE_TARGET_LIMITS["target_gpu_memory_pct"].default
+    target_memory_pct: int = KEEPALIVE_TARGET_LIMITS["target_memory_pct"].default
+
+    def __post_init__(self) -> None:
+        for name in KEEPALIVE_TARGET_LIMITS:
+            validate_target_pct(name, getattr(self, name))
+
+    def as_dict(self) -> dict[str, int]:
+        return {name: getattr(self, name) for name in KEEPALIVE_TARGET_LIMITS}
+
+    @classmethod
+    def from_mapping(cls, value: dict[str, Any]) -> KeepaliveTargets:
+        """Read the targets a message carries; one it omits takes the default.
+
+        A control plane from before a target still drives this helper, so its
+        requests mean the default rather than a refusal.
+        """
+
+        return cls(
+            **{name: value.get(name, limit.default) for name, limit in KEEPALIVE_TARGET_LIMITS.items()}
+        )
+
+
+@dataclass(frozen=True, slots=True)
 class KeepaliveRequest:
-    """A v3 per-GPU request, with the load a started worker holds."""
+    """A v3 per-GPU request, with the targets a started worker holds."""
 
     enabled: bool
     gpu_uuids: tuple[str, ...]
-    target_utilization_pct: int
+    targets: KeepaliveTargets
 
     def encode(self) -> bytes:
         if type(self.enabled) is not bool:
@@ -92,9 +134,7 @@ class KeepaliveRequest:
                 "schema_version": KEEPALIVE_SCHEMA_VERSION,
                 "enabled": self.enabled,
                 "gpu_uuids": list(gpu_uuids),
-                "target_utilization_pct": validate_target_utilization_pct(
-                    self.target_utilization_pct
-                ),
+                **self.targets.as_dict(),
             }
         )
 
@@ -113,13 +153,10 @@ class KeepaliveRequest:
             raise KeepaliveProtocolError("keepalive request is missing a required field") from exc
         if type(enabled) is not bool:
             raise KeepaliveProtocolError("keepalive enabled must be a boolean")
-        # A control plane from before the field still drives this helper, so
-        # its requests mean the default load rather than a refusal.
-        target = value.get("target_utilization_pct", KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT)
         return cls(
             enabled=enabled,
             gpu_uuids=_validate_gpu_uuids(raw_gpu_uuids),
-            target_utilization_pct=validate_target_utilization_pct(target),
+            targets=KeepaliveTargets.from_mapping(value),
         )
 
 
@@ -332,7 +369,8 @@ def keepalive_protocol_info() -> dict[str, Any]:
         "schema_version": KEEPALIVE_SCHEMA_VERSION,
         "implementation_version": KEEPALIVE_IMPLEMENTATION_VERSION,
         "capabilities": [
-            *KEEPALIVE_PROTOCOL_INFO_CAPABILITIES, KEEPALIVE_TARGET_UTILIZATION_CAPABILITY
+            *KEEPALIVE_PROTOCOL_INFO_CAPABILITIES,
+            *(limit.capability for limit in KEEPALIVE_TARGET_LIMITS.values()),
         ],
     }
 

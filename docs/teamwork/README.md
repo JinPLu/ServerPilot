@@ -8,7 +8,7 @@
 
 ## Project current state
 
-- **未发布（11 月 11 日）**：每台服务器可设置占卡负载（10%–100%，用户选定默认 85%），worker 按目标比例计算并逐周期修正；改负载时先停后起。helper 需在各服务器升级后才生效。原话与取舍见[记录](records/keepalive-target-utilization.md)。
+- **未发布（11 月 11 日）**：每台服务器可分别设置占卡时的 GPU 利用率、显存占用率、内存占用率（用户选定三项分开设、内存按占住的卡分摊；默认都是 85%，内存可设 0 不占）。worker 按目标比例计算、显存补到目标、内存每 5 秒按余量收放并设 `oom_score_adj=1000`；改目标时先停后起。helper 需在各服务器升级后才生效，真实服务器读数未测。原话与取舍见[记录](records/keepalive-target-utilization.md)。
 - **5.5.0（11 月 11 日）**：容器服务器上归还任务也能结束进程（按 `CUDA_VISIBLE_DEVICES` 认进程，认不出的不碰，不再误报已退出）。按用户要求测试 Agent 调度与 App 交互并修复：超出任何服务器卡数的申请改回不可重试的 `gpu_count_too_large`，错写服务器编号直接说找不到，`take_over` 不再为别的项目的同名任务另开新卡；App 等服务器的操作按服务端最坏耗时给超时，确认框只写真会发生的事，删除被占卡挡住时说明要先结束占卡。测试方法、未验证项见[状态文档](../IMPLEMENTATION_STATUS_zh.md)同日条目。
 - **5.4.0（11 月 10 日）**：用户选定：App 里归还任务即结束它的进程（核对后 SIGTERM，10 秒后 SIGKILL，只限登录账号的进程）；Agent 可归还别的项目留下、确认无人在用的任务；服务器页用量改为最近 30 秒平均。另修菜单栏深色模式、统一方块与指标条配色、整理服务器页列宽与悬停。原话与取舍见[决定记录](records/return-ends-processes-and-agent-cleanup.md)。随后：服务器列按地址长度收窄、剩余宽度由任务列和指标平分；Agent 任务结束或被归还时产生“任务结束”提醒，确认后侧栏数字立刻减少。
 - **5.3.0（11 月 7 日）**：服务器组可以在 App 里建好并放进服务器——侧边栏「服务器组」旁的 + 打开一张表单，填名称、勾选服务器、确认路径，标识按名称自动生成；编辑时增减成员，没移动的服务器逐台说明原因。点击表头、行和按钮不再留下整列宽的焦点框（去掉了强制的 `.focusable()`）。同版带上 Slurm 立即申请失败后的终态对账与重试。见[状态文档](../IMPLEMENTATION_STATUS_zh.md)。
@@ -106,7 +106,7 @@
 
 ### records/
 
-- [占卡负载按服务器设置](records/keepalive-target-utilization.md) — 用户要求自定义占卡利用率并选定默认 85%；为何改负载要先停后起、旧 helper 如何兼容。
+- [占卡目标按服务器设置](records/keepalive-target-utilization.md) — 用户要求自定义占卡利用率（默认 85%），随后要求显存、内存也拉上去并选定三项分开设、内存按卡分摊；为何改目标要先停后起、内存如何收放、旧 helper 如何兼容。
 - [归还即结束进程、Agent 清理无人任务、30 秒平均](records/return-ends-processes-and-agent-cleanup.md) — 改变“ServerPilot 不停止用户程序”边界的用户决定原话，以及三处取舍。
 - [占卡程序与 agent 工作负载相撞（p8908）](records/keepalive-workload-collision-p8908.md) — keepalive 把 80% 显存占到 agent 正在跑的卡上；根因是「此刻没观察到进程」被当成「活干完了」；四条修法已落地（唯一存活原语 + 心跳、进程缺席由 `absent_since` 证据链计时且断连重置、人工还卡与自动回收共用判据、起卡冷却期），周转代价已收敛到 60 秒连续健康观测。
 - [端点 monitor 状态的两条正交轴拆分](records/endpoint-monitor-status-axis-split.md) — 端点 `monitor` 状态该由什么判据推导、消费者该读哪个字段;根因是连通性轴与人为设定轴被压进同一枚举、且连通性判据用错了时钟,已修法落地并通过对抗性审查。

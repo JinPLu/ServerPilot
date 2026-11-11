@@ -6,16 +6,25 @@ import os
 from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
 from serverpilot.keepalive_protocol import (
-    KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT,
-    KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
-    KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
+    KEEPALIVE_MAX_TARGET_PCT,
+    KEEPALIVE_TARGET_LIMITS,
+    KeepaliveTargets,
 )
+
+
+def keepalive_target_field(name: str, *, required: bool = False) -> Any:
+    """A keepalive target in percent, bounded by the protocol's own table."""
+
+    limit = KEEPALIVE_TARGET_LIMITS[name]
+    return Field(
+        ... if required else limit.default, ge=limit.minimum, le=KEEPALIVE_MAX_TARGET_PCT
+    )
 
 
 class ConfigurationError(ValueError):
@@ -301,12 +310,10 @@ class EndpointConfig(BaseModel):
     # Desired policy only; actual ownership remains a per-GPU lease and starts
     # disabled for both new and migrated endpoints.
     keepalive_policy: KeepalivePolicy = "disabled"
-    # How hard each held card works, in percent of time computing.
-    keepalive_target_utilization_pct: int = Field(
-        default=KEEPALIVE_DEFAULT_TARGET_UTILIZATION_PCT,
-        ge=KEEPALIVE_MIN_TARGET_UTILIZATION_PCT,
-        le=KEEPALIVE_MAX_TARGET_UTILIZATION_PCT,
-    )
+    # What each held card is driven to; see KEEPALIVE_TARGET_LIMITS.
+    keepalive_target_utilization_pct: int = keepalive_target_field("target_utilization_pct")
+    keepalive_target_gpu_memory_pct: int = keepalive_target_field("target_gpu_memory_pct")
+    keepalive_target_memory_pct: int = keepalive_target_field("target_memory_pct")
     labels: list[str] = Field(default_factory=list)
     storage_group: str | None = Field(default=None, max_length=120)
     server_group_id: str | None = Field(default=None, pattern=r"^[a-z][a-z0-9-]{1,127}$")
@@ -315,6 +322,14 @@ class EndpointConfig(BaseModel):
     # Kept as a tolerated legacy inventory field.  Endpoint access is global;
     # a claim's project_id is not pre-registered or scoped to a server.
     project_ids: list[str] = Field(default_factory=list)
+
+    @property
+    def keepalive_targets(self) -> KeepaliveTargets:
+        return KeepaliveTargets(
+            target_utilization_pct=self.keepalive_target_utilization_pct,
+            target_gpu_memory_pct=self.keepalive_target_gpu_memory_pct,
+            target_memory_pct=self.keepalive_target_memory_pct,
+        )
 
     @field_validator("labels", "project_ids")
     @classmethod

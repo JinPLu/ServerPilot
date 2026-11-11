@@ -261,6 +261,85 @@ public enum ResourceText {
     }
 }
 
+/// One reading a held card is driven to. The wire key is the control plane's
+/// own name for it, in the request and in the endpoint's keepalive summary.
+public enum KeepaliveTarget: String, CaseIterable, Sendable {
+    case utilization = "target_utilization_pct"
+    case gpuMemory = "target_gpu_memory_pct"
+    case memory = "target_memory_pct"
+
+    /// Named like the server table's columns, which are what it drives.
+    public var label: String {
+        switch self {
+        case .utilization: "GPU 利用率"
+        case .gpuMemory: "显存占用率"
+        case .memory: "内存占用率"
+        }
+    }
+
+    /// What the app offers. The control plane accepts 10–100 for the card's
+    /// readings and 0–100 for host memory, where 0 holds none; the app stops
+    /// host memory at 95 so the server always keeps some to start a task.
+    public var choices: [Int] {
+        switch self {
+        case .utilization: [30, 50, 60, 70, 80, 85, 90, 95, 100]
+        case .gpuMemory: [50, 60, 70, 80, 85, 90, 95, 100]
+        case .memory: [0, 30, 50, 60, 70, 80, 85, 90, 95]
+        }
+    }
+
+    /// What it does to the server, for the menu's help.
+    public var help: String {
+        switch self {
+        case .utilization: "每张占住的卡计算的时间比例。"
+        case .gpuMemory: "每张占住的卡的显存占到多少。"
+        case .memory: "整台服务器的内存占到多少，按卡分摊：全部卡占住时达到，任务申请走一张卡就让出它那一份；0% 不占内存。"
+        }
+    }
+}
+
+/// What this server's held cards are driven to, each a whole percent.
+public struct KeepaliveTargets: Equatable, Sendable {
+    public var values: [KeepaliveTarget: Int]
+
+    /// The control plane's own default, for a server that has not set one.
+    public static let defaultPct = 85
+
+    public init(_ values: [KeepaliveTarget: Int] = [:]) {
+        self.values = values
+    }
+
+    public init(raw: [String: Any]) {
+        values = Dictionary(uniqueKeysWithValues: KeepaliveTarget.allCases.map {
+            ($0, raw.int($0.rawValue, default: Self.defaultPct))
+        })
+    }
+
+    public subscript(target: KeepaliveTarget) -> Int {
+        get { values[target] ?? Self.defaultPct }
+        set { values[target] = newValue }
+    }
+
+    public func setting(_ target: KeepaliveTarget, to pct: Int) -> KeepaliveTargets {
+        var changed = self
+        changed[target] = pct
+        return changed
+    }
+
+    public var payload: [String: Int] {
+        Dictionary(uniqueKeysWithValues: KeepaliveTarget.allCases.map { ($0.rawValue, self[$0]) })
+    }
+
+    /// "GPU 利用率 85%、显存占用率 85%、内存占用率 85%", for the targets given.
+    public func describe(_ targets: [KeepaliveTarget] = KeepaliveTarget.allCases) -> String {
+        targets.map { "\($0.label) \(self[$0])%" }.joined(separator: "、")
+    }
+
+    public static func == (lhs: KeepaliveTargets, rhs: KeepaliveTargets) -> Bool {
+        KeepaliveTarget.allCases.allSatisfy { lhs[$0] == rhs[$0] }
+    }
+}
+
 public struct EndpointKeepaliveSummary: Equatable, Sendable {
     public let configured: Bool
     /// Desired endpoint policy.  Runtime coverage is deliberately reported per GPU.
@@ -271,18 +350,13 @@ public struct EndpointKeepaliveSummary: Equatable, Sendable {
     public let eligibleIdleGPUCount: Int
     public let reasons: [String]
     public let message: String?
-    /// How hard each held card works, in percent of time computing. A worker
-    /// keeps the load it started with; changing this restarts the server's.
-    public let targetUtilizationPct: Int
-
-    /// The loads offered in the app; the control plane accepts 10 to 100.
-    public static let targetUtilizationChoices = [30, 50, 60, 70, 80, 85, 90, 95, 100]
-    /// The control plane's own default, for a server that has not set one.
-    public static let defaultTargetUtilizationPct = 85
+    /// What each held card is driven to. A worker keeps the targets it
+    /// started with; changing one restarts the server's.
+    public let targets: KeepaliveTargets
 
     public init?(raw: [String: Any], fallbackConfigured: Bool) {
         configured = raw.bool("configured", default: fallbackConfigured)
-        targetUtilizationPct = raw.int("target_utilization_pct", default: Self.defaultTargetUtilizationPct)
+        targets = KeepaliveTargets(raw: raw)
         let suppliedState = (raw.string("actual") ?? raw.string("state") ?? "OFF").uppercased()
         guard ["OFF", "ON", "ERROR"].contains(suppliedState) else { return nil }
         state = suppliedState

@@ -759,7 +759,11 @@ import Testing
         #expect(updatePayload["observation_profile"] as? String == "linux")
 
         let keepaliveRecorder = CompletionRecorder()
-        store.setEndpointKeepalive(endpoint, enabled: true, targetUtilizationPct: 90) { success, message in
+        store.setEndpointKeepalive(
+            endpoint,
+            enabled: true,
+            targets: KeepaliveTargets([.utilization: 90, .gpuMemory: 95, .memory: 0])
+        ) { success, message in
             keepaliveRecorder.success = success
             keepaliveRecorder.message = message
         }
@@ -771,7 +775,11 @@ import Testing
         let keepalivePayload = try #require(try JSONSerialization.jsonObject(with: keepaliveBody) as? [String: Any])
         #expect(keepalivePayload["enabled"] as? Bool == true)
         #expect(keepalivePayload["target_utilization_pct"] as? Int == 90)
-        #expect(Set(keepalivePayload.keys) == Set(["enabled", "target_utilization_pct"]))
+        #expect(keepalivePayload["target_gpu_memory_pct"] as? Int == 95)
+        #expect(keepalivePayload["target_memory_pct"] as? Int == 0)
+        #expect(Set(keepalivePayload.keys) == Set([
+            "enabled", "target_utilization_pct", "target_gpu_memory_pct", "target_memory_pct",
+        ]))
 
         let conflictRecorder = CompletionRecorder()
         store.clearEmptyConflictedLease(
@@ -1293,18 +1301,27 @@ import Testing
         #expect(defensiveSnapshot.leases.isEmpty)
     }
 
-    @Test func aServersKeepaliveLoadIsReadAndDefaultsToTheControlPlanes() throws {
+    @Test func aServersKeepaliveTargetsAreReadAndDefaultToTheControlPlanes() throws {
         let set = try #require(EndpointKeepaliveSummary(
-            raw: ["configured": true, "policy": "idle_keepalive", "state": "ON", "target_utilization_pct": 90],
+            raw: [
+                "configured": true, "policy": "idle_keepalive", "state": "ON",
+                "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_memory_pct": 0,
+            ],
             fallbackConfigured: true
         ))
-        #expect(set.targetUtilizationPct == 90)
+        #expect(set.targets[.utilization] == 90)
+        #expect(set.targets[.gpuMemory] == 95)
+        #expect(set.targets[.memory] == 0)
+        #expect(set.targets.describe() == "GPU 利用率 90%、显存占用率 95%、内存占用率 0%")
         let unset = try #require(EndpointKeepaliveSummary(
             raw: ["configured": true, "policy": "disabled", "state": "OFF"],
             fallbackConfigured: true
         ))
-        #expect(unset.targetUtilizationPct == 85)
-        #expect(EndpointKeepaliveSummary.targetUtilizationChoices.contains(85))
+        #expect(unset.targets == KeepaliveTargets())
+        #expect(KeepaliveTarget.allCases.allSatisfy { unset.targets[$0] == 85 && $0.choices.contains(85) })
+        #expect(set.targets.setting(.memory, to: 50).payload == [
+            "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_memory_pct": 50,
+        ])
     }
 
     @Test func testKeepaliveProtocolRejectsUnknownPolicyAndState() {
