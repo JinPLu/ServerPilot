@@ -40,6 +40,27 @@ def test_apply_tells_the_agent_how_to_enter_without_assembling_anything(mcp_agen
     assert server["ssh"]
 
 
+def test_apply_and_the_task_view_say_which_cards_the_task_got(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    fleet(mcp_agent, ("endpoint-a",), 2)
+    cards = tools.gpu_apply(task="train", gpu_count=2)["servers"][0]["cards"]
+    assert [(card["name"], card["vram_mib"]) for card in cards] == [("Test GPU", 100_000)] * 2
+    assert tools.gpu_status(task="train")["gpus"] == [{"name": "Test GPU", "vram_mib": 100_000, "count": 2}]
+
+
+def test_a_server_with_two_models_says_which_selector_is_which(mcp_agent) -> None:  # type: ignore[no-untyped-def]
+    sample = observation("endpoint-a", count=3)
+    sample.nodes[0].gpus[2].name, sample.nodes[0].gpus[2].total_vram_mib = "Other GPU", 24_576
+    mcp_agent.ingest_observation(sample)
+    reply = tools.gpu_apply(task="train", gpu_count=3)
+    assert reply["ok"], reply
+    assert [(card["selector"], card["name"]) for card in reply["servers"][0]["cards"]] == [
+        (0, "Test GPU"), (1, "Test GPU"), (2, "Other GPU")]
+    assert sorted(tools.gpu_status(task="train")["gpus"], key=lambda item: item["count"]) == [
+        {"name": "Other GPU", "vram_mib": 24_576, "count": 1},
+        {"name": "Test GPU", "vram_mib": 100_000, "count": 2},
+    ]
+
+
 def test_a_direct_lease_can_be_recovered_after_context_loss(mcp_agent) -> None:  # type: ignore[no-untyped-def]
     fleet(mcp_agent, ("endpoint-a",), 2)
     lease_id = tools.gpu_apply(task="train", gpu_count=2)["lease_id"]
@@ -296,12 +317,14 @@ def test_replies_stay_within_budget_on_a_realistic_fleet(build_app, inventory, m
     applied = tools.gpu_apply(task="多卡训练", gpu_count=8)
     assert applied["ok"], applied
     tools.gpu_apply(task="第二个任务", gpu_count=2)
+    # The task view names its card models once (`gpus`), which put the
+    # telemetry view, the heartbeat plus eight cards of readings, past 2500.
     budgets = (
         ("apply", applied, 1500),
         ("summary", tools.gpu_status(), 1500),
         ("server", tools.gpu_status(server_id="endpoint-a"), 12000),
         ("heartbeat", tools.gpu_status(task="多卡训练"), 600),
-        ("telemetry", tools.gpu_status(task="多卡训练", telemetry=True), 2500),
+        ("telemetry", tools.gpu_status(task="多卡训练", telemetry=True), 2600),
         ("release", tools.gpu_release(task="多卡训练"), 200),
     )
     sizes = {name: size(reply) for name, reply, _limit in budgets}

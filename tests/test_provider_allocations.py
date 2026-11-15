@@ -118,6 +118,16 @@ def test_apply_has_location_without_inventing_inventory_and_is_visible(service, 
     assert "no_leased_gpus" not in status
 
 
+def test_a_cluster_task_counts_its_cards_and_names_their_model_once_observed(service, admin, provider):
+    lease = claim(service, admin)["lease"]
+    ingest(service, [allocation_fact(record(service).id)])
+    view = service.lease_view(admin, lease_id=lease["id"], task=None, project_id=None, include_entry=True)
+    cards = mcp_server._cards_by_server(view["lease"])[0]["cards"]
+    assert [(card["name"], card["vram_mib"]) for card in cards] == [("GPU model", 81920)] * 2
+    assert view["gpu_count"] == 2
+    assert view["gpus"] == [{"name": "GPU model", "vram_mib": 81920, "count": 2}]
+
+
 def test_repeated_request_and_repeated_task_return_same_allocation(service, admin, provider):
     first = claim(service, admin)
     again = claim(service, admin)

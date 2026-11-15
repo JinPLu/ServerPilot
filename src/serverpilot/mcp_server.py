@@ -1006,7 +1006,8 @@ def _cards_by_server(lease: dict[str, Any]) -> list[dict[str, Any]]:
             server["allocation_id"] = resource.get("allocation_id")
             server["cards"] = [
                 {"node": location["node"], "gpu_id": device["gpu_uuid"],
-                 "selector": device.get("device_selector")}
+                 "selector": device.get("device_selector"),
+                 "name": device.get("name"), "vram_mib": device.get("total_vram_mib")}
                 for location in resource.get("locations", [])
                 for device in location["devices"]
             ]
@@ -1017,7 +1018,8 @@ def _cards_by_server(lease: dict[str, Any]) -> list[dict[str, Any]]:
             }
             server["cards"] = [
                 {"gpu_id": gpu.get("gpu_uuid"), "index": gpu.get("gpu_index"),
-                 "selector": gpu.get("cuda_ordinal")}
+                 "selector": gpu.get("cuda_ordinal"),
+                 "name": gpu.get("name"), "vram_mib": gpu.get("total_vram_mib")}
                 for gpu in resource.get("gpus", [])
             ]
         servers.append(server)
@@ -1087,7 +1089,7 @@ async def _task_view(client: Any, project: str, task: str) -> dict[str, Any]:
 
 @mcp.tool(annotations=_HEARTBEAT)
 async def gpu_status(
-    task: Annotated[str | None, Field(description="Your task: its state, what changed, and cards at risk. Counts as your heartbeat")] = None,
+    task: Annotated[str | None, Field(description="Your task: its state, card models, what changed, and cards at risk. Counts as your heartbeat")] = None,
     server_id: Annotated[str | None, Field(description="One server's nodes, cards and processes")] = None,
     telemetry: Annotated[bool, Field(description="With task: per-card use, for tuning batch size")] = False,
     context: Context | None = None,
@@ -1140,7 +1142,7 @@ async def gpu_apply(
     project: Annotated[str | None, Field(description="Only when this client gives no project root; normally derived")] = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Declare what a task needs. Returns how to enter its cards, or why not; nothing queues. Repeating is safe."""
+    """Declare what a task needs. Returns its cards (model, VRAM) and how to enter them, or why not; nothing queues. Repeating is safe."""
 
     try:
         client, resolved = await _identity(context, project)

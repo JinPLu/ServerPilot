@@ -2263,6 +2263,8 @@ class BrokerService:
                             "gpu_uuid": gpu.gpu_uuid,
                             "gpu_index": gpu.gpu_index,
                             "cuda_ordinal": gpu.cuda_ordinal,
+                            "name": gpu.name,
+                            "total_vram_mib": gpu.total_vram_mib,
                         }
                         for gpu in gpus
                     ],
@@ -6919,8 +6921,9 @@ class BrokerService:
                 })
             result: dict[str, Any] = {
                 "lease_id": lease.id, "state": lease.state, "task": lease.task_ref,
-                "gpu_count": len(cards), "resource_epoch": lease.resource_epoch,
-                "at_risk": at_risk, "changes": changes,
+                "gpu_count": self._lease_card_count(session, lease),
+                "gpus": self._held_models(session, lease, cards),
+                "resource_epoch": lease.resource_epoch, "at_risk": at_risk, "changes": changes,
             }
             if kept is not None:
                 result["kept_idle"] = kept
@@ -6929,6 +6932,28 @@ class BrokerService:
             return result
 
         return self._write(operation)
+
+    def _held_models(
+        self, session: Session, lease: Lease, cards: Iterable[LeaseResource]
+    ) -> list[dict[str, Any]]:
+        """What a task's cards are, one line per model, so eight A800s read as one.
+
+        A cluster's cards are the devices its allocation reports; until the
+        node is observed their model is not known and reads as null.
+        """
+
+        held = [(gpu.name, gpu.total_vram_mib) for gpu in (session.get(GPUDevice, card.gpu_id) for card in cards)]
+        held += [
+            (device.get("name"), device.get("total_vram_mib"))
+            for allocation in self._allocations(session, lease.id)
+            if allocation.provider_id != "builtin"
+            for location in json_load(allocation.locations_json)
+            for device in location["devices"]
+        ]
+        return [
+            {"name": name, "vram_mib": vram_mib, "count": count}
+            for (name, vram_mib), count in Counter(held).items()
+        ]
 
     @staticmethod
     def _unseen_changes(session: Session, lease: Lease) -> list[dict[str, Any]]:
