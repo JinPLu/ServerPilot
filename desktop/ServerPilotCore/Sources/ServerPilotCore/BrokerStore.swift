@@ -159,8 +159,6 @@ public final class BrokerStore: ObservableObject {
         }
     }
     @Published public var feedback: Feedback?
-    @Published public private(set) var alerts: [AlertRecord] = []
-    @Published public private(set) var openAlertCount = 0
     @Published public private(set) var utilizationTrends = UtilizationTrends.empty
     /// How often to ask whether anything changed: quickly while someone is
     /// looking, slowly from the menu bar.  Coming back into view catches up at once.
@@ -335,15 +333,12 @@ public final class BrokerStore: ObservableObject {
         snapshot: BrokerSnapshot,
         serviceInfo: ServiceInfo = .fixture,
         endpointTelemetryHistoryClient: BrokerEndpointTelemetryHistoryClient? = nil,
-        utilizationTrends: UtilizationTrends = .empty,
-        alerts: [AlertRecord] = []
+        utilizationTrends: UtilizationTrends = .empty
     ) {
         invalidateRefreshWork()
         invalidateEndpointTelemetryHistoryWork()
         self.endpointTelemetryHistoryClient = endpointTelemetryHistoryClient
         self.utilizationTrends = utilizationTrends
-        self.alerts = alerts
-        self.openAlertCount = alerts.filter(\.isOpen).count
         self.snapshot = snapshot
         self.lastGoodSnapshot = snapshot
         // A fixture can contain offline endpoints, but the fixture itself was
@@ -1546,7 +1541,7 @@ public final class BrokerStore: ObservableObject {
         }
     }
 
-    // ---- pulse and reminders ----
+    // ---- pulse ----
 
     private func startPulseLoop() {
         pulseTask?.cancel()
@@ -1571,14 +1566,8 @@ public final class BrokerStore: ObservableObject {
         await reloadUtilizationTrendsIfDue()
         let previous = lastPulse
         lastPulse = pulse
-        if openAlertCount != pulse.openAlerts {
-            openAlertCount = pulse.openAlerts
-        }
-        guard pulse != previous else { return }
-        let refreshed = previous?.revision != pulse.revision && requestRefreshIfDue()
-        if refreshed || previous?.openAlerts != pulse.openAlerts {
-            await reloadAlerts()
-        }
+        guard pulse != previous, previous?.revision != pulse.revision else { return }
+        _ = requestRefreshIfDue()
     }
 
     private func reloadUtilizationTrendsIfDue() async {
@@ -1592,46 +1581,6 @@ public final class BrokerStore: ObservableObject {
         if utilizationTrends != trends {
             utilizationTrends = trends
         }
-    }
-
-    public func reloadAlerts() async {
-        guard let payload = await requestJSON(path: "api/v2/alerts"),
-              let rows = payload["alerts"] as? [[String: Any]] else { return }
-        let decoded = rows.compactMap(AlertRecord.init)
-        if alerts != decoded {
-            alerts = decoded
-        }
-    }
-
-    /// Alerts nobody has been told about yet, already folded together.
-    public func pendingNotifications() async -> [AlertRecord] {
-        guard let payload = await requestJSON(path: "api/v2/alerts", query: "pending=true"),
-              let rows = payload["alerts"] as? [[String: Any]] else { return [] }
-        return rows.compactMap(AlertRecord.init)
-    }
-
-    /// The control plane takes at most this many ids per mark.
-    static let alertMarkBatch = 200
-
-    public func markAlerts(_ ids: [String], notified: Bool = false, acked: Bool = false) async {
-        // A day of reminders gathered while the app was closed can exceed one
-        // request's limit; a refused mark used to repeat the same banner every
-        // fifteen seconds.
-        var failed = false
-        for start in stride(from: 0, to: ids.count, by: Self.alertMarkBatch) {
-            let batch = Array(ids[start..<min(start + Self.alertMarkBatch, ids.count)])
-            let marked = await requestJSON(
-                path: "api/v2/alerts/mark",
-                body: ["alert_ids": batch, "notified": notified, "acked": acked]
-            )
-            failed = failed || marked == nil
-        }
-        if failed && acked {
-            errorMessage = "提醒没有确认成功，请稍后重试。"
-        }
-        // The badge answers now, not at the next pulse; the pulse reloads the
-        // list whenever the count it reports has moved.
-        await checkPulse()
     }
 
     private func requestJSON(path: String, query: String? = nil, body: [String: Any]? = nil) async -> [String: Any]? {

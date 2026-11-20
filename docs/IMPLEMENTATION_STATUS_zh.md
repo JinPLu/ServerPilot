@@ -1,9 +1,22 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-11-15（Asia/Taipei）
+更新时间：2026-11-19（Asia/Taipei）
 
 当前包装版本为 `5.6.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 删除“提醒”；引导 Agent 用卡前再申请（2026-11-19，未发布）
+
+用户要求：“「提醒」功能没有作用，需要删掉”；“给agent的相关引导里需要优化，用卡前再申请，不要申请了不用”。
+
+删除提醒：
+- App：去掉侧栏“提醒”页、总览“需要处理”卡（顶部只剩容量与利用率）、菜单栏数字与弹窗里的“需要处理”、系统通知投递；`BrokerStore` 不再拉 `/api/v2/alerts`，`PulseRecord` 去掉 `open_alerts`。
+- 后端：删除 `alerts.py`、提醒判定与投递、`/api/v2/alerts` 两条路由、`AlertMark`；旧的 `active` 告警也一并删除——查遍 App、CLI、MCP，状态快照里的 `alerts` 没有读者，也没有调度判断读 `alerts` 表。`pulse()` 只回 `version`、`revision`；状态快照去掉 `alerts`；保留期不再清理告警。`idle_lease_alert_seconds` 仍是闲置判定阈值，未改名。
+- 持久化：`20261119_0046` 删除 `alerts` 表（降级重建空表）；初始迁移按 `allocation_requests` 的先例手写重建该表，因为 ORM 已不再描述它。
+
+用卡前再申请：`agent_contract.py` 的调用顺序改为先准备代码、数据和环境（不需要卡），任务就绪才 `gpu_apply` 并立即启动；新增一句：不要为写代码、调试先占卡，下一次运行不会马上开始就先归还、准备好再申请。`gpu_apply` 的说明和成功回包的 `next` 同步。MCP instructions 由 2592 增至 2980 字符，预算 2600 调到 3000，原因写在常量旁。生成物已重新渲染。
+
+验证：全部 Python 测试 851 通过、Ruff、`serverpilot mcp policy --check`；Swift 98 个测试通过；`build-macos-app.sh` 与 `verify-macos-app.sh` 通过，`dashboard` 夹具总览截图确认两卡并排、侧栏无提醒。未做：本机运行环境未更新（未运行 `update-macos-app.sh`）；已安装到各客户端全局规则的策略块需重新执行 `serverpilot mcp policy --install` 才会换成新文字；Agent 是否真的据此晚申请、早归还未实测。
 
 ## Agent 申请到卡时能看到卡的型号与显存（2026-11-15，5.6.0）
 

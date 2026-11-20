@@ -1,7 +1,5 @@
 import AppKit
-import Combine
 import SwiftUI
-import UserNotifications
 
 // ---- feedback ----
 
@@ -49,158 +47,6 @@ struct FeedbackBanner: View {
     }
 }
 
-// ---- reminders page ----
-
-struct AlertsDashboard: View {
-    @ObservedObject var store: BrokerStore
-
-    private var open: [AlertRecord] { store.alerts.filter(\.isOpen) }
-    private var earlier: [AlertRecord] { store.alerts.filter { !$0.isOpen } }
-
-    var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 16) {
-                if store.alerts.isEmpty {
-                    HomeCard {
-                        VStack(spacing: 10) {
-                            Image(systemName: "bell.badge")
-                                .font(Typography.icon)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                            Text("没有提醒").font(Typography.label)
-                            Text("Agent 的任务结束或被归还、任务受影响、服务器异常、资源闲置或有卡可用时，会出现在这里。")
-                                .font(Typography.identity)
-                                .foregroundStyle(DesignTokens.mutedInk)
-                        }
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 40)
-                    }
-                }
-                if !open.isEmpty {
-                    HomeCard {
-                        VStack(alignment: .leading, spacing: 12) {
-                            HStack {
-                                Text("\(open.count) 条待处理").font(Typography.label)
-                                Spacer()
-                                Button("全部确认") {
-                                    let ids = open.map(\.id)
-                                    Task { await store.markAlerts(ids, acked: true) }
-                                }
-                            }
-                            ForEach(open) { alert in
-                                Divider().opacity(DesignTokens.Alpha.muted)
-                                AlertRow(alert: alert) {
-                                    Task { await store.markAlerts([alert.id], acked: true) }
-                                }
-                            }
-                        }
-                    }
-                }
-                if !earlier.isEmpty {
-                    HomeCard {
-                        VStack(alignment: .leading, spacing: 12) {
-                            Text("更早").font(Typography.label).foregroundStyle(DesignTokens.mutedInk)
-                            ForEach(earlier) { alert in
-                                Divider().opacity(DesignTokens.Alpha.muted)
-                                AlertRow(alert: alert, acknowledge: nil)
-                            }
-                        }
-                    }
-                }
-            }
-            .padding(.horizontal, 24)
-            .padding(.vertical, 20)
-        }
-    }
-}
-
-private struct AlertRow: View {
-    let alert: AlertRecord
-    let acknowledge: (() -> Void)?
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(alert.category.title)
-                    .font(Typography.annotation.weight(.semibold))
-                    .foregroundStyle(DesignTokens.mutedInk)
-                Text(alert.message)
-                    .foregroundStyle(DesignTokens.ink)
-                    .textSelection(.enabled)
-            }
-            Spacer()
-            if let acknowledge {
-                Button("确认", action: acknowledge)
-            }
-        }
-        .accessibilityElement(children: .combine)
-    }
-}
-
-// ---- notifications ----
-
-@MainActor
-protocol AlertNotifier {
-    func deliver(title: String, body: String) async
-}
-
-/// The banner is a courtesy: the menu bar badge and the reminders page work
-/// without it, so a refused authorization only costs the banner.
-@MainActor
-final class SystemAlertNotifier: AlertNotifier {
-    private var authorized: Bool?
-
-    func deliver(title: String, body: String) async {
-        let center = UNUserNotificationCenter.current()
-        if authorized == nil {
-            authorized = (try? await center.requestAuthorization(options: [.alert, .sound])) ?? false
-        }
-        guard authorized == true else { return }
-        let content = UNMutableNotificationContent()
-        content.title = title
-        content.body = body
-        try? await center.add(UNNotificationRequest(identifier: UUID().uuidString, content: content, trigger: nil))
-    }
-}
-
-@MainActor
-final class AlertDelivery {
-    private static let intervalSeconds: UInt64 = 15
-    /// Past this, a burst after the App was closed reads as one summary.
-    private static let individualLimit = 3
-
-    private let store: BrokerStore
-    private let notifier: AlertNotifier
-    private var task: Task<Void, Never>?
-
-    init(store: BrokerStore, notifier: AlertNotifier) {
-        self.store = store
-        self.notifier = notifier
-    }
-
-    func start() {
-        task?.cancel()
-        task = Task { [weak self] in
-            while !Task.isCancelled {
-                await self?.deliverPending()
-                try? await Task.sleep(nanoseconds: Self.intervalSeconds * 1_000_000_000)
-            }
-        }
-    }
-
-    private func deliverPending() async {
-        let pending = await store.pendingNotifications()
-        guard !pending.isEmpty else { return }
-        if pending.count > Self.individualLimit {
-            await notifier.deliver(title: "ServerPilot", body: "有 \(pending.count) 条新提醒")
-        } else {
-            for alert in pending {
-                await notifier.deliver(title: alert.category.title, body: alert.message)
-            }
-        }
-        await store.markAlerts(pending.flatMap(\.alertIDs), notified: true)
-    }
-}
-
 // ---- menu bar ----
 
 /// The overview at the size of a menu: the same words and the same squares, so
@@ -211,7 +57,6 @@ private struct MenuBarPopover: View {
     let requestClaim: () -> Void
 
     private var summary: ResourceSummary { store.snapshot.summary }
-    private var openAlerts: [AlertRecord] { store.alerts.filter(\.isOpen) }
     private var servers: [EndpointRecord] { serverFleets(in: store.snapshot).flatMap(\.servers) }
 
     private var freeFraction: Double {
@@ -222,7 +67,6 @@ private struct MenuBarPopover: View {
         VStack(alignment: .leading, spacing: 10) {
             if store.isConnected {
                 capacity
-                if !openAlerts.isEmpty { attention }
                 if !servers.isEmpty { fleet }
             } else {
                 Label("本机服务未响应", systemImage: "exclamationmark.triangle.fill")
@@ -289,25 +133,6 @@ private struct MenuBarPopover: View {
         .accessibilityValue("\(summary.availableGPUs) 张，共 \(summary.totalGPUs) 张")
     }
 
-    private var attention: some View {
-        VStack(alignment: .leading, spacing: 7) {
-            Text("需要处理 · \(openAlerts.count)")
-                .font(Typography.annotation.weight(.semibold))
-                .foregroundStyle(DesignTokens.warning)
-            ForEach(openAlerts.prefix(3)) { alert in
-                Text(alert.message)
-                    .font(Typography.identity)
-                    .foregroundStyle(DesignTokens.ink)
-                    .lineLimit(1)
-                    .truncationMode(.tail)
-                    .help(alert.message)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .padding(12)
-        .background(DesignTokens.surface, in: RoundedRectangle(cornerRadius: DesignTokens.Radius.panel + 4, style: .continuous))
-    }
-
     private var fleet: some View {
         VStack(spacing: 6) {
             ForEach(servers.prefix(10)) { endpoint in
@@ -348,7 +173,6 @@ final class StatusItemController: NSObject {
     private let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
     private let popover = NSPopover()
     private let store: BrokerStore
-    private var subscription: AnyCancellable?
 
     init(store: BrokerStore, openWindow: @escaping () -> Void) {
         self.store = store
@@ -373,9 +197,6 @@ final class StatusItemController: NSObject {
                 NotificationCenter.default.post(name: .serverPilotRequestClaim, object: nil)
             }
         ))
-        subscription = store.$openAlertCount.sink { [weak self] count in
-            self?.item.button?.title = count > 0 ? " \(count)" : ""
-        }
     }
 
     @objc private func toggle(_ sender: Any?) {

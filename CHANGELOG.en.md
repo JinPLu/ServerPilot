@@ -4,6 +4,11 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
+## Unreleased
+
+- **Reminders are gone.** The reminders page in the sidebar, the overview's "需要处理" card, the count beside the menu bar icon and system notifications have been removed; the overview's top row now holds capacity and utilization only. The `/api/v2/alerts` routes and the `alerts` field of the state snapshot are removed too, and existing reminder records are deleted on upgrade.
+- **Agents are told to apply just before using cards.** The MCP rules and `gpu_apply` now say: prepare code, data and environment first, which needs no cards; apply when the job is ready and start it at once; never hold cards while coding or debugging; release when the next run will not start soon, and apply again when it is ready.
+
 ## 5.6.0 - 2026-11-15
 
 - **Each server sets the GPU utilization, VRAM use and host memory use its held cards keep up.** A "占卡目标" menu next to the keepalive button in a server's details sets the three separately, 85% each by default. The keepalive pace used to be fixed in code (about 65% on an A800 and only about 43% on a B20Z), VRAM was fixed at 80%, and host memory was not held at all. Now utilization follows its target, corrected every period from the busy time measured; each held card's VRAM is filled to its target, counting what the keepalive process itself uses; and host memory is shared out per card, reaching its target when every card on the server is held. A card handed to a task takes its share with it, held cards give memory back when other programs grow, the kernel ends a keepalive process first when memory runs short, and 0% holds none. On a container server memory is counted against the container's limit, as the App's memory reading is. Changing a target while cards are held stops them, confirms, and holds them again at the new targets. The server's keepalive helper must be upgraded to this release for the settings to apply; an older helper keeps holding cards and ignores them.

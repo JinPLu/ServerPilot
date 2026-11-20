@@ -36,7 +36,6 @@ from serverpilot.process_stop import Card, StopPlan, StopTarget, sealed_runner, 
 from serverpilot.provider_contract import ProviderConnectionUpdate
 from serverpilot.runtime_identity import package_build_id
 from serverpilot.schemas import (
-    AlertMark,
     ApplyBody,
     CollectorSettingsUpdate,
     ControlPlaneSnapshot,
@@ -1556,16 +1555,6 @@ def create_app(
         return service.release_lease(
             actor, lease_id, reason=RELEASE_REASONS[body.outcome], idempotency_key=None
         )
-
-    @app.get("/api/v2/alerts")
-    def alerts_inbox(pending: bool = False) -> dict[str, Any]:
-        return {"alerts": service.pending_notifications() if pending else service.list_reminders()}
-
-    @app.post("/api/v2/alerts/mark")
-    def alerts_mark(body: AlertMark, actor: ApiActor) -> dict[str, Any]:
-        return {"updated": service.mark_reminders(
-            actor, body.alert_ids, notified=body.notified, acked=body.acked
-        )}
 
     @app.post("/api/v2/claims")
     async def claim_now(

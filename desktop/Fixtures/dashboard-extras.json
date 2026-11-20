@@ -709,22 +709,5 @@
     ]
    }
   }
- },
- "alerts": [
-  {
-   "id": "fixture-a1",
-   "category": "server_abnormal",
-   "state": "active",
-   "message": "10.0.8.21:2222 连接失败：认证被拒绝",
-   "first_seen_at": "2026-11-01T16:49:30.102328+00:00"
-  },
-  {
-   "id": "fixture-a2",
-   "category": "resource_idle",
-   "state": "active",
-   "message": "eval-batch 占着 8 张卡，42 分钟没有进程",
-   "task": "eval-batch",
-   "first_seen_at": "2026-11-01T16:49:30.102328+00:00"
-  }
- ]
+ }
 }

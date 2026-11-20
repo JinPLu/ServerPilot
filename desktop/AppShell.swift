@@ -31,7 +31,6 @@ struct NativeBrokerRoot: View {
         let initialSection: DashboardSection = switch requested {
         case "server-pool": .resources
         case "resource-usage", "leases": .leases
-        case "alerts": .alerts
         case "overview": .overview
         case "settings": .settings
         default: .overview
@@ -251,9 +250,6 @@ private struct AppSidebar: View {
             }
             SidebarSelection(title: "任务", systemImage: "list.bullet.rectangle", badge: store.snapshot.leases.isEmpty ? nil : "\(store.snapshot.leases.count)", selected: selectedSection == .leases, compact: compact) {
                 navigate(.leases)
-            }
-            SidebarSelection(title: "提醒", systemImage: "bell", badge: store.openAlertCount > 0 ? "\(store.openAlertCount)" : nil, selected: selectedSection == .alerts, compact: compact) {
-                navigate(.alerts)
             }
 
             // Server groups are the rooms of this house: go straight to one, or
@@ -479,7 +475,6 @@ private struct AppToolbar: View {
         case .overview: return "总览"
         case .resources: return "服务器"
         case .leases: return "任务"
-        case .alerts: return "提醒"
         case .settings: return "设置"
         }
     }

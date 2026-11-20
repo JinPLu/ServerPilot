@@ -42,8 +42,6 @@ struct DashboardView: View {
                     )
                 case .leases:
                     ResourceUsageDashboard(store: store, claimGPU: claimGPU)
-                case .alerts:
-                    AlertsDashboard(store: store)
                 case .settings:
                     SettingsDashboard(store: store)
                 }

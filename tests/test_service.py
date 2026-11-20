@@ -13,7 +13,6 @@ from serverpilot.config import EndpointConfig, InventoryConfig, ProjectConfig
 from serverpilot.database import Database
 from serverpilot.models import (
     Actor,
-    Alert,
     AuditEvent,
     EndpointTelemetrySnapshot,
     GPUDevice,
@@ -848,10 +847,6 @@ def test_multi_gpu_task_stays_running_during_mixed_worker_turnover(service, admi
         gpu_uuids[2]: {4_102},
         gpu_uuids[3]: {4_103, 5_103},
     }
-    assert not any(
-        alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.snapshot(admin)["data"]["alerts"]
-    )
 
 
 def test_task_stays_running_during_overlapping_worker_turnover(service, admin) -> None:
@@ -906,10 +901,6 @@ def test_worker_turnover_then_empty_gpu_keeps_task_lease_active(service, admin) 
     assert gpu["state"] == "LEASED_IDLE"
     assert gpu["lease"]["id"] == lease_id
     assert gpu["lease"]["state"] == "ACTIVE"
-    assert not any(
-        alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.snapshot(admin)["data"]["alerts"]
-    )
 
 
 def test_workload_lease_process_restart_preserves_task_assignment(service, admin) -> None:
@@ -1095,25 +1086,9 @@ def test_initialize_normalizes_legacy_process_attribution_conflict(service, admi
     lease_id = claimed["lease"]["id"]
 
     def seed_legacy_conflict(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
         lease = session.get(Lease, lease_id)
         assert lease is not None
         lease.state = "CONFLICT"
-        session.add(
-            Alert(
-                id="legacy-process-attribution-conflict",
-                alert_type="lease_process_conflict",
-                severity="critical",
-                resource_type="lease",
-                resource_id=lease_id,
-                message="legacy PID attribution conflict",
-                active=True,
-                first_seen_at=now,
-                last_seen_at=now,
-                acknowledged_at=None,
-                acknowledged_by=None,
-            )
-        )
 
     service._write(seed_legacy_conflict)
     service.initialize()
@@ -1121,10 +1096,6 @@ def test_initialize_normalizes_legacy_process_attribution_conflict(service, admi
     gpu = service.list_gpus(admin)["data"][0]
     assert gpu["state"] == "RUNNING_MANAGED"
     assert gpu["lease"]["state"] == "ACTIVE"
-    assert not any(
-        alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.snapshot(admin)["data"]["alerts"]
-    )
     assert any(
         event["action"] == "lease.conflict_resolved"
         and event["resource_id"] == lease_id
@@ -1147,25 +1118,9 @@ def test_endpoint_operator_can_release_empty_conflicted_lease_after_fresh_observ
     service.ingest_observation(observation(count=1, processes=[process_for_gpu(gpu_uuid)]))
 
     def seed_legacy_conflict(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
         lease = session.get(Lease, lease_id)
         assert lease is not None
         lease.state = "CONFLICT"
-        session.add(
-            Alert(
-                id="legacy-empty-release-conflict",
-                alert_type="lease_process_conflict",
-                severity="critical",
-                resource_type="lease",
-                resource_id=lease_id,
-                message="legacy PID attribution conflict",
-                active=True,
-                first_seen_at=now,
-                last_seen_at=now,
-                acknowledged_at=None,
-                acknowledged_by=None,
-            )
-        )
 
     service._write(seed_legacy_conflict)
 
@@ -1189,10 +1144,6 @@ def test_endpoint_operator_can_release_empty_conflicted_lease_after_fresh_observ
     assert released["released"] is True
     assert released["lease"]["state"] == "RELEASED"
     assert service.list_gpus(admin)["data"][0]["state"] == "AVAILABLE"
-    assert not any(
-        alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.snapshot(admin)["data"]["alerts"]
-    )
 
 
 def test_owner_can_release_legacy_conflict_while_process_is_observed(service, admin) -> None:
@@ -1207,25 +1158,9 @@ def test_owner_can_release_legacy_conflict_while_process_is_observed(service, ad
     service.ingest_observation(observation(count=1, processes=[process_for_gpu(gpu_uuid)]))
 
     def seed_legacy_conflict(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
         lease = session.get(Lease, lease_id)
         assert lease is not None
         lease.state = "CONFLICT"
-        session.add(
-            Alert(
-                id="legacy-owner-release-conflict",
-                alert_type="lease_process_conflict",
-                severity="critical",
-                resource_type="lease",
-                resource_id=lease_id,
-                message="legacy PID attribution conflict",
-                active=True,
-                first_seen_at=now,
-                last_seen_at=now,
-                acknowledged_at=None,
-                acknowledged_by=None,
-            )
-        )
 
     service._write(seed_legacy_conflict)
     barrier = utcnow() - timedelta(seconds=1)
@@ -1251,115 +1186,7 @@ def test_owner_can_release_legacy_conflict_while_process_is_observed(service, ad
         idempotency_key="release-legacy-conflict-with-process",
     )
     assert released["lease"]["state"] == "RELEASED"
-    assert not any(
-        alert["active"] and alert["resource_id"] == lease_id
-        for alert in service.snapshot(admin)["data"]["alerts"]
-    )
     assert service.list_gpus(admin)["data"][0]["state"] == "BUSY_UNMANAGED"
-
-
-def test_initialize_resolves_stale_alerts_for_terminal_lease(service, admin) -> None:
-    service.ingest_observation(observation(count=1))
-    claimed = service.create_request(
-        admin,
-        request_data("startup-alert-repair"),
-        idempotency_key="startup-alert-repair-claim",
-    )
-    lease_id = claimed["lease"]["id"]
-    service.release_lease(
-        admin,
-        lease_id,
-        reason="workload completed",
-        idempotency_key="startup-alert-repair-release",
-    )
-
-    def seed_stale_alerts(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
-        for alert_type in ("lease_process_conflict", "orphaned_busy"):
-            session.add(
-                Alert(
-                    id=f"startup-{alert_type}",
-                    alert_type=alert_type,
-                    severity="critical",
-                    resource_type="lease",
-                    resource_id=lease_id,
-                    message="stale test alert",
-                    active=True,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    acknowledged_at=None,
-                    acknowledged_by=None,
-                )
-            )
-
-    service._write(seed_stale_alerts)
-    assert {
-        alert["type"]
-        for alert in service.snapshot(admin)["data"]["alerts"]
-        if alert["resource_id"] == lease_id
-    } == {"lease_process_conflict", "orphaned_busy"}
-    service.initialize()
-    assert not any(
-        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
-    )
-
-
-def test_a_collector_round_resolves_alerts_for_a_lease_without_active_resources(
-    service, admin
-) -> None:
-    """An alert about a claim that no longer holds anything is noise.
-
-    The claim is still live, so nothing terminal closes its alerts; only the
-    repair that runs on every collector round can, and it is reached through
-    ingestion rather than any operator verb.
-    """
-
-    service.ingest_observation(observation(count=1))
-    claimed = service.create_request(
-        admin,
-        request_data("resource-alert-repair"),
-        idempotency_key="resource-alert-repair-claim",
-    )
-    lease_id = claimed["lease"]["id"]
-
-    def orphan_alerts_from_resources(session) -> None:  # type: ignore[no-untyped-def]
-        now = utcnow()
-        resources = session.scalars(
-            select(LeaseResource).where(LeaseResource.lease_id == lease_id)
-        ).all()
-        assert resources
-        for resource in resources:
-            resource.active = False
-            resource.released_at = now
-        for alert_type in ("lease_process_conflict", "orphaned_busy"):
-            session.add(
-                Alert(
-                    id=f"reconcile-{alert_type}",
-                    alert_type=alert_type,
-                    severity="critical",
-                    resource_type="lease",
-                    resource_id=lease_id,
-                    message="stale test alert",
-                    active=True,
-                    first_seen_at=now,
-                    last_seen_at=now,
-                    acknowledged_at=None,
-                    acknowledged_by=None,
-                )
-            )
-
-    service._write(orphan_alerts_from_resources)
-    assert {
-        alert["type"]
-        for alert in service.snapshot(admin)["data"]["alerts"]
-        if alert["resource_id"] == lease_id
-    } == {"lease_process_conflict", "orphaned_busy"}
-
-    service.ingest_observation(observation(count=1))
-
-    assert not any(
-        alert["resource_id"] == lease_id for alert in service.snapshot(admin)["data"]["alerts"]
-    )
 
 
 def test_endpoint_operator_can_release_empty_idle_workload_lease(service, admin) -> None:
@@ -2329,7 +2156,7 @@ def _backdate_idle_since(service, lease_id: str, seconds: int, *, gpu_ids=None) 
     service._write(write)
 
 
-def test_idle_workload_lease_is_warned_then_reclaimed_without_a_process(service, admin) -> None:
+def test_idle_workload_lease_is_kept_then_reclaimed_without_a_process(service, admin) -> None:
     """A persistent claim that never runs must not hold GPUs forever.
 
     Routine claims carry no expiry, so before this path nothing ever returned
@@ -2348,15 +2175,12 @@ def test_idle_workload_lease_is_warned_then_reclaimed_without_a_process(service,
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] in {"HELD", "ACTIVE"}
 
-    # Past the alert window the lease is flagged but still owns its GPU.
+    # Past the idle threshold the lease still owns its GPU.
     _backdate_idle_since(service, lease_id, service.inventory.idle_lease_alert_seconds + 5)
     service.ingest_observation(observation(count=1))
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] in {"HELD", "ACTIVE"}
-    alerts = service.snapshot(admin)["data"]["alerts"]
-    idle_alerts = [item for item in alerts if item["type"] == "idle_lease"]
-    assert len(idle_alerts) == 1
-    assert idle_alerts[0]["resource_id"] == lease_id
+    assert _lease_idle_since(service, lease_id) is not None
 
     # Past the reclaim window the GPU comes back to the allocatable pool.
     _backdate_idle_since(service, lease_id, service.inventory.idle_lease_reclaim_seconds + 5)
@@ -2364,11 +2188,6 @@ def test_idle_workload_lease_is_warned_then_reclaimed_without_a_process(service,
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] == "EXPIRED_EMPTY"
     assert lease["release_reason"] == "idle without observed process"
-    assert not [
-        item
-        for item in service.snapshot(admin)["data"]["alerts"]
-        if item["type"] == "idle_lease" and item["active"]
-    ]
     reclaimed = service.create_request(
         admin, request_data("after-reclaim"), idempotency_key="after"
     )
@@ -2496,12 +2315,6 @@ def test_idle_reclaim_keeps_a_claim_whose_holder_still_checks_in(service, admin)
 
     lease = next(item for item in service.list_leases(admin)["data"] if item["id"] == lease_id)
     assert lease["state"] != "EXPIRED_EMPTY"
-    idle_alerts = [
-        item
-        for item in service.snapshot(admin)["data"]["alerts"]
-        if item["type"] == "idle_lease" and item["active"]
-    ]
-    assert len(idle_alerts) == 1, "a human still has to be able to see the idle claim"
 
 
 def test_a_live_holder_keeps_its_spare_cards_when_the_streaks_disagree(service, admin) -> None:
@@ -2705,73 +2518,6 @@ def test_idle_reclaim_keeps_a_gpu_whose_process_appears_before_the_window(servic
     assert marks[late_id] is None, "its idle streak must be cleared"
 
 
-def _active_alerts(service) -> set[tuple[str, str]]:  # noqa: ANN001
-    with service.database.session() as session:
-        return {
-            (alert.alert_type, alert.resource_id)
-            for alert in session.scalars(select(Alert).where(Alert.active.is_(True))).all()
-        }
-
-
-def test_alerts_do_not_outlive_the_lease_or_server_they_describe(service, admin) -> None:
-    """An alert about something that no longer exists is noise, not a warning.
-
-    Nothing used to close a released lease's idle warning or a deleted
-    server's collector warning, so the state page filled with warnings about
-    resources that were gone and the real ones stopped standing out.
-    """
-
-    service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
-    # The alert waits for the same staleness criterion the monitor status
-    # uses: a single failed probe right after a fresh observation must not
-    # raise it, so age the last success before failing the probe.
-    with service.database.session() as session:
-        state = session.scalar(
-            select(ProviderState).where(ProviderState.endpoint_id == "endpoint-b")
-        )
-        assert state is not None
-        state.last_success_at = utcnow() - timedelta(
-            seconds=service.collector.stale_after_seconds + 60
-        )
-        session.commit()
-    service.record_provider_failure("endpoint-b", "CollectionError: timed out")
-    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
-
-    claimed = service.create_request(
-        admin,
-        RequestCreate.model_validate(
-            {
-                "project_id": "project-a",
-                "task_ref": "alert-lifetime",
-                "purpose": "an idle lease raises a warning",
-                "constraints": {"gpu_count": 1, "endpoint_ids": ["endpoint-b"]},
-            }
-        ),
-        idempotency_key="alert-lifetime-claim",
-    )
-    lease_id = claimed["lease"]["id"]
-    with service.database.session() as session:
-        service._upsert_alert(
-            session,
-            alert_type="idle_lease",
-            severity="warning",
-            resource_type="lease",
-            resource_id=lease_id,
-            message="idle for over 10 minutes",
-            now=utcnow(),
-        )
-        session.commit()
-    assert ("idle_lease", lease_id) in _active_alerts(service)
-
-    service.release_lease(
-        admin, lease_id, reason="finished", idempotency_key="alert-lifetime-release"
-    )
-    assert ("idle_lease", lease_id) not in _active_alerts(service)
-
-    service.delete_endpoint(admin, "endpoint-b", idempotency_key="alert-lifetime-delete")
-    assert _active_alerts(service) == set()
-
-
 def _endpoint_monitor(service, endpoint_id: str) -> dict[str, object]:  # noqa: ANN001
     snapshot = service.snapshot(service.local_actor("human"))["data"]
     endpoint = next(item for item in snapshot["endpoints"] if item["id"] == endpoint_id)
@@ -2793,10 +2539,9 @@ def test_single_failed_probe_within_stale_window_stays_online(service, admin) ->
     monitor = _endpoint_monitor(service, "endpoint-b")
     assert monitor["status"] == "ONLINE"
     assert monitor["last_error"] == "TimeoutError: SSH observation timed out"
-    assert ("collector_unreachable", "endpoint-b") not in _active_alerts(service)
 
 
-def test_stale_last_success_with_error_reports_error_and_alerts(service, admin) -> None:
+def test_stale_last_success_with_error_reports_error(service, admin) -> None:
     """Once the last successful observation is itself stale, the failure is believed."""
 
     service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
@@ -2814,10 +2559,9 @@ def test_stale_last_success_with_error_reports_error_and_alerts(service, admin) 
 
     monitor = _endpoint_monitor(service, "endpoint-b")
     assert monitor["status"] == "ERROR"
-    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
 
 
-def test_recovering_observation_clears_error_status_and_alert(service, admin) -> None:
+def test_recovering_observation_clears_error_status(service, admin) -> None:
     """A complete observation is what proves the host is back, and only that."""
 
     service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
@@ -2832,14 +2576,12 @@ def test_recovering_observation_clears_error_status_and_alert(service, admin) ->
         session.commit()
     service.record_provider_failure("endpoint-b", "TimeoutError: SSH observation timed out")
     assert _endpoint_monitor(service, "endpoint-b")["status"] == "ERROR"
-    assert ("collector_unreachable", "endpoint-b") in _active_alerts(service)
 
     service.ingest_observation(observation(endpoint_id="endpoint-b", count=1))
 
     monitor = _endpoint_monitor(service, "endpoint-b")
     assert monitor["status"] == "ONLINE"
     assert monitor["last_error"] is None
-    assert ("collector_unreachable", "endpoint-b") not in _active_alerts(service)
 
 
 def test_gpus_stay_allocatable_through_a_single_probe_jitter(service, admin) -> None:

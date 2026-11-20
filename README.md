@@ -220,8 +220,11 @@ Full per-client notes are in the
 ## 🤖 How an agent uses it
 
 ```text
-gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<group>, gpu_count=<launch config>, task="my task") → use what it returns → gpu_release(lease_id)
+prepare code and data (no cards) → gpu_status → gpu_apply(duration_seconds=<expected seconds>, server_group_id=<group>, gpu_count=<launch config>, task="my task") → start the job at once → gpu_release(lease_id)
 ```
+
+- Apply only when the GPU job is ready to launch, never to reserve cards while
+  coding or debugging; release between runs that will not start soon.
 
 - Routine apply is `gpu_apply(task, gpu_count=1, server_group_id?, server_id?, duration_seconds?, change?, take_over?, project?)`.
   Repeating it is safe: it returns the same task's entry. `change=true` grows or

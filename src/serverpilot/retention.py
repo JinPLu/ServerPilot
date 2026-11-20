@@ -1,8 +1,8 @@
 """How long each kind of record is kept.
 
 One table. Retention used to be a property of exactly two tables that happened
-to have a pruner, while the rest -- every audit event, every replay key, every
-resolved alert -- grew for as long as the control plane ran. Nothing failed
+to have a pruner, while the rest -- every audit event, every replay key -- grew
+for as long as the control plane ran. Nothing failed
 because of it, which is why it went unnoticed: the cost was a database that
 only ever got slower to open and back up.
 
@@ -30,10 +30,6 @@ IDEMPOTENCY_SECONDS: Final = 1 * DAY
 # Long enough to explain last month's incident, not long enough to become the
 # largest thing in the database.
 AUDIT_SECONDS: Final = 30 * DAY
-
-# An alert that is no longer active describes a condition that has already
-# ended. It is kept briefly so a person who steps away still sees what happened.
-RESOLVED_ALERT_SECONDS: Final = 7 * DAY
 
 # Process sightings are evidence for the absence clock, which reasons in
 # minutes. Anything this old is history nothing consults.

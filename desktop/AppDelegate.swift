@@ -11,7 +11,6 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
     private let brokerStore = BrokerStore()
     private var window: NSWindow?
     private var statusItem: StatusItemController?
-    private var alertDelivery: AlertDelivery?
     private var isStarting = false
 
     private lazy var projectRoot: URL? = {
@@ -98,8 +97,6 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
 #endif
         ensureDaemon()
         statusItem = StatusItemController(store: brokerStore) { [weak self] in self?.showMainWindow() }
-        alertDelivery = AlertDelivery(store: brokerStore, notifier: SystemAlertNotifier())
-        alertDelivery?.start()
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -370,12 +367,12 @@ final class DesktopAppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegat
                     endpointTelemetryHistoryClient: FixtureEndpointTelemetryHistoryClient(history: history)
                 )
             } else if let extrasFixture = environment["SERVERPILOT_DESKTOP_EXTRAS_FIXTURE"], !extrasFixture.isEmpty {
-                let extras = try FixtureSnapshots.loadDashboardExtras(from: FixtureSnapshots.resolve(
+                let trends = try FixtureSnapshots.loadDashboardExtras(from: FixtureSnapshots.resolve(
                     extrasFixture,
                     fixturesRoot: fixturesRoot,
                     projectRoot: projectRoot
                 ))
-                brokerStore.useFixture(snapshot: snapshot, utilizationTrends: extras.trends, alerts: extras.alerts)
+                brokerStore.useFixture(snapshot: snapshot, utilizationTrends: trends)
             } else {
                 brokerStore.useFixture(snapshot: snapshot)
             }

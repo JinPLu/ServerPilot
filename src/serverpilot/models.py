@@ -616,38 +616,6 @@ class AuditEvent(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class Alert(Base):
-    __tablename__ = "alerts"
-    __table_args__ = (
-        Index("ix_alert_active", "active", "severity", "last_seen_at"),
-        Index("ix_alert_state", "state", "category", "last_seen_at"),
-        Index("ix_alert_dedupe", "dedupe_key"),
-    )
-
-    id: Mapped[str] = mapped_column(String(64), primary_key=True)
-    alert_type: Mapped[str] = mapped_column(String(80), nullable=False)
-    severity: Mapped[str] = mapped_column(String(32), nullable=False)
-    resource_type: Mapped[str] = mapped_column(String(80), nullable=False)
-    resource_id: Mapped[str] = mapped_column(String(260), nullable=False)
-    message: Mapped[str] = mapped_column(String(1000), nullable=False)
-    active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
-    first_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    last_seen_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    acknowledged_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    #: task_impacted, server_abnormal, resource_idle or capacity_available.
-    category: Mapped[str] = mapped_column(String(32), nullable=False, default="resource_idle")
-    dedupe_key: Mapped[str | None] = mapped_column(String(320))
-    #: pending (debouncing), active, acked or resolved.
-    state: Mapped[str] = mapped_column(String(16), nullable=False, default="active")
-    pending_since: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    notified_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    lease_id: Mapped[str | None] = mapped_column(String(64))
-    project_id: Mapped[str | None] = mapped_column(String(64))
-    task_ref: Mapped[str | None] = mapped_column(String(255))
-    payload_json: Mapped[str | None] = mapped_column(Text)
-    acknowledged_by: Mapped[str | None] = mapped_column(String(128))
-
-
 class IdempotencyRecord(Base):
     __tablename__ = "idempotency_records"
     __table_args__ = (UniqueConstraint("actor_id", "action", "key", name="uq_idempotency"),)

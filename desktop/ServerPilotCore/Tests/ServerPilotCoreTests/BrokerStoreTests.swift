@@ -187,13 +187,6 @@ import Testing
         #expect(store.feedback == Feedback(.failure, "提交失败：连接被拒绝"))
     }
 
-    @Test func testAlertsDecodeAndIgnoreCategoriesFromTheFuture() {
-        let known = AlertRecord(["id": "a", "category": "capacity_available", "message": "m"])
-        #expect(known?.category.title == "有卡可用")
-        #expect(known?.alertIDs == ["a"])
-        #expect(AlertRecord(["id": "b", "category": "new_kind", "message": "m"]) == nil)
-    }
-
     @Test func testFailureBeforeAnySnapshotHasFailedFreshness() async throws {
         let client = ScriptedClient(results: [.failure(BrokerRefreshError.invalidSnapshot)])
         let store = BrokerStore(actorID: "tester", refreshTimeoutSeconds: 1, refreshIntervalSeconds: 0)
@@ -1944,42 +1937,5 @@ private final class StateRouteURLProtocol: URLProtocol, @unchecked Sendable {
         let split = snapshot.processesToStop(holding: lease)
         #expect(split.ending.map(\.pid) == [7, 9])
         #expect(split.leaving.map(\.pid) == [8])
-    }
-}
-
-@MainActor
-@Suite(.serialized) struct ReminderBadgeTests {
-    @Test func confirmingRemindersClearsTheBadgeAtOnce() async throws {
-        let configuration = URLSessionConfiguration.ephemeral
-        configuration.protocolClasses = [StateRouteURLProtocol.self]
-        let store = BrokerStore(
-            actorID: "tester",
-            refreshTimeoutSeconds: 1,
-            refreshIntervalSeconds: 0,
-            mutationSession: URLSession(configuration: configuration)
-        )
-        defer { StateRouteURLProtocol.reset() }
-        store.connectForTesting(
-            snapshotClient: RepeatingClient(BrokerSnapshot.empty),
-            serviceInfo: ServiceInfo(schemaVersion: "v1", capabilities: []),
-            baseURL: URL(string: "http://broker.test/")!
-        )
-        func answer(open: Int, state: String) throws {
-            StateRouteURLProtocol.responseData = try JSONSerialization.data(withJSONObject: [
-                "version": "test", "revision": 1, "open_alerts": open, "updated": 2,
-                "alerts": ["a", "b"].map { id in
-                    ["id": id, "category": "task_ended", "state": state, "message": "任务「\(id)」已完成"]
-                },
-            ])
-        }
-        try answer(open: 2, state: "active")
-        await store.checkPulse()
-        #expect(store.openAlertCount == 2)
-        #expect(store.alerts.map(\.category) == [.taskEnded, .taskEnded])
-
-        try answer(open: 0, state: "acked")
-        await store.markAlerts(["a", "b"], acked: true)
-        #expect(store.openAlertCount == 0)
-        #expect(store.alerts.allSatisfy { !$0.isOpen })
     }
 }

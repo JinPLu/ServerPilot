@@ -36,7 +36,6 @@ INITIAL_TABLES = frozenset(
         "reservations",
         "maintenance_windows",
         "audit_events",
-        "alerts",
         "idempotency_records",
         "provider_states",
     }
@@ -60,7 +59,8 @@ _RETIRED_COLUMNS = (("endpoints", "enabled"), ("gpu_devices", "enabled"))
 _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_seconds")
 
 
-# 20261030_0041 adds these, 20261104_0042 adds idle_checked_at, 20261111_0044
+# 20261030_0041 adds these (and extends alerts, rebuilt by hand below),
+# 20261104_0042 adds idle_checked_at, 20261111_0044
 # the keepalive utilization target and 20261111_0045 the two memory targets,
 # each with its check. The indexes go first: one
 # of them names task_ref, which _create_retired_request_tables removes; a check
@@ -68,14 +68,10 @@ _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_se
 _LATER_INDEXES = (
     ("leases", "uq_active_owned_task"),
     ("audit_events", "ix_audit_resource"),
-    ("alerts", "ix_alert_state"),
-    ("alerts", "ix_alert_dedupe"),
 )
 _LATER_COLUMNS = {
     "leases": ("owner_session_id", "resource_epoch", "agent_seen_audit_id"),
     "lease_resources": ("added_at", "release_reason", "released_by", "keep_idle_windows", "idle_checked_at"),
-    "alerts": ("category", "dedupe_key", "state", "pending_since", "notified_at", "lease_id",
-               "project_id", "task_ref", "payload_json"),
     "endpoints": (
         "keepalive_target_utilization_pct",
         "keepalive_target_gpu_memory_pct",
@@ -143,8 +139,33 @@ def _create_retired_request_tables() -> None:
     op.create_index("uq_leases_request_id", "leases", ["request_id"], unique=True)
 
 
+def _create_retired_alerts_table() -> None:
+    """Rebuild the alerts table as this revision created it.
+
+    The ORM no longer describes it; 20261030_0041 extends it and
+    20261119_0046 is where it goes away.
+    """
+
+    op.create_table(
+        "alerts",
+        sa.Column("id", sa.String(length=64), primary_key=True),
+        sa.Column("alert_type", sa.String(length=80), nullable=False),
+        sa.Column("severity", sa.String(length=32), nullable=False),
+        sa.Column("resource_type", sa.String(length=80), nullable=False),
+        sa.Column("resource_id", sa.String(length=260), nullable=False),
+        sa.Column("message", sa.String(length=1000), nullable=False),
+        sa.Column("active", sa.Boolean(), nullable=False),
+        sa.Column("first_seen_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("last_seen_at", sa.DateTime(timezone=True), nullable=False),
+        sa.Column("acknowledged_at", sa.DateTime(timezone=True)),
+        sa.Column("acknowledged_by", sa.String(length=128)),
+    )
+    op.create_index("ix_alert_active", "alerts", ["active", "severity", "last_seen_at"])
+
+
 def upgrade() -> None:
     Base.metadata.create_all(bind=op.get_bind(), tables=_initial_tables(), checkfirst=False)
+    _create_retired_alerts_table()
     _drop_later_additions()
     # Node scoping is introduced in 0040, not in the original schema.
     with op.batch_alter_table("gpu_devices") as batch:
@@ -162,4 +183,6 @@ def upgrade() -> None:
 def downgrade() -> None:
     op.drop_index("uq_leases_request_id", table_name="leases")
     op.drop_table("allocation_requests")
+    op.drop_index("ix_alert_active", table_name="alerts")
+    op.drop_table("alerts")
     Base.metadata.drop_all(bind=op.get_bind(), tables=_initial_tables(), checkfirst=False)

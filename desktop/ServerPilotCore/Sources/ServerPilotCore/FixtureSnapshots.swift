@@ -93,19 +93,18 @@ public enum FixtureSnapshots {
         return history
     }
 
-    /// What a live store fetches beside the state: the trend lines and the
-    /// reminders. Separate from the state fixture for the same reason history is.
-    public static func loadDashboardExtras(from url: URL) throws -> (trends: UtilizationTrends, alerts: [AlertRecord]) {
+    /// What a live store fetches beside the state: the trend lines. Separate
+    /// from the state fixture for the same reason history is.
+    public static func loadDashboardExtras(from url: URL) throws -> UtilizationTrends {
         let data = try Data(contentsOf: url)
         guard
             let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
             let payload = object["trends"] as? [String: Any],
-            let trends = UtilizationTrends(payload: payload),
-            let rows = object["alerts"] as? [[String: Any]]
+            let trends = UtilizationTrends(payload: payload)
         else {
             throw FixtureSnapshotError.invalid(url)
         }
-        return (trends, rows.compactMap(AlertRecord.init))
+        return trends
     }
 }
 

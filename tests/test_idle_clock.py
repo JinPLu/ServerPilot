@@ -7,7 +7,7 @@ from datetime import timedelta
 import pytest
 from sqlalchemy import select
 
-from serverpilot.models import Alert, Lease, LeaseResource
+from serverpilot.models import Lease, LeaseResource
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation
 from tests.test_service import _make_persistent, request_data
@@ -56,16 +56,6 @@ def _observed_idle_seconds(service, clock: Clock) -> float | None:  # type: igno
     return service._read(read)
 
 
-def _reminder_state(service, lease_id: str) -> str | None:  # type: ignore[no-untyped-def]
-    return service._read(
-        lambda session: session.scalar(
-            select(Alert.state)
-            .where(Alert.dedupe_key == f"idle:{lease_id}")
-            .order_by(Alert.first_seen_at.desc())
-        )
-    )
-
-
 @pytest.mark.parametrize("first_probe_fails", [False, True])
 def test_a_sleeping_mac_does_not_count_as_idle_time(service, admin, clock, first_probe_fails) -> None:
     """Nothing runs while the lid is closed, not even a failure to record."""
@@ -109,20 +99,3 @@ def test_an_outage_that_could_hide_a_job_starts_the_clock_over(service, admin, c
     assert _lease_state(service, lease_id) == "HELD"
     _report(service, clock)
     assert _observed_idle_seconds(service, clock) == 0
-
-
-def test_a_reminder_stands_while_its_cards_cannot_be_seen(service, admin, clock) -> None:
-    """Nothing being known is not a recovery."""
-
-    lease_id = _idle_claim(service, admin, clock)
-    assert _reminder_state(service, lease_id) == "active"
-
-    for _ in range(36):
-        clock.tick(10)
-        _report(service, clock, "endpoint-b")
-    assert _reminder_state(service, lease_id) == "active"
-
-    # Back in view with a fresh clock, there is no longer a long idle to report.
-    clock.tick(20)
-    _report(service, clock)
-    assert _reminder_state(service, lease_id) == "resolved"

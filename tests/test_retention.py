@@ -7,7 +7,7 @@ from datetime import timedelta
 from sqlalchemy import select, text
 
 from serverpilot import retention
-from serverpilot.models import Alert, AuditEvent, IdempotencyRecord, TelemetrySnapshot
+from serverpilot.models import AuditEvent, IdempotencyRecord, TelemetrySnapshot
 from serverpilot.service import BrokerService
 from serverpilot.timeutil import utcnow
 from tests.helpers import observation
@@ -94,48 +94,6 @@ def test_audit_history_older_than_its_window_is_dropped(
 
     deleted = service.prune_expired()
     assert deleted["audit_events"] == expected_removed
-
-
-def test_an_active_alert_is_never_pruned_however_old_it_is(
-    service: BrokerService, admin
-) -> None:
-    """Age does not end a condition. Only resolution does."""
-
-    old = utcnow() - timedelta(seconds=retention.RESOLVED_ALERT_SECONDS * 10)
-    with service.database.session() as session:
-        session.add(
-            Alert(
-                id="still-happening",
-                alert_type="collector_unreachable",
-                severity="warning",
-                resource_type="endpoint",
-                resource_id="endpoint-a",
-                message="still happening",
-                active=True,
-                first_seen_at=old,
-                last_seen_at=old,
-            )
-        )
-        session.add(
-            Alert(
-                id="over-and-done",
-                alert_type="collector_unreachable",
-                severity="warning",
-                resource_type="endpoint",
-                resource_id="endpoint-b",
-                message="over and done",
-                active=False,
-                first_seen_at=old,
-                last_seen_at=old,
-            )
-        )
-        session.commit()
-
-    service.prune_expired()
-    with service.database.session() as session:
-        remaining = {item.id for item in session.scalars(select(Alert)).all()}
-    assert "still-happening" in remaining
-    assert "over-and-done" not in remaining
 
 
 def test_pruning_leaves_current_telemetry_and_live_leases_alone(

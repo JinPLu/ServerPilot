@@ -3,16 +3,16 @@
 Use the local `serverpilot` MCP.
 
 1. `gpu_status(task?, server_id?, telemetry?)`
-2. `gpu_apply(task, gpu_count=1, server_group_id?, server_id?, duration_seconds?, change?, take_over?, project?)` — declares what a task needs (task=what this work is, stable across restarts)
+2. `gpu_apply(task, gpu_count=1, server_group_id?, server_id?, duration_seconds?, change?, take_over?, project?)` — declares what a task needs once its job is ready to start (task=what this work is, stable across restarts)
 3. `gpu_release(task|lease_id, gpu_ids?, outcome=completed)`
 
 These three tools are the whole MCP surface; server deletion and other lifecycle work happen in the app or through REST.
 
-Work in this order: gpu_status(); gpu_apply(task, gpu_count); enter servers[]; while working, gpu_status(task) within heartbeat_within_seconds; gpu_release(task, outcome) when done.
+Work in this order: prepare code, data and environment first, which needs no cards; gpu_status(); gpu_apply(task, gpu_count) when the GPU job is ready to launch; enter servers[] and start it at once; while it runs, gpu_status(task) within heartbeat_within_seconds; gpu_release(task, outcome) when it ends.
 
 Every reply has ok. ok=false carries error{code,message,retryable,retry_after_seconds?,next?,details?}: an answer to act on. Follow error.next when present; next.human is a step only a person can take, so tell the user and stop retrying.
 
-gpu_apply gives cards now or says why; nothing queues. gpu_count comes from your launch config, never from free capacity. Choose server_group_id for grouped hosts; server_id must not pin a grouped host. To wait, repeat it after retry_after_seconds; eta=null means no honest estimate. Repeating it is always safe: it returns your entry after a restart and keeps idle cards you still want. change=true grows or shrinks the task, and a running process cannot see added cards. Sessions of one project share its tasks; take_over=true takes one from before sessions, never another project's. duration_seconds is required on clusters, whose jobs end at that limit.
+Apply only to start a GPU job now, never to reserve cards while coding, setting up or debugging: cards that run nothing are kept from everyone else. If your next run will not start soon, gpu_release and apply again when it is ready. gpu_apply gives cards now or says why; nothing queues. gpu_count comes from your launch config, never from free capacity. Choose server_group_id for grouped hosts; server_id must not pin a grouped host. To wait, repeat it after retry_after_seconds; eta=null means no honest estimate. Repeating it is always safe: it returns your entry after a restart and keeps idle cards you still want. change=true grows or shrinks the task, and a running process cannot see added cards. Sessions of one project share its tasks; take_over=true takes one from before sessions, never another project's. duration_seconds is required on clusters, whose jobs end at that limit.
 
 Enter each server in servers[]: ssh, cwd, then set env. cwd is a working directory, never a code repository. Allocation entries require entering the existing provider allocation first: entry.argv opens a terminal; without one, prefix commands with entry.exec_prefix. verified=false means probe before use. Never guess a selector.
 

@@ -147,8 +147,10 @@ Claude Code 安装时会询问是否允许 Agent 调用这些工具时不再确�
 ## 🤖 Agent 用法
 
 ```text
-gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, task="任务名") → 使用返回的分配 → gpu_release(lease_id)
+准备好代码和数据（不需要卡）→ gpu_status → gpu_apply(server_group_id=<分组>, gpu_count=<启动配置>, task="任务名") → 立即启动任务 → gpu_release(lease_id)
 ```
+
+- 任务准备好要上卡时才申请，不要在写代码、调环境时先占着卡；下一次运行不会马上开始，就先归还，准备好再申请。
 
 - 日常申请签名是 `gpu_apply(server_group_id?, server_id?, gpu_count=1, task?)`。Agent 不传 GPU ID，`gpu_apply` 负责选卡，一份租约始终只落在一台机器上。`gpu_count` 来自启动脚本或配置中的任务并行度，安全默认 1，绝不从空闲容量推断。
 - 已分组主机（裸机 `direct` 和插件 `delegated`）传 `server_group_id`，再由分配器在组内 best-fit；`server_id` 只留给未分组主机。插件接入的集群以正常分组出现，带 `allocation`、`limits` 和 `largest_allocatable_block`（一次申请能拿到的最大卡数，不是池子剩余总数；`null` 表示未知，不要编造数字）。

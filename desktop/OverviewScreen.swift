@@ -9,26 +9,22 @@ import Charts
 /// on it.  Servers are tiles here because this page is for the whole fleet at a
 /// glance; comparing machines is the server table's job.
 struct OverviewDashboard: View {
-    private static let shownAlerts = 3
     private static let tileMinimumWidth: CGFloat = 320
 
     @ObservedObject var store: BrokerStore
     let openEndpoint: (EndpointRecord) -> Void
     let navigate: (DashboardSection, EndpointFilter) -> Void
 
-    private var openAlerts: [AlertRecord] { store.alerts.filter(\.isOpen) }
     private var summary: ResourceSummary { store.snapshot.summary }
     private var fleets: [ServerFleet] { serverFleets(in: store.snapshot) }
 
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 18) {
-                // Side by side at every width the window allows.  Measuring whether
-                // they fit read a long alert's full length, however it truncates.
+                // Side by side at every width the window allows.
                 HStack(alignment: .top, spacing: 12) {
                     capacity.frame(maxWidth: .infinity)
                     trend.frame(maxWidth: .infinity)
-                    attention.frame(maxWidth: .infinity)
                 }
                 ForEach(fleets) { fleet in
                     VStack(alignment: .leading, spacing: 10) {
@@ -208,68 +204,6 @@ struct OverviewDashboard: View {
         if seconds < 3600 { return "未采集 \(seconds / 60) 分钟" }
         let hours = Double(seconds) / 3600
         return "未采集 \(hours.formatted(.number.precision(.fractionLength(0...1)))) 小时"
-    }
-
-    /// Only what a person has to act on.  A card coming free is good news: the
-    /// notification tells it, and the alerts page keeps it.
-    private var problems: [AlertRecord] {
-        openAlerts.filter { $0.category != .capacityAvailable }
-    }
-
-    private var attention: some View {
-        HomeCard(padding: 16) {
-            VStack(alignment: .leading, spacing: 10) {
-                HStack {
-                    Text("需要处理")
-                        .font(Typography.label)
-                        .foregroundStyle(DesignTokens.mutedInk)
-                    Spacer()
-                    if problems.count > Self.shownAlerts {
-                        Button("全部 \(problems.count)") { navigate(.alerts, .all) }
-                            .buttonStyle(.link)
-                            .font(Typography.annotation)
-                    }
-                }
-                if problems.isEmpty {
-                    Spacer(minLength: 0)
-                    Label(
-                        isCurrent ? "现在没有要处理的事" : "暂时无法确认",
-                        systemImage: isCurrent ? "checkmark.circle" : "questionmark.circle"
-                    )
-                        .font(Typography.body)
-                        .foregroundStyle(DesignTokens.mutedInk)
-                    Spacer(minLength: 0)
-                } else {
-                    ForEach(problems.prefix(Self.shownAlerts)) { alert in
-                        Button {
-                            // An ended task is no longer on the tasks page; its reminder is the record.
-                            navigate(
-                                alert.category == .serverAbnormal ? .resources
-                                    : (alert.category == .taskEnded ? .alerts : .leases),
-                                .all
-                            )
-                        } label: {
-                            HStack(alignment: .firstTextBaseline, spacing: 8) {
-                                Circle()
-                                    .fill(alert.category == .serverAbnormal ? DesignTokens.danger : DesignTokens.nearFullCard)
-                                    .frame(width: 8, height: 8)
-                                Text(alert.message)
-                                    .font(Typography.body)
-                                    .foregroundStyle(DesignTokens.ink)
-                                    .lineLimit(1)
-                                    .truncationMode(.tail)
-                                Spacer(minLength: 0)
-                            }
-                            .contentShape(Rectangle())
-                        }
-                        .buttonStyle(.plain)
-                        .help(alert.message)
-                    }
-                    Spacer(minLength: 0)
-                }
-            }
-            .frame(height: 124)
-        }
     }
 
     private func fleetHeadline(_ fleet: ServerFleet) -> String {

@@ -580,9 +580,3 @@ class TakeOverBody(StrictModel):
     project: str = Field(min_length=1, max_length=64)
     reason: str = Field(min_length=1, max_length=300)
     force: bool = False
-
-
-class AlertMark(StrictModel):
-    alert_ids: list[str] = Field(min_length=1, max_length=200)
-    notified: bool = False
-    acked: bool = False

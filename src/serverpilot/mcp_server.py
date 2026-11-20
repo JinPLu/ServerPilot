@@ -1142,7 +1142,7 @@ async def gpu_apply(
     project: Annotated[str | None, Field(description="Only when this client gives no project root; normally derived")] = None,
     context: Context | None = None,
 ) -> dict[str, Any]:
-    """Declare what a task needs. Returns its cards (model, VRAM) and how to enter them, or why not; nothing queues. Repeating is safe."""
+    """Declare what a task needs, only once its GPU job is ready to start: cards that run nothing are kept from others. Returns its cards (model, VRAM) and how to enter them, or why not; nothing queues. Repeating is safe."""
 
     try:
         client, resolved = await _identity(context, project)
@@ -1161,8 +1161,9 @@ async def gpu_apply(
         "heartbeat_within_seconds": payload.get("heartbeat_within_seconds"),
         "servers": _cards_by_server(lease),
         "next": (
-            "Enter each server in servers[]. While the job runs, call gpu_status(task) "
-            "within heartbeat_within_seconds; call gpu_release(task, outcome) when it ends."
+            "Enter each server in servers[] and start the job now. While it runs, call "
+            "gpu_status(task) within heartbeat_within_seconds; call gpu_release(task, outcome) "
+            "when it ends, or if the next run will not start soon."
         ),
     }
     if payload.get("added_gpu_ids"):
