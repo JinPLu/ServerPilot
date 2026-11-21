@@ -4,7 +4,7 @@
 
 This changelog records user-visible changes; implementation details belong in Git history.
 
-## Unreleased
+## 5.7.0 - 2026-11-21
 
 - **Reminders are gone.** The reminders page in the sidebar, the overview's "需要处理" card, the count beside the menu bar icon and system notifications have been removed; the overview's top row now holds capacity and utilization only. The `/api/v2/alerts` routes and the `alerts` field of the state snapshot are removed too, and existing reminder records are deleted on upgrade.
 - **Keepalive can keep CPU busy too.** The "占卡目标" menu in a server's details gains "CPU 负载" (0% to 90%), read the way the server table's CPU column is: against the container's CPU quota where there is one, otherwise the whole host. Like memory it is shared out per card, reaching its target when every card on the server is held; a card handed to a task takes its share with it, held cards give way when other programs need the CPU, and nothing is burned while CPU usage cannot be read. It defaults to 0%, so servers keep their current behavior until you raise it on one.
