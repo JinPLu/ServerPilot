@@ -378,6 +378,7 @@ class EndpointKeepaliveRequest(StrictModel):
     enabled: bool
     target_utilization_pct: int = keepalive_target_field("target_utilization_pct", required=True)
     target_gpu_memory_pct: int = keepalive_target_field("target_gpu_memory_pct", required=True)
+    target_cpu_pct: int = keepalive_target_field("target_cpu_pct", required=True)
     target_memory_pct: int = keepalive_target_field("target_memory_pct", required=True)
 
     @property
@@ -385,6 +386,7 @@ class EndpointKeepaliveRequest(StrictModel):
         return KeepaliveTargets(
             target_utilization_pct=self.target_utilization_pct,
             target_gpu_memory_pct=self.target_gpu_memory_pct,
+            target_cpu_pct=self.target_cpu_pct,
             target_memory_pct=self.target_memory_pct,
         )
 

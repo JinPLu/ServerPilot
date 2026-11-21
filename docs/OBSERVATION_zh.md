@@ -162,8 +162,8 @@ payload。旧 v2 wire/state 版本直接拒绝。预检和启停走与采集同�
 「归属待确认」，人可以在监控端执行「清理遗留归属」；ServerPilot 会先重新采集，确认相关
 GPU 上都没有进程后才释放，只看 0% 利用率不会直接释放。
 
-每张目标 GPU 都有独立的内部租约、worker 和健康状态。worker 把三项读数拉到这台服务器设置的
-占卡目标（App 服务器详情的「占卡目标」菜单，默认都是 85%）：
+每张目标 GPU 都有独立的内部租约、worker 和健康状态。worker 把四项读数拉到这台服务器设置的
+占卡目标（App 服务器详情的「占卡目标」菜单；CPU 默认 0%，其余默认 85%）：
 
 - **GPU 利用率**（10%–100%）：启动时测一次矩阵乘法耗时，把计算按每批约 4 毫秒 GPU 时间
   排队，始终让下一批排在正在跑的那批后面，每 100 毫秒周期里只在目标比例的时间内计算，并按
@@ -175,14 +175,22 @@ GPU 上都没有进程后才释放，只看 0% 利用率不会直接释放。
   读一次内存，按距目标的余量（除以 GPU 数）增减，各卡合起来补齐而不越过目标；别的程序用多了，
   占卡跟着退让。读数与采集探针一致：主机看 MemTotal 与 MemAvailable，有 cgroup v2 内存上限的
   容器另看 memory.max 与 memory.current，取两者中更紧的那个。worker 启动时把自己的
-  `oom_score_adj` 设为 1000，内存耗尽时内核先结束占卡程序；读不到内存时全部放掉。
+  `oom_score_adj` 设为 1000，内存耗尽时内核先结束占卡程序；读不到内存时全部放掉。补内存用
+  PyTorch 写入（写的时候不占 Python 的 GIL），不会卡住 GPU 计算的下发。
+- **CPU 负载**（0%–100%，0 表示不占，默认 0）：与内存同一个分摊与步进算法，单位换成核：每张
+  占住的卡最多烧「目标 × 核数 ÷ 这台服务器的 GPU 数」个核，worker 按这个份额向上取整起几个
+  线程，每 100 毫秒周期里按同一比例做 SHA-256 哈希（哈希时释放 GIL），其余时间空闲。每 5 秒
+  取两次读数之差得到在用核数，按距目标的余量（除以 GPU 数）调整份额；读不到或两次读数对不上
+  时不烧。读数与采集探针、服务端算法一致：主机看 `/proc/stat`（idle 与 iowait 以外都算忙），
+  有 cgroup v2 CPU 配额的容器另看 `cpu.max` 与 `cpu.stat` 的 `usage_usec`，取两者中更紧的那个。
 
-只用单个 PyTorch CPU 线程，等待时用阻塞事件而不空转；稳态下无磁盘 / 网络 I/O，只每隔几秒
-读一次内核的内存数字。正在运行的 worker 保持启动时的目标；改任何一项时控制面先停掉这台服务器
+GPU 计算只用单个 PyTorch CPU 线程，等待时用阻塞事件而不空转；稳态下无磁盘 / 网络 I/O，只每隔
+几秒读一次内核的 CPU 与内存数字。正在运行的 worker 保持启动时的目标；改任何一项时控制面先停掉这台服务器
 正在占卡的 worker、重新采集确认，再按新目标启动。目标随启停请求的 `target_utilization_pct`、
-`target_gpu_memory_pct`、`target_memory_pct` 下发；`--protocol-info` 带对应能力
-（`target_utilization`、`target_gpu_memory`、`target_memory`）的 helper 才按它控制，旧 helper
-忽略这些字段，继续按旧的固定节奏（实测 A800 约 65%、B20Z 约 43%）、固定 80% 显存且不占内存。
+`target_gpu_memory_pct`、`target_cpu_pct`、`target_memory_pct` 下发；`--protocol-info` 带对应
+能力（`target_utilization`、`target_gpu_memory`、`target_cpu`、`target_memory`）的 helper 才按它
+控制，旧 helper 忽略这些字段，继续按旧的固定节奏（实测 A800 约 65%、B20Z 约 43%）、固定 80%
+显存且不占内存与 CPU。
 实际的 CPU、RSS、GPU 干扰和停止响应，仍须在获授权的目标主机上验证。
 
 即时受管的申请，只有在普通分配失败、且服务已规划出完整并验证过的逐卡回收方案时，才会

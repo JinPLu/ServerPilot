@@ -8,6 +8,7 @@
 
 ## Project current state
 
+- **未发布（11 月 21 日）**：占卡加入 CPU 目标（默认 0%，口径同服务器表“CPU 负载”，与内存同一套按卡分摊、按余量步进的算法，烧 CPU 用释放 GIL 的哈希线程），并修掉补内存时持有 GIL、启动后约 1 分钟 GPU 利用率接近 0 的问题。原话与取舍见[记录](records/keepalive-target-utilization.md)。
 - **未发布（11 月 19 日）**：按用户要求删除“提醒”（App 页面、总览卡、菜单栏数字、系统通知、`alerts` 表与接口全部去掉），并改写 Agent 规则为用卡前再申请、不跑就归还，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)同日条目。
 - **5.6.0（11 月 15 日）**：每台服务器可分别设置占卡时的 GPU 利用率、显存占用率、内存占用率（用户选定三项分开设、内存按占住的卡分摊；默认都是 85%，内存可设 0 不占）。worker 按目标比例计算、显存补到目标、内存每 5 秒按余量收放并设 `oom_score_adj=1000`；改目标时先停后起。helper 需在各服务器升级后才生效，真实服务器读数未测。原话与取舍见[记录](records/keepalive-target-utilization.md)。同版应用户要求，`gpu_apply` 的每张卡带型号与显存（逐卡写，因为挑卡不分型号），`gpu_status(task)` 按型号合并列出，集群任务的卡数不再报 0，见[状态文档](../IMPLEMENTATION_STATUS_zh.md)同日条目。
 - **5.5.0（11 月 11 日）**：容器服务器上归还任务也能结束进程（按 `CUDA_VISIBLE_DEVICES` 认进程，认不出的不碰，不再误报已退出）。按用户要求测试 Agent 调度与 App 交互并修复：超出任何服务器卡数的申请改回不可重试的 `gpu_count_too_large`，错写服务器编号直接说找不到，`take_over` 不再为别的项目的同名任务另开新卡；App 等服务器的操作按服务端最坏耗时给超时，确认框只写真会发生的事，删除被占卡挡住时说明要先结束占卡。测试方法、未验证项见[状态文档](../IMPLEMENTATION_STATUS_zh.md)同日条目。
@@ -107,7 +108,7 @@
 
 ### records/
 
-- [占卡目标按服务器设置](records/keepalive-target-utilization.md) — 用户要求自定义占卡利用率（默认 85%），随后要求显存、内存也拉上去并选定三项分开设、内存按卡分摊；为何改目标要先停后起、内存如何收放、旧 helper 如何兼容。
+- [占卡目标按服务器设置](records/keepalive-target-utilization.md) — 用户要求自定义占卡利用率（默认 85%），随后要求显存、内存、CPU 也拉上去，选定分开设、按卡分摊（CPU 默认 0）；为何改目标要先停后起、内存如何收放、旧 helper 如何兼容。
 - [归还即结束进程、Agent 清理无人任务、30 秒平均](records/return-ends-processes-and-agent-cleanup.md) — 改变“ServerPilot 不停止用户程序”边界的用户决定原话，以及三处取舍。
 - [占卡程序与 agent 工作负载相撞（p8908）](records/keepalive-workload-collision-p8908.md) — keepalive 把 80% 显存占到 agent 正在跑的卡上；根因是「此刻没观察到进程」被当成「活干完了」；四条修法已落地（唯一存活原语 + 心跳、进程缺席由 `absent_since` 证据链计时且断连重置、人工还卡与自动回收共用判据、起卡冷却期），周转代价已收敛到 60 秒连续健康观测。
 - [端点 monitor 状态的两条正交轴拆分](records/endpoint-monitor-status-axis-split.md) — 端点 `monitor` 状态该由什么判据推导、消费者该读哪个字段;根因是连通性轴与人为设定轴被压进同一枚举、且连通性判据用错了时钟,已修法落地并通过对抗性审查。

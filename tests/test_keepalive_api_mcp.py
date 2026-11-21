@@ -2409,6 +2409,7 @@ def _detailed_status(server, client):  # type: ignore[no-untyped-def]
         {"target_utilization_pct": 95},
         {"target_gpu_memory_pct": 95},
         {"target_memory_pct": 0},
+        {"target_cpu_pct": 50},
     ],
 )
 def test_a_new_target_restarts_the_running_workers_at_it(
@@ -2457,7 +2458,10 @@ def test_a_target_set_while_off_waits_for_the_next_start(
     app, _ = _keepalive_app(build_app, inventory, adapter=adapter, collector=collector)
     client = TestClient(app)
     path = "/api/v2/endpoints/endpoint-a/keepalive"
-    chosen = {"target_utilization_pct": 60, "target_gpu_memory_pct": 95, "target_memory_pct": 50}
+    chosen = {
+        "target_utilization_pct": 60, "target_gpu_memory_pct": 95, "target_cpu_pct": 40,
+        "target_memory_pct": 50,
+    }
 
     assert client.post(
         path, json=_keepalive(False, **chosen), headers=_headers("off-chosen")
@@ -2476,6 +2480,8 @@ def test_a_target_set_while_off_waits_for_the_next_start(
         ("target_utilization_pct", 101),
         ("target_gpu_memory_pct", 9),
         ("target_gpu_memory_pct", 101),
+        ("target_cpu_pct", -1),
+        ("target_cpu_pct", 101),
         ("target_memory_pct", -1),
         ("target_memory_pct", 101),
     ],

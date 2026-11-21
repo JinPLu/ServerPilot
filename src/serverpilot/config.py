@@ -313,6 +313,7 @@ class EndpointConfig(BaseModel):
     # What each held card is driven to; see KEEPALIVE_TARGET_LIMITS.
     keepalive_target_utilization_pct: int = keepalive_target_field("target_utilization_pct")
     keepalive_target_gpu_memory_pct: int = keepalive_target_field("target_gpu_memory_pct")
+    keepalive_target_cpu_pct: int = keepalive_target_field("target_cpu_pct")
     keepalive_target_memory_pct: int = keepalive_target_field("target_memory_pct")
     labels: list[str] = Field(default_factory=list)
     storage_group: str | None = Field(default=None, max_length=120)
@@ -328,6 +329,7 @@ class EndpointConfig(BaseModel):
         return KeepaliveTargets(
             target_utilization_pct=self.keepalive_target_utilization_pct,
             target_gpu_memory_pct=self.keepalive_target_gpu_memory_pct,
+            target_cpu_pct=self.keepalive_target_cpu_pct,
             target_memory_pct=self.keepalive_target_memory_pct,
         )
 

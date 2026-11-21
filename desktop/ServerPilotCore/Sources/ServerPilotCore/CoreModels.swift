@@ -266,6 +266,7 @@ public enum ResourceText {
 public enum KeepaliveTarget: String, CaseIterable, Sendable {
     case utilization = "target_utilization_pct"
     case gpuMemory = "target_gpu_memory_pct"
+    case cpu = "target_cpu_pct"
     case memory = "target_memory_pct"
 
     /// Named like the server table's columns, which are what it drives.
@@ -273,19 +274,28 @@ public enum KeepaliveTarget: String, CaseIterable, Sendable {
         switch self {
         case .utilization: "GPU 利用率"
         case .gpuMemory: "显存占用率"
+        case .cpu: "CPU 负载"
         case .memory: "内存占用率"
         }
     }
 
     /// What the app offers. The control plane accepts 10–100 for the card's
-    /// readings and 0–100 for host memory, where 0 holds none; the app stops
-    /// host memory at 95 so the server always keeps some to start a task.
+    /// readings and 0–100 for the server's CPU and memory, where 0 holds
+    /// none; the app stops those short of full so the server always keeps
+    /// some to start a task.
     public var choices: [Int] {
         switch self {
         case .utilization: [30, 50, 60, 70, 80, 85, 90, 95, 100]
         case .gpuMemory: [50, 60, 70, 80, 85, 90, 95, 100]
+        case .cpu: [0, 30, 50, 60, 70, 80, 85, 90]
         case .memory: [0, 30, 50, 60, 70, 80, 85, 90, 95]
         }
+    }
+
+    /// The control plane's own default, for a server that has not set one:
+    /// CPU is burned only where a server asks for it.
+    public var defaultPct: Int {
+        self == .cpu ? 0 : 85
     }
 
     /// What it does to the server, for the menu's help.
@@ -293,6 +303,7 @@ public enum KeepaliveTarget: String, CaseIterable, Sendable {
         switch self {
         case .utilization: "每张占住的卡计算的时间比例。"
         case .gpuMemory: "每张占住的卡的显存占到多少。"
+        case .cpu: "整台服务器的 CPU 利用率拉到多少，按卡分摊：全部卡占住时达到，任务申请走一张卡就让出它那一份，别的程序用多了就退让；0% 不占 CPU。"
         case .memory: "整台服务器的内存占到多少，按卡分摊：全部卡占住时达到，任务申请走一张卡就让出它那一份；0% 不占内存。"
         }
     }
@@ -302,21 +313,18 @@ public enum KeepaliveTarget: String, CaseIterable, Sendable {
 public struct KeepaliveTargets: Equatable, Sendable {
     public var values: [KeepaliveTarget: Int]
 
-    /// The control plane's own default, for a server that has not set one.
-    public static let defaultPct = 85
-
     public init(_ values: [KeepaliveTarget: Int] = [:]) {
         self.values = values
     }
 
     public init(raw: [String: Any]) {
         values = Dictionary(uniqueKeysWithValues: KeepaliveTarget.allCases.map {
-            ($0, raw.int($0.rawValue, default: Self.defaultPct))
+            ($0, raw.int($0.rawValue, default: $0.defaultPct))
         })
     }
 
     public subscript(target: KeepaliveTarget) -> Int {
-        get { values[target] ?? Self.defaultPct }
+        get { values[target] ?? target.defaultPct }
         set { values[target] = newValue }
     }
 
@@ -330,7 +338,7 @@ public struct KeepaliveTargets: Equatable, Sendable {
         Dictionary(uniqueKeysWithValues: KeepaliveTarget.allCases.map { ($0.rawValue, self[$0]) })
     }
 
-    /// "GPU 利用率 85%、显存占用率 85%、内存占用率 85%", for the targets given.
+    /// "GPU 利用率 85%、显存占用率 85%、CPU 负载 0%、内存占用率 85%", for the targets given.
     public func describe(_ targets: [KeepaliveTarget] = KeepaliveTarget.allCases) -> String {
         targets.map { "\($0.label) \(self[$0])%" }.joined(separator: "、")
     }

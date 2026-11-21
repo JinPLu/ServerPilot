@@ -755,7 +755,7 @@ import Testing
         store.setEndpointKeepalive(
             endpoint,
             enabled: true,
-            targets: KeepaliveTargets([.utilization: 90, .gpuMemory: 95, .memory: 0])
+            targets: KeepaliveTargets([.utilization: 90, .gpuMemory: 95, .cpu: 40, .memory: 0])
         ) { success, message in
             keepaliveRecorder.success = success
             keepaliveRecorder.message = message
@@ -769,9 +769,11 @@ import Testing
         #expect(keepalivePayload["enabled"] as? Bool == true)
         #expect(keepalivePayload["target_utilization_pct"] as? Int == 90)
         #expect(keepalivePayload["target_gpu_memory_pct"] as? Int == 95)
+        #expect(keepalivePayload["target_cpu_pct"] as? Int == 40)
         #expect(keepalivePayload["target_memory_pct"] as? Int == 0)
         #expect(Set(keepalivePayload.keys) == Set([
-            "enabled", "target_utilization_pct", "target_gpu_memory_pct", "target_memory_pct",
+            "enabled", "target_utilization_pct", "target_gpu_memory_pct", "target_cpu_pct",
+            "target_memory_pct",
         ]))
 
         let conflictRecorder = CompletionRecorder()
@@ -1298,22 +1300,30 @@ import Testing
         let set = try #require(EndpointKeepaliveSummary(
             raw: [
                 "configured": true, "policy": "idle_keepalive", "state": "ON",
-                "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_memory_pct": 0,
+                "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_cpu_pct": 40,
+                "target_memory_pct": 0,
             ],
             fallbackConfigured: true
         ))
         #expect(set.targets[.utilization] == 90)
         #expect(set.targets[.gpuMemory] == 95)
+        #expect(set.targets[.cpu] == 40)
         #expect(set.targets[.memory] == 0)
-        #expect(set.targets.describe() == "GPU 利用率 90%、显存占用率 95%、内存占用率 0%")
+        #expect(set.targets.describe() == "GPU 利用率 90%、显存占用率 95%、CPU 负载 40%、内存占用率 0%")
         let unset = try #require(EndpointKeepaliveSummary(
             raw: ["configured": true, "policy": "disabled", "state": "OFF"],
             fallbackConfigured: true
         ))
         #expect(unset.targets == KeepaliveTargets())
-        #expect(KeepaliveTarget.allCases.allSatisfy { unset.targets[$0] == 85 && $0.choices.contains(85) })
+        // CPU is burned only where a server asks; the rest default to 85.
+        #expect(unset.targets[.cpu] == 0)
+        #expect(KeepaliveTarget.allCases.allSatisfy {
+            unset.targets[$0] == $0.defaultPct && $0.choices.contains($0.defaultPct)
+        })
+        #expect(KeepaliveTarget.allCases.filter { $0 != .cpu }.allSatisfy { unset.targets[$0] == 85 })
         #expect(set.targets.setting(.memory, to: 50).payload == [
-            "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_memory_pct": 50,
+            "target_utilization_pct": 90, "target_gpu_memory_pct": 95, "target_cpu_pct": 40,
+            "target_memory_pct": 50,
         ])
     }
 

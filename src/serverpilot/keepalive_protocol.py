@@ -29,11 +29,13 @@ KEEPALIVE_INSPECT_COMMAND = (
 KEEPALIVE_WORKER_MARKER = "serverpilot-keepalive-worker-v3"
 # What a held card is driven to, each in whole percent of a reading the App
 # shows for the server: GPU utilization (time a kernel runs), GPU memory
-# (each held card's VRAM in use) and host memory (the server's memory in use,
-# split evenly across its GPUs, so it reaches the target only when every card
-# is held). One name per target on the wire, in the API and in the summary;
-# the endpoint column adds a `keepalive_` prefix. A server sets its own; the
-# default holds until it does. Host memory alone may be 0, which holds none.
+# (each held card's VRAM in use), and the server's CPU and host memory in use,
+# both split evenly across its GPUs, so they reach the target only when every
+# card is held. One name per target on the wire, in the API and in the
+# summary; the endpoint column adds a `keepalive_` prefix. A server sets its
+# own; the default holds until it does. CPU and host memory may be 0, which
+# holds none, and CPU starts there: burning cores costs power and competes
+# with a task's data loading, so a server takes it on only when set.
 # Each target is advertised apart from the required capabilities: a helper
 # deployed before it ignores the field, which `--protocol-info` lets a person
 # see.
@@ -50,6 +52,7 @@ class KeepaliveTargetLimit:
 KEEPALIVE_TARGET_LIMITS: dict[str, KeepaliveTargetLimit] = {
     "target_utilization_pct": KeepaliveTargetLimit(10, 85, "target_utilization"),
     "target_gpu_memory_pct": KeepaliveTargetLimit(10, 85, "target_gpu_memory"),
+    "target_cpu_pct": KeepaliveTargetLimit(0, 0, "target_cpu"),
     "target_memory_pct": KeepaliveTargetLimit(0, 85, "target_memory"),
 }
 
@@ -95,6 +98,7 @@ class KeepaliveTargets:
 
     target_utilization_pct: int = KEEPALIVE_TARGET_LIMITS["target_utilization_pct"].default
     target_gpu_memory_pct: int = KEEPALIVE_TARGET_LIMITS["target_gpu_memory_pct"].default
+    target_cpu_pct: int = KEEPALIVE_TARGET_LIMITS["target_cpu_pct"].default
     target_memory_pct: int = KEEPALIVE_TARGET_LIMITS["target_memory_pct"].default
 
     def __post_init__(self) -> None:

@@ -8,6 +8,7 @@ import signal
 import stat
 import tempfile
 import threading
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -44,13 +45,16 @@ from serverpilot.server_keepalive import (
     KeepaliveProcessIdentity,
     LocalKeepaliveController,
     TorchSubprocessProvider,
+    burn_cpu,
+    cpu_in_use,
     default_state_directory,
     gpu_memory_hold_bytes,
     handle_attestation,
     handle_request,
+    hold_host_cpu,
     hold_host_memory,
     hold_utilization,
-    next_host_memory_hold,
+    next_hold,
 )
 
 GPU_A = "GPU-00000000-0000-0000-0000-000000000001"
@@ -116,15 +120,16 @@ def test_torch_provider_sets_pci_order_and_derived_ordinal(
     provider._gpu_ordinals = {GPU_A: "4"}
 
     targets = KeepaliveTargets(
-        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=0
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_cpu_pct=40, target_memory_pct=0
     )
     assert provider.start(GPU_A, targets, 8) == identity
     assert captured["env"]["CUDA_DEVICE_ORDER"] == "PCI_BUS_ID"
     assert captured["env"]["CUDA_VISIBLE_DEVICES"] == "4"
-    assert captured["command"][-10:] == [
+    assert captured["command"][-12:] == [
         "--worker-marker", WORKER_PROCESS_MARKER,
         "--target-utilization-pct", "90",
         "--target-gpu-memory-pct", "95",
+        "--target-cpu-pct", "40",
         "--target-memory-pct", "0",
         "--host-gpu-count", "8",
     ]
@@ -190,7 +195,7 @@ def _result(
 
 def test_protocol_uses_only_the_per_gpu_request() -> None:
     targets = KeepaliveTargets(
-        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=0
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_cpu_pct=40, target_memory_pct=0
     )
     request = KeepaliveRequest(enabled=True, gpu_uuids=(GPU_A, GPU_B), targets=targets)
     decoded = KeepaliveRequest.decode(request.encode())
@@ -202,6 +207,7 @@ def test_protocol_uses_only_the_per_gpu_request() -> None:
         "gpu_uuids": [GPU_A, GPU_B],
         "target_utilization_pct": 90,
         "target_gpu_memory_pct": 95,
+        "target_cpu_pct": 40,
         "target_memory_pct": 0,
     }
     assert KEEPALIVE_SCHEMA_VERSION == 3
@@ -218,12 +224,13 @@ def test_protocol_uses_only_the_per_gpu_request() -> None:
         enabled=True,
         gpu_uuids=(GPU_A,),
         targets=KeepaliveTargets(
-            target_utilization_pct=90, target_gpu_memory_pct=85, target_memory_pct=85
+            target_utilization_pct=90, target_gpu_memory_pct=85, target_cpu_pct=0, target_memory_pct=85
         ),
     )
     for name, out_of_range in (
         *(("target_utilization_pct", value) for value in (9, 101, "90", 90.5, True)),
         *(("target_gpu_memory_pct", value) for value in (9, 101)),
+        *(("target_cpu_pct", value) for value in (-1, 101)),
         *(("target_memory_pct", value) for value in (-1, 101)),
     ):
         with pytest.raises(KeepaliveProtocolError, match=name):
@@ -234,8 +241,10 @@ def test_protocol_uses_only_the_per_gpu_request() -> None:
                     {"schema_version": 3, "enabled": True, "gpu_uuids": [GPU_A], name: out_of_range}
                 )
             )
-    # Holding no host memory is a choice; a held card always holds some VRAM.
+    # Holding no host memory or CPU is a choice; a held card always holds some
+    # VRAM. CPU is held only where a server asks for it.
     assert KeepaliveTargets(target_memory_pct=0).target_memory_pct == 0
+    assert KeepaliveTargets().target_cpu_pct == 0
 
 
 def test_protocol_info_publishes_v3_helper_capabilities() -> None:
@@ -254,6 +263,7 @@ def test_protocol_info_publishes_v3_helper_capabilities() -> None:
             # old fixed load and VRAM and without holding host memory.
             "target_utilization",
             "target_gpu_memory",
+            "target_cpu",
             "target_memory",
         ],
     }
@@ -404,6 +414,7 @@ def test_adapter_uses_fixed_ssh_command_and_exact_json_stdin(
         # The server's own targets, the defaults here; a stop ignores them.
         "target_utilization_pct": 85,
         "target_gpu_memory_pct": 85,
+        "target_cpu_pct": 0,
         "target_memory_pct": 85,
     }
     assert {"shell", "env", "pid", "path", "argv", "command", "cuda_visible_devices"}.isdisjoint(
@@ -1263,7 +1274,7 @@ def _settle_host_memory(
         used = others + sum(holds)
         observed = [(total, used) for total in views]
         holds = [
-            next_host_memory_hold(held, observed, target_pct, host_gpu_count) for held in holds
+            next_hold(held, observed, target_pct, host_gpu_count) for held in holds
         ]
         peaks.append((others + sum(holds)) / min(views))
     return holds, peaks
@@ -1284,7 +1295,7 @@ def test_each_held_card_holds_only_its_share_of_host_memory() -> None:
         host_gpu_count=8, held_cards=2, others=40 * GIB, target_pct=85, views=[total]
     )
     share = total * 0.85 / 8
-    assert holds == [int(share), int(share)]
+    assert holds == [pytest.approx(share), pytest.approx(share)]
 
 
 def test_host_memory_comes_back_when_something_else_grows_into_it() -> None:
@@ -1296,14 +1307,14 @@ def test_host_memory_comes_back_when_something_else_grows_into_it() -> None:
     grown = 240 * GIB
     for _ in range(40):
         used = grown + sum(holds)
-        holds = [next_host_memory_hold(held, [(total, used)], 85, 8) for held in holds]
+        holds = [next_hold(held, [(total, used)], 85, 8) for held in holds]
     assert (grown + sum(holds)) / total == pytest.approx(0.85, abs=0.005)
     # Something else alone past the target leaves the cards holding nothing.
     holds = [10 * GIB] * 8
     others = int(total * 0.95)
     for _ in range(40):
         used = others + sum(holds)
-        holds = [next_host_memory_hold(held, [(total, used)], 85, 8) for held in holds]
+        holds = [next_hold(held, [(total, used)], 85, 8) for held in holds]
     assert holds == [0] * 8
 
 
@@ -1317,11 +1328,11 @@ def test_host_memory_respects_the_tightest_of_container_and_host() -> None:
     assert (8 * GIB + sum(holds)) / (128 * GIB) == pytest.approx(0.85, abs=0.005)
     # A host already at 90% from other tenants holds back the container's cards.
     crowded = [(512 * GIB, int(512 * GIB * 0.90)), (128 * GIB, 8 * GIB)]
-    assert next_host_memory_hold(0, crowded, 85, 4) == 0
+    assert next_hold(0, crowded, 85, 4) == 0
 
 
 def test_host_memory_target_zero_holds_nothing() -> None:
-    assert next_host_memory_hold(0, [(512 * GIB, 0)], 0, 8) == 0
+    assert next_hold(0, [(512 * GIB, 0)], 0, 8) == 0
 
 
 def test_host_memory_hold_keeps_its_pieces_and_lets_go_when_memory_cannot_be_read(
@@ -1335,10 +1346,11 @@ def test_host_memory_hold_keeps_its_pieces_and_lets_go_when_memory_cannot_be_rea
         [(64 * chunk, 0)],
     ]
     held_before_each_step: list[int] = []
-    original = keepalive_module.next_host_memory_hold
+    original = keepalive_module.next_hold
+    pieces: list[int] = []
 
-    def recording_next(held: int, views: list[tuple[int, int]], target_pct: int, count: int) -> int:
-        held_before_each_step.append(held // chunk)
+    def recording_next(held: float, views: list[tuple[float, float]], target_pct: int, count: int) -> float:
+        held_before_each_step.append(int(held) // chunk)
         return original(held, views, target_pct, count)
 
     def read_views() -> list[tuple[int, int]]:
@@ -1356,16 +1368,23 @@ def test_host_memory_hold_keeps_its_pieces_and_lets_go_when_memory_cannot_be_rea
                 self.set()
             return self.is_set()
 
-    monkeypatch.setattr(keepalive_module, "next_host_memory_hold", recording_next)
+    def allocate(size: int) -> bytes:
+        pieces.append(size)
+        return b"\x01" * size
+
+    monkeypatch.setattr(keepalive_module, "next_hold", recording_next)
     stop = StopAfterFourPauses()
     hold_host_memory(
-        50, 2, read_views=read_views, stop_event=stop, chunk_bytes=chunk, adjust_seconds=0.25
+        50, 2, read_views=read_views, allocate=allocate, stop_event=stop,
+        chunk_bytes=chunk, adjust_seconds=0.25,
     )
     # 50% of 64 pieces over two cards is 16 for this one; it keeps them while
     # the reading includes them, lets all go when memory cannot be read, and
     # starts again from nothing.
     assert held_before_each_step == [0, 16, 0]
     assert stop.pauses == [0.25] * 4
+    # Each piece comes from the allocator it was given: 16, then 16 again.
+    assert pieces == [chunk] * 32
 
 
 def test_default_state_directory_is_persistent(
@@ -1464,7 +1483,7 @@ def test_a_full_target_never_lets_the_card_idle() -> None:
 
 def test_a_started_worker_is_given_the_requested_targets(tmp_path: Path) -> None:
     targets = KeepaliveTargets(
-        target_utilization_pct=90, target_gpu_memory_pct=95, target_memory_pct=60
+        target_utilization_pct=90, target_gpu_memory_pct=95, target_cpu_pct=40, target_memory_pct=60
     )
     provider = FakeProvider()
     controller = LocalKeepaliveController(
@@ -1500,3 +1519,154 @@ def test_memory_views_read_the_host_and_a_limited_container_like_the_probe(tmp_p
 
     (cgroup / "memory.max").write_text(f"{64 * GIB}\n", encoding="ascii")
     assert keepalive_module.read_memory_views(tmp_path) == [host, (64 * GIB, 8 * GIB)]
+
+
+def _write_cpu_files(root: Path, *, ticks: list[int], cpu_max: str | None, usage_usec: int) -> None:
+    (root / "proc").mkdir(exist_ok=True)
+    (root / "proc" / "stat").write_text(
+        "cpu  " + " ".join(str(tick) for tick in ticks) + "\ncpu0 1 2 3 4\n", encoding="ascii"
+    )
+    cgroup = root / "sys" / "fs" / "cgroup"
+    cgroup.mkdir(parents=True, exist_ok=True)
+    if cpu_max is None:
+        return
+    (cgroup / "cpu.max").write_text(cpu_max + "\n", encoding="ascii")
+    (cgroup / "cpu.stat").write_text(
+        f"usage_usec {usage_usec}\nuser_usec 1\nsystem_usec 1\n", encoding="ascii"
+    )
+
+
+def test_cpu_counters_read_the_host_and_a_quota_container_like_the_probe(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        keepalive_module.os, "sysconf",
+        lambda name: {"SC_CLK_TCK": 100, "SC_NPROCESSORS_ONLN": 64}[name],
+    )
+    clock = iter([10.0, 15.0, 20.0, 25.0]).__next__
+    # user nice system idle iowait irq softirq steal
+    _write_cpu_files(tmp_path, ticks=[600, 0, 200, 1000, 200, 0, 0, 0], cpu_max="max 100000", usage_usec=0)
+    before = keepalive_module.read_cpu_counters(tmp_path, clock)
+    _write_cpu_files(tmp_path, ticks=[1400, 0, 400, 1800, 400, 0, 0, 0], cpu_max="max 100000", usage_usec=0)
+    after = keepalive_module.read_cpu_counters(tmp_path, clock)
+    # No quota: only the host, which spent 1000 of 2000 new ticks busy.
+    assert cpu_in_use(before, after) == [(64.0, pytest.approx(32.0))]
+
+    _write_cpu_files(tmp_path, ticks=[1400, 0, 400, 1800, 400, 0, 0, 0], cpu_max="1700000 100000",
+                     usage_usec=10_000_000)
+    before = keepalive_module.read_cpu_counters(tmp_path, clock)
+    _write_cpu_files(tmp_path, ticks=[2200, 0, 600, 2600, 600, 0, 0, 0], cpu_max="1700000 100000",
+                     usage_usec=52_500_000)
+    after = keepalive_module.read_cpu_counters(tmp_path, clock)
+    # A 17-core quota used 42.5 core-seconds over 5 seconds: 8.5 cores.
+    host, container = cpu_in_use(before, after)
+    assert host == (64.0, pytest.approx(32.0))
+    assert container == (17.0, pytest.approx(8.5))
+
+
+def test_cpu_readings_that_do_not_pair_give_nothing() -> None:
+    assert cpu_in_use([(8.0, 1.0, 10.0)], []) == []
+    assert cpu_in_use([(8.0, 1.0, 10.0)], [(8.0, 1.0, 10.0)]) == []
+
+
+def test_every_held_card_together_brings_cpu_to_the_target_and_gives_way() -> None:
+    cores, cards = 170.0, 8
+    levels = [0.0] * cards
+    others = 20.0
+    peaks = []
+    for _ in range(40):
+        used = others + sum(levels)
+        levels = [next_hold(level, [(cores, used)], 50, cards) for level in levels]
+        peaks.append((others + sum(levels)) / cores)
+    assert max(peaks) <= 0.5 + 1e-9
+    assert (others + sum(levels)) / cores == pytest.approx(0.5)
+    # A task's data loading grows by 60 cores: the cards give it back.
+    others = 80.0
+    for _ in range(40):
+        used = others + sum(levels)
+        levels = [next_hold(level, [(cores, used)], 50, cards) for level in levels]
+    assert (others + sum(levels)) / cores == pytest.approx(0.5)
+
+
+def test_cpu_hold_burns_its_share_and_stops_when_cpu_cannot_be_read() -> None:
+    """A simulated server: each step the cards' burn and 2 other cores show up as usage."""
+
+    cores = 16.0
+    duties: list[Callable[[], float]] = []
+    clock = [0.0]
+    busy = [0.0]
+    unreadable = {6}
+
+    def burner(duty: Callable[[], float], _stop: threading.Event) -> None:
+        duties.append(duty)
+
+    def burning() -> float:
+        return sum(duty() for duty in duties)
+
+    def read_counters() -> list[tuple[float, float, float]]:
+        if len(stop.pauses) in unreadable:
+            raise OSError("cpu.stat is gone")
+        return [(cores, busy[0], clock[0] * cores)]
+
+    class Steps(threading.Event):
+        pauses: list[float] = []
+
+        def wait(self, timeout: float | None = None) -> bool:
+            # The cores burning now accrue for the whole interval.
+            busy[0] += (2.0 + burning()) * 5.0
+            clock[0] += 5.0
+            self.pauses.append(timeout or 0.0)
+            seen.append(burning())
+            if len(self.pauses) == 9:
+                self.set()
+            return self.is_set()
+
+    seen: list[float] = []
+    stop = Steps()
+    hold_host_cpu(50, 2, read_counters=read_counters, stop_event=stop, burner=burner)
+    # 50% of 16 cores over two cards is 4 cores, so four threads.
+    assert len(duties) == 4
+    # One card alone fills its 4-core share and stays there, below the 8-core
+    # target; when a reading fails it burns nothing until two readings pair
+    # again, then climbs back.
+    assert seen == pytest.approx([0, 3, 4, 4, 4, 4, 0, 0, 3])
+
+
+def test_a_server_without_a_cpu_target_burns_nothing() -> None:
+    started: list[object] = []
+    stop = threading.Event()
+    stop.set()
+    hold_host_cpu(
+        0, 8, read_counters=lambda: [(64.0, 0.0, 0.0)], stop_event=stop,
+        burner=lambda duty, event: started.append(duty),
+    )
+    assert started == []
+
+
+def test_a_burner_stays_busy_for_its_duty_of_each_period(monkeypatch: pytest.MonkeyPatch) -> None:
+    now = [0.0]
+    hashed: list[float] = []
+
+    class FakeHash:
+        def digest(self) -> bytes:
+            hashed.append(now[0])
+            now[0] += 0.0625
+            return b""
+
+    monkeypatch.setattr(keepalive_module.hashlib, "sha256", lambda _data: FakeHash())
+
+    class TwoPeriods(threading.Event):
+        waits: list[float] = []
+
+        def wait(self, timeout: float | None = None) -> bool:
+            self.waits.append(timeout or 0.0)
+            now[0] += timeout or 0.0
+            if len(self.waits) == 2:
+                self.set()
+            return self.is_set()
+
+    stop = TwoPeriods()
+    burn_cpu(lambda: 0.25, stop, period=1.0, clock=lambda: now[0])
+    # A quarter of each period hashing, in sixteenth-period calls, then idle.
+    assert len(hashed) == 8
+    assert stop.waits == [0.75, 0.75]

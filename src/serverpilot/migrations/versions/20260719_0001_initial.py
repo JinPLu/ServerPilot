@@ -61,8 +61,8 @@ _FUTURE_LEASE_COLUMNS = ("task_ref", "purpose", "constraints_json", "duration_se
 
 # 20261030_0041 adds these (and extends alerts, rebuilt by hand below),
 # 20261104_0042 adds idle_checked_at, 20261111_0044
-# the keepalive utilization target and 20261111_0045 the two memory targets,
-# each with its check. The indexes go first: one
+# the keepalive utilization target, 20261111_0045 the two memory targets and
+# 20261121_0047 the CPU target, each with its check. The indexes go first: one
 # of them names task_ref, which _create_retired_request_tables removes; a check
 # goes before the column it names.
 _LATER_INDEXES = (
@@ -76,6 +76,7 @@ _LATER_COLUMNS = {
         "keepalive_target_utilization_pct",
         "keepalive_target_gpu_memory_pct",
         "keepalive_target_memory_pct",
+        "keepalive_target_cpu_pct",
     ),
 }
 _LATER_CHECKS = {
@@ -83,6 +84,7 @@ _LATER_CHECKS = {
         "ck_endpoint_keepalive_target_utilization",
         "ck_endpoint_keepalive_target_gpu_memory",
         "ck_endpoint_keepalive_target_memory",
+        "ck_endpoint_keepalive_target_cpu",
     ),
 }
 

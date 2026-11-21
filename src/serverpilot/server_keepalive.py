@@ -14,6 +14,7 @@ import contextlib
 import ctypes
 import errno
 import fcntl
+import hashlib
 import json
 import math
 import os
@@ -50,7 +51,7 @@ from serverpilot.keepalive_protocol import (
 # only inputs are its targets, validated whole percents.  The worker has no
 # steady-state disk or network activity: state is read/written only during a
 # reconciliation call, runtime CUDA work is fully resident, and the one
-# recurring read is the kernel's own memory figures every few seconds.
+# recurring read is the kernel's own CPU and memory figures every few seconds.
 DUTY_PERIOD_SECONDS = 0.1
 # Work goes to the card in batches of about this much GPU time, sized once
 # from a measured kernel, so a fast card and a slow one are fed alike.
@@ -61,9 +62,13 @@ ALLOCATION_CHUNK_BYTES = 256 * 1024 * 1024
 COMPUTE_MATRIX_SIZE = 4096
 WORKER_MEMORY_SLACK_BYTES = 256 * 1024 * 1024
 # Host memory moves in pieces this size, each written through so every page
-# is resident; small enough that filling one holds the GIL only briefly.
+# is resident.
 HOST_MEMORY_CHUNK_BYTES = 64 * 1024 * 1024
-HOST_MEMORY_ADJUST_SECONDS = 5.0
+# CPU and host memory are re-sized this often from the kernel's own figures.
+HOST_ADJUST_SECONDS = 5.0
+# A CPU-burning thread hashes this much per call. Hashing releases the GIL, so
+# the duty loop's kernel launches wait on a burning thread only between calls.
+CPU_BURN_BYTES = 4 * 1024 * 1024
 WORKER_READY_TIMEOUT_SECONDS = 35
 WORKER_STOP_TIMEOUT_SECONDS = 10
 NVIDIA_SMI_TIMEOUT_SECONDS = 10
@@ -125,23 +130,25 @@ def read_memory_views(root: Path = Path("/")) -> list[tuple[int, int]]:
     return views
 
 
-def next_host_memory_hold(
-    held: int, views: list[tuple[int, int]], target_pct: int, host_gpu_count: int
-) -> int:
-    """Host memory one held card should hold next, in bytes.
+def next_hold(
+    held: float, views: list[tuple[float, float]], target_pct: int, host_gpu_count: int
+) -> float:
+    """How much of a server resource one held card should hold next.
 
-    A card's share is the target times the memory it may use, over the
-    server's GPU count, so memory reaches the target only when every card is
-    held and a card handed to a task takes its share with it. Each step moves
-    by the room left under the target in the tightest view over that same
-    count: workers on every card together close the gap without overshooting
-    it, and give memory back when something else grows into it.
+    ``views`` are (capacity, in use) pairs for the same resource: bytes of
+    host memory, or cores of CPU. A card's share is the target times the
+    capacity it may use, over the server's GPU count, so the reading reaches
+    the target only when every card is held and a card handed to a task takes
+    its share with it. Each step moves by the room left under the target in
+    the tightest view over that same count: workers on every card together
+    close the gap without overshooting it, and give way when something else
+    grows into it.
     """
 
     target = target_pct / 100
     share = min(total for total, _used in views) * target / host_gpu_count
     room = min(total * target - used for total, used in views)
-    return int(max(0.0, min(share, held + room / host_gpu_count)))
+    return max(0.0, min(share, held + room / host_gpu_count))
 
 
 def hold_host_memory(
@@ -149,33 +156,154 @@ def hold_host_memory(
     host_gpu_count: int,
     *,
     read_views: Callable[[], list[tuple[int, int]]],
+    allocate: Callable[[int], object],
     stop_event: threading.Event,
     chunk_bytes: int = HOST_MEMORY_CHUNK_BYTES,
-    adjust_seconds: float = HOST_MEMORY_ADJUST_SECONDS,
+    adjust_seconds: float = HOST_ADJUST_SECONDS,
 ) -> None:
     """Hold this card's share of host memory until stopped, re-sized every few seconds.
 
+    ``allocate`` returns one written-through piece of the given size. The
+    worker fills with PyTorch, which drops the GIL while it writes; a fill
+    that kept it (a bytes repeat did) stalled the duty loop's kernel launches
+    and held a card near 0% for the minute a large share took to fill.
     Memory that cannot be read is memory not held: every piece is let go.
     """
 
-    chunks: list[bytes] = []
+    chunks: list[object] = []
     while True:
         try:
             views = read_views()
         except (OSError, UnicodeError, ValueError, KeyError, IndexError):
             views = []
         wanted = (
-            next_host_memory_hold(len(chunks) * chunk_bytes, views, target_pct, host_gpu_count)
+            int(next_hold(len(chunks) * chunk_bytes, views, target_pct, host_gpu_count))
             // chunk_bytes
             if views
             else 0
         )
         del chunks[wanted:]
         while len(chunks) < wanted and not stop_event.is_set():
-            # A repeated non-zero byte is written through, so every page is resident.
-            chunks.append(b"\x01" * chunk_bytes)
+            chunks.append(allocate(chunk_bytes))
         if stop_event.wait(adjust_seconds):
             return
+
+
+def read_cpu_counters(
+    root: Path = Path("/"), clock: Callable[[], float] = time.monotonic
+) -> list[tuple[float, float, float]]:
+    """Return (cores, busy core-seconds, elapsed core-seconds) for each CPU view.
+
+    The counters only grow; two readings give the cores in use between them.
+    The host's view is /proc/stat, busy being everything but idle and iowait
+    over every tick; under a cgroup v2 CPU quota the container's usage against
+    the quota comes too, the one the App shows as CPU 负载 there. These are
+    the observation probe's readings and the service's arithmetic.
+    """
+
+    fields = (root / "proc" / "stat").read_text(encoding="ascii").splitlines()[0].split()
+    if fields[0] != "cpu":
+        raise ValueError("host CPU counters are unreadable")
+    ticks = [int(value) for value in fields[1:]]
+    tick_seconds = 1 / os.sysconf("SC_CLK_TCK")
+    host_cores = float(os.sysconf("SC_NPROCESSORS_ONLN"))
+    total = sum(ticks) * tick_seconds
+    idle = (ticks[3] + ticks[4]) * tick_seconds
+    # Ticks sum over every CPU, so both counters are already core-seconds, on
+    # the same footing as the container's.
+    views = [(host_cores, total - idle, total)]
+    cgroup = root / "sys" / "fs" / "cgroup"
+    try:
+        quota, period = (cgroup / "cpu.max").read_text(encoding="ascii").split()
+        usage = next(
+            int(line.split()[1])
+            for line in (cgroup / "cpu.stat").read_text(encoding="ascii").splitlines()
+            if line.startswith("usage_usec ")
+        )
+    except (OSError, StopIteration):
+        return views
+    if quota != "max":
+        cores = int(quota) / int(period)
+        views.append((cores, usage / 1_000_000, clock() * cores))
+    return views
+
+
+def cpu_in_use(
+    before: list[tuple[float, float, float]], after: list[tuple[float, float, float]]
+) -> list[tuple[float, float]]:
+    """(cores, cores in use) for each view between two readings, or none if they do not pair."""
+
+    if len(before) != len(after):
+        return []
+    views = []
+    for (cores, busy_before, elapsed_before), (_cores, busy_after, elapsed_after) in zip(
+        before, after, strict=True
+    ):
+        elapsed = elapsed_after - elapsed_before
+        if elapsed <= 0:
+            return []
+        views.append((cores, (busy_after - busy_before) / elapsed * cores))
+    return views
+
+
+def burn_cpu(
+    duty: Callable[[], float],
+    stop_event: threading.Event,
+    *,
+    period: float = DUTY_PERIOD_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Keep one core busy for ``duty()`` of every period until stopped."""
+
+    block = bytes(CPU_BURN_BYTES)
+    while not stop_event.is_set():
+        started = clock()
+        busy_until = started + duty() * period
+        while clock() < busy_until:
+            hashlib.sha256(block).digest()
+        stop_event.wait(max(0.0, started + period - clock()))
+
+
+def hold_host_cpu(
+    target_pct: int,
+    host_gpu_count: int,
+    *,
+    read_counters: Callable[[], list[tuple[float, float, float]]],
+    stop_event: threading.Event,
+    burner: Callable[[Callable[[], float], threading.Event], None] = burn_cpu,
+    adjust_seconds: float = HOST_ADJUST_SECONDS,
+) -> None:
+    """Keep this card's share of the server's CPU busy until stopped.
+
+    One burning thread per core of the share, each busy for the same part of
+    every period; the share in cores moves every few seconds by the same
+    step as host memory. CPU that cannot be read is CPU not burned.
+    """
+
+    try:
+        before = read_counters()
+    except (OSError, UnicodeError, ValueError, KeyError, IndexError, ZeroDivisionError):
+        before = []
+    threads = (
+        math.ceil(min(cores for cores, _busy, _elapsed in before) * target_pct / 100 / host_gpu_count)
+        if before
+        else 0
+    )
+    level = 0.0
+
+    def duty() -> float:
+        return level / threads
+
+    for _ in range(threads):
+        threading.Thread(target=burner, args=(duty, stop_event), daemon=True).start()
+    while not stop_event.wait(adjust_seconds):
+        try:
+            after = read_counters()
+        except (OSError, UnicodeError, ValueError, KeyError, IndexError, ZeroDivisionError):
+            after = []
+        views = cpu_in_use(before, after)
+        level = next_hold(level, views, target_pct, host_gpu_count) if views and threads else 0.0
+        before = after
 
 
 def _prefer_worker_for_oom_kill() -> None:
@@ -307,6 +435,8 @@ class TorchSubprocessProvider:
                     str(targets.target_utilization_pct),
                     "--target-gpu-memory-pct",
                     str(targets.target_gpu_memory_pct),
+                    "--target-cpu-pct",
+                    str(targets.target_cpu_pct),
                     "--target-memory-pct",
                     str(targets.target_memory_pct),
                     "--host-gpu-count",
@@ -1064,12 +1194,22 @@ def _run_cuda_worker(ready_fd: int, targets: KeepaliveTargets, host_gpu_count: i
 
     signal.signal(signal.SIGTERM, request_stop)
     signal.signal(signal.SIGINT, request_stop)
-    # Host memory has its own pace and never touches CUDA, so it runs beside
-    # the duty loop and goes when the process does.
+    # Host memory and CPU have their own pace and never touch CUDA, so they
+    # run beside the duty loop and go when the process does.
     threading.Thread(
         target=hold_host_memory,
         args=(targets.target_memory_pct, host_gpu_count),
-        kwargs={"read_views": read_memory_views, "stop_event": stop_event},
+        kwargs={
+            "read_views": read_memory_views,
+            "allocate": lambda size: torch.ones(size, dtype=torch.uint8),
+            "stop_event": stop_event,
+        },
+        daemon=True,
+    ).start()
+    threading.Thread(
+        target=hold_host_cpu,
+        args=(targets.target_cpu_pct, host_gpu_count),
+        kwargs={"read_counters": read_cpu_counters, "stop_event": stop_event},
         daemon=True,
     ).start()
 
@@ -1102,6 +1242,7 @@ def main() -> None:
     parser.add_argument("--worker-marker", help=argparse.SUPPRESS)
     parser.add_argument("--target-utilization-pct", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--target-gpu-memory-pct", type=int, help=argparse.SUPPRESS)
+    parser.add_argument("--target-cpu-pct", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--target-memory-pct", type=int, help=argparse.SUPPRESS)
     parser.add_argument("--host-gpu-count", type=int, help=argparse.SUPPRESS)
     arguments = parser.parse_args()
@@ -1110,6 +1251,7 @@ def main() -> None:
         arguments.worker_marker,
         arguments.target_utilization_pct,
         arguments.target_gpu_memory_pct,
+        arguments.target_cpu_pct,
         arguments.target_memory_pct,
         arguments.host_gpu_count,
     )
@@ -1154,6 +1296,7 @@ def main() -> None:
             targets = KeepaliveTargets(
                 target_utilization_pct=arguments.target_utilization_pct,
                 target_gpu_memory_pct=arguments.target_gpu_memory_pct,
+                target_cpu_pct=arguments.target_cpu_pct,
                 target_memory_pct=arguments.target_memory_pct,
             )
             host_gpu_count = _validate_host_gpu_count(arguments.host_gpu_count)

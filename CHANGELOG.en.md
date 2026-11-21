@@ -7,6 +7,8 @@ This changelog records user-visible changes; implementation details belong in Gi
 ## Unreleased
 
 - **Reminders are gone.** The reminders page in the sidebar, the overview's "需要处理" card, the count beside the menu bar icon and system notifications have been removed; the overview's top row now holds capacity and utilization only. The `/api/v2/alerts` routes and the `alerts` field of the state snapshot are removed too, and existing reminder records are deleted on upgrade.
+- **Keepalive can keep CPU busy too.** The "占卡目标" menu in a server's details gains "CPU 负载" (0% to 90%), read the way the server table's CPU column is: against the container's CPU quota where there is one, otherwise the whole host. Like memory it is shared out per card, reaching its target when every card on the server is held; a card handed to a task takes its share with it, held cards give way when other programs need the CPU, and nothing is burned while CPU usage cannot be read. It defaults to 0%, so servers keep their current behavior until you raise it on one.
+- **GPU utilization no longer drops to 0 while keepalive starts.** Filling host memory used to stall the held card's computing for the 30 seconds to a minute a large memory target took; it no longer does.
 - **Agents are told to apply just before using cards.** The MCP rules and `gpu_apply` now say: prepare code, data and environment first, which needs no cards; apply when the job is ready and start it at once; never hold cards while coding or debugging; release when the next run will not start soon, and apply again when it is ready.
 
 ## 5.6.0 - 2026-11-15

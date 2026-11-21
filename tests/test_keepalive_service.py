@@ -136,6 +136,7 @@ def test_one_gpu_keepalive_does_not_block_sibling_gpu_or_hide_public_state(servi
         "policy": "idle_keepalive",
         "target_utilization_pct": 85,
         "target_gpu_memory_pct": 85,
+        "target_cpu_pct": 0,
         "target_memory_pct": 85,
         "desired": "ON",
         "actual": "ON",

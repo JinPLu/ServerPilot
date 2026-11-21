@@ -121,6 +121,10 @@ class Endpoint(Base):
             name="ck_endpoint_keepalive_target_gpu_memory",
         ),
         CheckConstraint(
+            "keepalive_target_cpu_pct >= 0 AND keepalive_target_cpu_pct <= 100",
+            name="ck_endpoint_keepalive_target_cpu",
+        ),
+        CheckConstraint(
             "keepalive_target_memory_pct >= 0 AND keepalive_target_memory_pct <= 100",
             name="ck_endpoint_keepalive_target_memory",
         ),
@@ -155,6 +159,9 @@ class Endpoint(Base):
     )
     keepalive_target_gpu_memory_pct: Mapped[int] = mapped_column(
         Integer, nullable=False, default=85, server_default="85"
+    )
+    keepalive_target_cpu_pct: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=0, server_default="0"
     )
     keepalive_target_memory_pct: Mapped[int] = mapped_column(
         Integer, nullable=False, default=85, server_default="85"

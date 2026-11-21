@@ -1,9 +1,22 @@
 # ServerPilot 当前实现与验证状态
 
-更新时间：2026-11-19（Asia/Taipei）
+更新时间：2026-11-21（Asia/Taipei）
 
 当前包装版本为 `5.6.0`。下方最新条目是当前交付状态，
 更早日期的验证条目保留为实施证据，不能替代本轮现场结论。
+
+## 占卡加入 CPU 目标；补内存不再卡住 GPU（2026-11-21，未发布）
+
+用户要求：“现在占卡功能不能调整cpu利用率，把这个也加进去”。决定与取舍见[记录](teamwork/records/keepalive-target-utilization.md)同日补充。
+
+改动：
+- 协议与持久化：`KEEPALIVE_TARGET_LIMITS` 加 `target_cpu_pct`（0–100，默认 0，能力 `target_cpu`），`KeepaliveTargets`、请求体、汇总同名；迁移 `20261121_0047` 给 `endpoints` 加 `keepalive_target_cpu_pct`（NOT NULL 默认 0，带检查），初始迁移把它列入后来新增的列。`POST /api/v2/endpoints/{id}/keepalive` 必须带四项，任一项变化且有 worker 在跑时照旧先停后起。
+- helper：内存与 CPU 共用 `next_hold`（每卡上限为目标 × 容量 ÷ 主机 GPU 数，步长为最紧视图里距目标的余量 ÷ 主机 GPU 数）。`read_cpu_counters` 读 `/proc/stat` 与 cgroup v2 `cpu.max`/`cpu.stat`，`cpu_in_use` 由两次读数得在用核数，口径与 `_host_cpu_utilization_pct` 一致；`hold_host_cpu` 按份额向上取整起 `burn_cpu` 线程，每 100 毫秒按比例做 SHA-256（释放 GIL），每 5 秒调整，读不到或对不上时不烧。worker 参数加 `--target-cpu-pct`。
+- 补内存：`hold_host_memory` 改由调用方给出分配函数，worker 用 `torch.ones`（写入时释放 GIL）。之前用 `bytes` 重复填充，写入时一直持有 GIL，主循环下发矩阵乘法被拖住：11 月 11 日实机重启 8 卡占卡时，约 290 GB/卡的内存补齐期间约 1 分钟利用率接近 0，补齐后才回到 80% 以上。
+- App：「占卡目标」加「CPU 负载」子菜单（0%–90%），默认值按目标区分（CPU 0，其余 85）。
+
+验证：全部 Python 测试、Ruff、Swift 测试（98）、App 构建与包检查；新 helper 在 Python 3.11 下 `--protocol-info` 正常。新增用例：读 CPU 计数（无配额只看主机、有配额另看容器）；8 卡合起来把 CPU 拉到 50% 且任何一步不越过、别的程序多用 60 核后退让回目标；单卡模拟中按份额起线程、读不到时停烧、恢复后重新爬升；目标 0 不起线程；烧 CPU 线程每周期按比例忙闲；补内存使用给定的分配函数。在本机 8 核 Mac 上模拟：每线程设 50% 实测忙 50%；6 个线程同时运行时，每批 25 次下发的中位用时 0.45 ms、p99 3.9 ms，仍在 4 ms 一批之内。在两台真实服务器上只读对比 CPU 读数：容器口径 4.9% 对 ServerPilot 采集的 4.74%，0.3% 对 0.33%。
+未验证：真实服务器上烧 CPU 时三项读数与 GPU 利用率的实际表现；改用 PyTorch 补内存后启动期间 GPU 利用率的实测；各服务器 helper 尚未升级。
 
 ## 删除“提醒”；引导 Agent 用卡前再申请（2026-11-19，未发布）
 

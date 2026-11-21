@@ -529,6 +529,7 @@ class BrokerService:
                     keepalive_policy=configured_endpoint.keepalive_policy,
                     keepalive_target_utilization_pct=configured_endpoint.keepalive_target_utilization_pct,
                     keepalive_target_gpu_memory_pct=configured_endpoint.keepalive_target_gpu_memory_pct,
+                    keepalive_target_cpu_pct=configured_endpoint.keepalive_target_cpu_pct,
                     keepalive_target_memory_pct=configured_endpoint.keepalive_target_memory_pct,
                     labels_json=json_dump(configured_endpoint.labels),
                     storage_group=configured_endpoint.storage_group,
@@ -808,6 +809,7 @@ class BrokerService:
                         keepalive_policy=endpoint.keepalive_policy,
                         keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
                         keepalive_target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+                        keepalive_target_cpu_pct=endpoint.keepalive_target_cpu_pct,
                         keepalive_target_memory_pct=endpoint.keepalive_target_memory_pct,
                         labels=json_load(endpoint.labels_json),
                         storage_group=endpoint.storage_group,
@@ -855,6 +857,7 @@ class BrokerService:
                 keepalive_policy=endpoint.keepalive_policy,
                 keepalive_target_utilization_pct=endpoint.keepalive_target_utilization_pct,
                 keepalive_target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+                keepalive_target_cpu_pct=endpoint.keepalive_target_cpu_pct,
                 keepalive_target_memory_pct=endpoint.keepalive_target_memory_pct,
                 labels=json_load(endpoint.labels_json),
                 storage_group=endpoint.storage_group,
@@ -1969,6 +1972,7 @@ class BrokerService:
             "keepalive_policy": endpoint.keepalive_policy,
             "keepalive_target_utilization_pct": endpoint.keepalive_target_utilization_pct,
             "keepalive_target_gpu_memory_pct": endpoint.keepalive_target_gpu_memory_pct,
+            "keepalive_target_cpu_pct": endpoint.keepalive_target_cpu_pct,
             "keepalive_target_memory_pct": endpoint.keepalive_target_memory_pct,
             "labels": json_load(endpoint.labels_json),
             "storage_group": endpoint.storage_group,
@@ -3084,6 +3088,7 @@ class BrokerService:
         return KeepaliveTargets(
             target_utilization_pct=endpoint.keepalive_target_utilization_pct,
             target_gpu_memory_pct=endpoint.keepalive_target_gpu_memory_pct,
+            target_cpu_pct=endpoint.keepalive_target_cpu_pct,
             target_memory_pct=endpoint.keepalive_target_memory_pct,
         )
 
@@ -3110,6 +3115,7 @@ class BrokerService:
             now = utcnow()
             endpoint.keepalive_target_utilization_pct = targets.target_utilization_pct
             endpoint.keepalive_target_gpu_memory_pct = targets.target_gpu_memory_pct
+            endpoint.keepalive_target_cpu_pct = targets.target_cpu_pct
             endpoint.keepalive_target_memory_pct = targets.target_memory_pct
             endpoint.updated_at = now
             self._bump_revision(session, now)
